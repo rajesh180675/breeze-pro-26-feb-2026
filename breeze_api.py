@@ -621,20 +621,33 @@ class BreezeAPIClient:
         limit_price: float = 0.0,
     ) -> Dict:
         """Square off one option position entry from get_positions()."""
-        from helpers import safe_int, safe_str
+        def _safe_str(value: Any, default: str = "") -> str:
+            if value is None:
+                return default
+            return str(value).strip()
 
-        stock_code = safe_str(position.get("stock_code", ""))
-        exchange_code = safe_str(position.get("exchange_code", ""))
-        expiry_date = safe_str(position.get("expiry_date", ""))
-        strike_price = str(safe_int(position.get("strike_price", 0)))
-        right_raw = safe_str(position.get("right", position.get("option_type", "")))
+        def _safe_int(value: Any, default: int = 0) -> int:
+            if value is None:
+                return default
+            try:
+                if isinstance(value, str):
+                    value = value.replace(",", "").strip()
+                return int(float(value))
+            except (ValueError, TypeError):
+                return default
+
+        stock_code = _safe_str(position.get("stock_code", ""))
+        exchange_code = _safe_str(position.get("exchange_code", ""))
+        expiry_date = _safe_str(position.get("expiry_date", ""))
+        strike_price = str(_safe_int(position.get("strike_price", 0)))
+        right_raw = _safe_str(position.get("right", position.get("option_type", "")))
         right = "call" if C.normalize_option_type(right_raw) == "CE" else "put"
 
-        full_qty = safe_int(position.get("quantity", 0))
+        full_qty = _safe_int(position.get("quantity", 0))
         sq_qty = quantity if quantity and 0 < quantity <= abs(full_qty) else abs(full_qty)
 
-        position_action = safe_str(position.get("action", "")).lower()
-        net_qty = safe_int(position.get("quantity", 0))
+        position_action = _safe_str(position.get("action", "")).lower()
+        net_qty = _safe_int(position.get("quantity", 0))
         if position_action == "sell" or net_qty < 0:
             closing_action = "buy"
         else:
