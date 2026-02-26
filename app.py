@@ -2977,6 +2977,43 @@ def page_watchlist():
     export_to_csv(df[display_cols], "watchlist.csv")
 
 
+def render_funds_management_tab(client: BreezeAPIClient) -> None:
+    """Render the Funds Management sub-tab within Settings."""
+    st.markdown("#### 💰 Fund Transfer Between Segments")
+    st.warning(
+        "⚠️ Fund transfers are real operations and cannot be undone. "
+        "Double-check all values before confirming."
+    )
+
+    with st.form("fund_transfer_form"):
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            txn_type = st.selectbox("Type", ["Deposit", "Withdrawal"], key="ft_type")
+        with col2:
+            amount = st.number_input(
+                "Amount ₹",
+                min_value=1.0,
+                value=10000.0,
+                step=1000.0,
+                key="ft_amount",
+            )
+        with col3:
+            segment = st.selectbox("Segment", ["Equity", "FNO", "Commodity"], key="ft_segment")
+
+        st.caption("Deposit: moves funds INTO segment. Withdrawal: moves funds OUT.")
+        confirm = st.checkbox(f"I confirm: {txn_type} ₹{amount:,.0f} to/from {segment}")
+        submitted = st.form_submit_button("Transfer Funds", type="primary")
+
+        if submitted and confirm:
+            resp = client.set_funds(txn_type, str(amount), segment)
+            if resp.get("success"):
+                st.success(f"✅ Fund transfer successful: {txn_type} ₹{amount:,.0f}")
+            else:
+                st.error(f"❌ Failed: {resp.get('message')}")
+        elif submitted and not confirm:
+            st.warning("Please check the confirmation checkbox.")
+
+
 # ═══════════════════════════════════════════════════════════════
 # PAGE: SETTINGS
 # ═══════════════════════════════════════════════════════════════
@@ -2989,31 +3026,46 @@ def page_settings():
 
     with t1:
         section("Trading Preferences")
-        c1, c2 = st.columns(2)
-        with c1:
-            default_order = st.selectbox("Default Order Type",
-                                         ["Market", "Limit"],
-                                         index=0 if _db.get_setting("default_order_type", "Market") == "Market" else 1)
-            default_lots = st.number_input("Default Lots", min_value=1, value=int(_db.get_setting("default_lots", 1)))
-            require_ack = st.checkbox("Require confirmation for orders",
-                                      value=_db.get_setting("require_ack", True))
-        with c2:
-            auto_sl = st.checkbox("Auto stop-loss after sell",
-                                  value=_db.get_setting("auto_sl", False))
-            sl_mult = st.slider("Default SL multiplier", 1.5, 5.0,
-                                float(_db.get_setting("sl_multiplier", 2.0)), 0.5)
-            max_lots_per_order = st.number_input("Max Lots Per Order",
-                                                  min_value=1, max_value=1000,
-                                                  value=int(_db.get_setting("max_lots", 100)))
+        settings_tab1, settings_tab2 = st.tabs(["⚙️ Trading", "💰 Funds"])
 
-        if st.button("💾 Save Trading Settings", type="primary"):
-            _db.set_setting("default_order_type", default_order)
-            _db.set_setting("default_lots", default_lots)
-            _db.set_setting("require_ack", require_ack)
-            _db.set_setting("auto_sl", auto_sl)
-            _db.set_setting("sl_multiplier", sl_mult)
-            _db.set_setting("max_lots", max_lots_per_order)
-            st.success("✅ Settings saved")
+        with settings_tab1:
+            c1, c2 = st.columns(2)
+            with c1:
+                default_order = st.selectbox(
+                    "Default Order Type",
+                    ["Market", "Limit"],
+                    index=0 if _db.get_setting("default_order_type", "Market") == "Market" else 1,
+                )
+                default_lots = st.number_input(
+                    "Default Lots", min_value=1, value=int(_db.get_setting("default_lots", 1))
+                )
+                require_ack = st.checkbox(
+                    "Require confirmation for orders", value=_db.get_setting("require_ack", True)
+                )
+            with c2:
+                auto_sl = st.checkbox("Auto stop-loss after sell", value=_db.get_setting("auto_sl", False))
+                sl_mult = st.slider(
+                    "Default SL multiplier", 1.5, 5.0, float(_db.get_setting("sl_multiplier", 2.0)), 0.5
+                )
+                max_lots_per_order = st.number_input(
+                    "Max Lots Per Order", min_value=1, max_value=1000, value=int(_db.get_setting("max_lots", 100))
+                )
+
+            if st.button("💾 Save Trading Settings", type="primary"):
+                _db.set_setting("default_order_type", default_order)
+                _db.set_setting("default_lots", default_lots)
+                _db.set_setting("require_ack", require_ack)
+                _db.set_setting("auto_sl", auto_sl)
+                _db.set_setting("sl_multiplier", sl_mult)
+                _db.set_setting("max_lots", max_lots_per_order)
+                st.success("✅ Settings saved")
+
+        with settings_tab2:
+            client = get_client()
+            if client and client.is_connected():
+                render_funds_management_tab(client)
+            else:
+                st.info("Connect to Breeze API to use fund transfer operations.")
 
     with t2:
         section("Risk Limits")

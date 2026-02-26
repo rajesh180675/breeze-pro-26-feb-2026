@@ -810,6 +810,47 @@ class BreezeAPIClient:
     def get_names(self, stock_code: str):
         return self.call_sdk("get_names", retryable=True, stock_code=stock_code)
 
+    def set_funds(
+        self,
+        transaction_type: str,
+        amount: str,
+        segment: str,
+    ) -> Dict:
+        """Transfer funds between segments or initiate deposit/withdrawal."""
+        self._require_connection()
+        log.info(f"SET FUNDS: {transaction_type} ₹{amount} segment={segment}")
+        return self.call_sdk(
+            "set_funds",
+            retryable=False,
+            transaction_type=transaction_type,
+            amount=str(amount),
+            segment=segment,
+        )
+
+    def add_margin(
+        self,
+        product_type: str,
+        stock_code: str,
+        exchange_code: str,
+        settlement_id: str = "",
+        add_amount: str = "",
+        margin_from_segment: str = "",
+        margin_to_segment: str = "",
+    ) -> Dict:
+        """Add margin for an existing position."""
+        self._require_connection()
+        return self.call_sdk(
+            "add_margin",
+            retryable=False,
+            product_type=product_type,
+            stock_code=stock_code,
+            exchange_code=exchange_code,
+            settlement_id=settlement_id,
+            add_amount=str(add_amount),
+            margin_from_segment=margin_from_segment,
+            margin_to_segment=margin_to_segment,
+        )
+
     # ---- Funds and limits wrappers ----
 
     @retry_api_call(max_attempts=2, initial_delay=0.5)
