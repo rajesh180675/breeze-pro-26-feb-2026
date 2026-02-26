@@ -545,11 +545,116 @@ class BreezeAPIClient:
         return self.place_order(stock_code, exchange, expiry, strike, "PE", "sell",
                                 quantity, order_type, price)
 
-    def square_off(self, stock_code, exchange, expiry, strike, option_type,
-                   quantity, position_type, order_type="market", price=0.0):
-        action = "buy" if position_type == "short" else "sell"
-        return self.place_order(stock_code, exchange, expiry, strike, option_type,
-                                action, quantity, order_type, price)
+    def square_off(
+        self,
+        exchange_code: str,
+        product: str,
+        stock_code: str,
+        quantity: str,
+        price: str,
+        action: str,
+        order_type: str,
+        validity: str = "day",
+        stoploss: str = "0",
+        disclosed_quantity: str = "0",
+        protection_percentage: str = "",
+        settlement_id: str = "",
+        cover_quantity: str = "",
+        open_quantity: str = "",
+        margin_amount: str = "",
+        expiry_date: str = "",
+        right: str = "",
+        strike_price: str = "",
+    ) -> Dict:
+        """
+        Square off an open position using Breeze SDK native square_off() API.
+
+        Idempotency:
+            - This method does NOT use IdempotencyGuard.
+            - Do NOT retry this method automatically.
+        """
+        self._require_connection()
+        if expiry_date:
+            expiry_date = convert_to_breeze_datetime(expiry_date)
+
+        log.info(
+            f"SQUARE OFF: {action.upper()} {stock_code} {exchange_code} "
+            f"strike={strike_price} {right} qty={quantity} "
+            f"type={order_type} price={price!r} expiry={expiry_date}"
+        )
+        try:
+            with self._api_lock:
+                self.rate_limiter.wait()
+                resp = self.breeze.square_off(
+                    exchange_code=exchange_code,
+                    product=product,
+                    stock_code=stock_code,
+                    quantity=str(quantity),
+                    price=price,
+                    action=action.lower(),
+                    order_type=order_type.lower(),
+                    validity=validity,
+                    stoploss=stoploss,
+                    disclosed_quantity=disclosed_quantity,
+                    protection_percentage=protection_percentage,
+                    settlement_id=settlement_id,
+                    cover_quantity=cover_quantity,
+                    open_quantity=open_quantity,
+                    margin_amount=margin_amount,
+                    expiry_date=expiry_date,
+                    right=right.lower() if right else "",
+                    strike_price=str(strike_price) if strike_price else "",
+                )
+            log.info(f"square_off response: {resp}")
+            return self._ok(resp)
+        except Exception as e:
+            log.error(f"square_off failed: {e}", exc_info=True)
+            return self._err(
+                C.ErrorMessages.ORDER_FAILED.format(error=str(e)), "SQUAREOFF_FAILED"
+            )
+
+    def square_off_option_position(
+        self,
+        position: Dict,
+        quantity: Optional[int] = None,
+        order_type: str = "market",
+        limit_price: float = 0.0,
+    ) -> Dict:
+        """Square off one option position entry from get_positions()."""
+        from helpers import safe_int, safe_str
+
+        stock_code = safe_str(position.get("stock_code", ""))
+        exchange_code = safe_str(position.get("exchange_code", ""))
+        expiry_date = safe_str(position.get("expiry_date", ""))
+        strike_price = str(safe_int(position.get("strike_price", 0)))
+        right_raw = safe_str(position.get("right", position.get("option_type", "")))
+        right = "call" if C.normalize_option_type(right_raw) == "CE" else "put"
+
+        full_qty = safe_int(position.get("quantity", 0))
+        sq_qty = quantity if quantity and 0 < quantity <= abs(full_qty) else abs(full_qty)
+
+        position_action = safe_str(position.get("action", "")).lower()
+        net_qty = safe_int(position.get("quantity", 0))
+        if position_action == "sell" or net_qty < 0:
+            closing_action = "buy"
+        else:
+            closing_action = "sell"
+
+        order_type = order_type.lower()
+        price_str = str(limit_price) if order_type == "limit" and limit_price > 0 else ""
+
+        return self.square_off(
+            exchange_code=exchange_code,
+            product="options",
+            stock_code=stock_code,
+            quantity=str(sq_qty),
+            price=price_str,
+            action=closing_action,
+            order_type=order_type,
+            expiry_date=expiry_date,
+            right=right,
+            strike_price=strike_price,
+        )
 
     def cancel_order(self, order_id, exchange):
         self._require_connection()

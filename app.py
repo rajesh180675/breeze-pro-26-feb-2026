@@ -1201,11 +1201,11 @@ def page_square_off():
                     continue
                 # Clamp to exact multiple of lot size
                 qty_to_close = lots_to_close * lot_size
-                r = client.square_off(
-                    sc, e.get("exchange_code"),
-                    e.get("expiry_date"), safe_int(e.get("strike_price")),
-                    C.normalize_option_type(e.get("right", "")),
-                    qty_to_close, e["_pt"], "market", 0.0
+                r = client.square_off_option_position(
+                    e,
+                    quantity=qty_to_close,
+                    order_type="market",
+                    limit_price=0.0,
                 )
                 if r["success"]:
                     success_count += 1
@@ -1338,11 +1338,11 @@ def page_square_off():
         st.session_state._order_busy = True
         try:
             with st.spinner("Squaring off..."):
-                r = client.square_off(
-                    sel.get("stock_code"), sel.get("exchange_code"),
-                    sel.get("expiry_date"), safe_int(sel.get("strike_price")),
-                    C.normalize_option_type(sel.get("right", "")),
-                    sq, sel["_pt"], ot.lower(), pr
+                r = client.square_off_option_position(
+                    sel,
+                    quantity=sq,
+                    order_type=ot.lower(),
+                    limit_price=pr,
                 )
                 if r["success"]:
                     oid = APIResponse(r).get("order_id", "?")
