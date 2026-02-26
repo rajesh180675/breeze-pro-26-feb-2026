@@ -13,9 +13,12 @@ Critical fixes from v10/v11:
 """
 
 import logging
+import os
+import sys
 import time
 import hashlib
 import threading
+from pathlib import Path
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Callable
 from functools import wraps
@@ -24,6 +27,18 @@ from breeze_connect import BreezeConnect
 import app_config as C
 
 log = logging.getLogger(__name__)
+
+
+def _load_production_breeze_client_class():
+    """Load the production REST wrapper class from app/lib when available."""
+    app_lib_path = Path(__file__).resolve().parent / "app"
+    if app_lib_path.exists() and str(app_lib_path) not in sys.path:
+        sys.path.insert(0, str(app_lib_path))
+    try:
+        from lib.breeze_client import BreezeClient  # type: ignore
+        return BreezeClient
+    except Exception:
+        return None
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -217,6 +232,8 @@ class BreezeAPIClient:
         self.idempotency = IdempotencyGuard(60)
         self._api_lock = threading.Lock()
         self._connection_time: Optional[float] = None
+        self.use_production_client = os.getenv("BREEZE_USE_PRODUCTION_CLIENT", "false").lower() in {"1", "true", "yes"}
+        self._production_client = None
 
     def is_connected(self) -> bool:
         return self.connected and self.breeze is not None
@@ -256,6 +273,21 @@ class BreezeAPIClient:
         self.breeze.generate_session(api_secret=self.api_secret, session_token=session_token)
         self.connected = True
         self._connection_time = time.time()
+
+        if self.use_production_client:
+            breeze_client_class = _load_production_breeze_client_class()
+            if breeze_client_class is not None:
+                os.environ["BREEZE_CLIENT_ID"] = self.api_key
+                os.environ["BREEZE_CLIENT_SECRET"] = self.api_secret
+                os.environ["BREEZE_SESSION_TOKEN"] = session_token
+                try:
+                    self._production_client = breeze_client_class(client_id=self.api_key, client_secret=self.api_secret)
+                    self._production_client.authenticate()
+                    log.info("Production BreezeClient bridge enabled for Streamlit UI")
+                except Exception as exc:
+                    self._production_client = None
+                    log.warning(f"Could not initialize production BreezeClient bridge: {exc}")
+
         log.info("Connected to Breeze API")
         return self._ok({"message": "Connected"})
 
@@ -271,6 +303,11 @@ class BreezeAPIClient:
     @retry_api_call(max_attempts=3, initial_delay=0.5)
     def get_positions(self):
         self._require_connection()
+        if self._production_client is not None:
+            try:
+                return self._ok(self._production_client.get_positions())
+            except Exception as exc:
+                log.warning(f"Production client get_positions failed, falling back to SDK: {exc}")
         with self._api_lock:
             self.rate_limiter.wait()
             return self._ok(self.breeze.get_portfolio_positions())
