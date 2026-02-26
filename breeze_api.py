@@ -1,12 +1,15 @@
 """
-Breeze API Client v8.0
+Breeze API Client v11.0
 
-Critical fixes from v7.0:
-1. Retry decorator ACTUALLY retries (exceptions propagate, not caught inside methods)
-2. Order idempotency prevents duplicate submissions
-3. Orders are NOT auto-retried (prevents double orders)
-4. get_spot_price() for accurate Greeks
-5. Thread-safe with API lock for background risk monitor
+Critical fixes from v10/v11:
+1. convert_to_breeze_datetime() now outputs ISO-8601 format required by ALL Breeze API calls
+   - OLD (WRONG): "04-Mar-2026"      <- DD-Mon-YYYY not accepted by Breeze
+   - NEW (CORRECT): "2026-03-04T06:00:00.000Z"  <- ISO-8601 required
+2. _ok() now validates Breeze response Status field and surfaces API errors
+3. get_option_chain_quotes / get_quotes / place_order all use correct datetime format
+4. Added _to_breeze_datetime helper for order/trade list date params
+5. Retry logic verified: data calls retry, order placement does NOT
+6. Thread-safe with API lock
 """
 
 import logging
@@ -50,16 +53,13 @@ def _is_permanent(e: Exception) -> bool:
 
 
 # ═══════════════════════════════════════════════════════════════
-# FIXED RETRY DECORATOR
+# RETRY DECORATOR
 # ═══════════════════════════════════════════════════════════════
 
 def retry_api_call(max_attempts: int = 3, initial_delay: float = 0.5, backoff: float = 2.0):
     """
-    Retry decorator that works correctly.
-
-    Methods must RAISE exceptions (not catch them internally).
-    This decorator catches, classifies, retries transient errors,
-    and converts final failure into an error dict.
+    Retry decorator for data-fetching calls only.
+    Order placement methods must NOT use this decorator.
     """
     def decorator(func: Callable) -> Callable:
         @wraps(func)
@@ -69,7 +69,6 @@ def retry_api_call(max_attempts: int = 3, initial_delay: float = 0.5, backoff: f
             for attempt in range(1, max_attempts + 1):
                 try:
                     result = func(*args, **kwargs)
-                    # Check for transient error in response body
                     if isinstance(result, dict) and not result.get("success", True):
                         msg = result.get("message", "").lower()
                         if any(p in msg for p in TRANSIENT_PATTERNS) and attempt < max_attempts:
@@ -132,7 +131,6 @@ class IdempotencyGuard:
         return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
     def check_and_reserve(self, key: str) -> bool:
-        """Returns True if order should proceed (new key)."""
         with self._lock:
             now = time.time()
             self._recent = {k: t for k, t in self._recent.items() if now - t < self._window}
@@ -148,25 +146,60 @@ class IdempotencyGuard:
 
 
 # ═══════════════════════════════════════════════════════════════
-# DATE CONVERSION
+# DATE / DATETIME CONVERSION
 # ═══════════════════════════════════════════════════════════════
 
-def convert_to_breeze_date(date_str: str) -> str:
-    if not date_str or not date_str.strip():
+def convert_to_breeze_datetime(date_str: str) -> str:
+    """
+    Convert ANY date string to the ISO-8601 format required by ALL Breeze Connect API calls.
+
+    Breeze Connect API requires: "YYYY-MM-DDTHH:MM:SS.000Z"
+    Example: "2026-03-04T06:00:00.000Z"
+
+    The time component T06:00:00.000Z represents 6 AM UTC (= 11:30 AM IST),
+    which is the standard convention used in all official Breeze Connect examples.
+
+    Accepts:
+      - "YYYY-MM-DD"               e.g. "2026-03-04"
+      - "DD-Mon-YYYY"              e.g. "04-Mar-2026"  (Breeze response format)
+      - "DD-Month-YYYY"            e.g. "04-March-2026"
+      - "YYYY-MM-DDTHH:MM:SS..."   e.g. "2026-03-04T00:00:00.000Z"
+      - "DD/MM/YYYY"               e.g. "04/03/2026"
+    """
+    if not date_str or not str(date_str).strip():
         return ""
-    date_str = date_str.strip()
-    formats = [
-        ("%d-%b-%Y", False), ("%d-%B-%Y", True), ("%Y-%m-%d", True),
-        ("%Y-%m-%dT%H:%M:%S", True), ("%Y-%m-%dT%H:%M:%S.%f", True),
-        ("%d/%m/%Y", True), ("%d-%m-%Y", True),
-    ]
-    for fmt, needs_conv in formats:
+    s = str(date_str).strip()
+    # If already ISO-8601 with time component, normalise to T06:00:00.000Z
+    if "T" in s:
+        s = s.split("T")[0].strip()
+    # Now parse the date portion
+    for fmt in ["%Y-%m-%d", "%d-%b-%Y", "%d-%B-%Y", "%d/%m/%Y", "%d-%m-%Y"]:
         try:
-            parsed = datetime.strptime(date_str, fmt)
-            return parsed.strftime("%d-%b-%Y") if needs_conv else date_str
+            parsed = datetime.strptime(s, fmt)
+            return parsed.strftime("%Y-%m-%dT06:00:00.000Z")
         except ValueError:
             continue
-    log.warning(f"Could not parse date: {date_str}")
+    log.warning(f"convert_to_breeze_datetime: could not parse '{date_str}', passing as-is")
+    return date_str
+
+
+def convert_to_breeze_iso_datetime(date_str: str, end_of_day: bool = False) -> str:
+    """
+    Convert date string to ISO-8601 for order/trade history API calls.
+    Uses T00:00:00.000Z for start-of-day, T23:59:59.000Z for end-of-day.
+    """
+    if not date_str or not str(date_str).strip():
+        return ""
+    s = str(date_str).strip()
+    if "T" in s:
+        s = s.split("T")[0].strip()
+    for fmt in ["%Y-%m-%d", "%d-%b-%Y", "%d-%B-%Y", "%d/%m/%Y", "%d-%m-%Y"]:
+        try:
+            parsed = datetime.strptime(s, fmt)
+            suffix = "T23:59:59.000Z" if end_of_day else "T00:00:00.000Z"
+            return parsed.strftime("%Y-%m-%d") + suffix
+        except ValueError:
+            continue
     return date_str
 
 
@@ -188,8 +221,25 @@ class BreezeAPIClient:
     def is_connected(self) -> bool:
         return self.connected and self.breeze is not None
 
-    def _ok(self, data):
-        return {"success": True, "data": data, "message": "", "error_code": None}
+    def _ok(self, raw_breeze_response):
+        """
+        Wrap a Breeze API response.
+
+        Breeze Connect returns dicts like:
+          {'Status': 200, 'Error': None, 'Success': [...]}  -> success
+          {'Status': 400, 'Error': 'some error', 'Success': None}  -> API error
+
+        We surface Breeze-level errors so callers always see them.
+        """
+        if isinstance(raw_breeze_response, dict):
+            status = raw_breeze_response.get("Status", 200)
+            error = raw_breeze_response.get("Error")
+            if error or (isinstance(status, int) and status >= 400):
+                msg = str(error) if error else f"Breeze API returned status {status}"
+                log.error(f"Breeze API error: status={status}, error={error}")
+                return {"success": False, "data": raw_breeze_response,
+                        "message": msg, "error_code": f"BREEZE_{status}"}
+        return {"success": True, "data": raw_breeze_response, "message": "", "error_code": None}
 
     def _err(self, msg, code=None):
         return {"success": False, "data": {}, "message": str(msg), "error_code": code}
@@ -227,65 +277,79 @@ class BreezeAPIClient:
 
     @retry_api_call(max_attempts=3, initial_delay=1.0, backoff=1.5)
     def get_option_chain(self, stock_code: str, exchange: str, expiry: str):
+        """
+        Fetch full option chain for a given instrument and expiry.
+
+        Breeze Connect requires:
+          - exchange_code: "NFO" for NSE derivatives, "BFO" for BSE derivatives
+          - product_type: "options"
+          - expiry_date: ISO-8601 format "YYYY-MM-DDTHH:MM:SS.000Z"
+          - right: "" to get both calls and puts
+          - strike_price: "" to get all strikes
+        """
         self._require_connection()
-        expiry_date = convert_to_breeze_date(expiry)
-        log.info(f"Fetching chain: {stock_code} {exchange} {expiry_date}")
+        expiry_iso = convert_to_breeze_datetime(expiry)
+        log.info(f"get_option_chain: stock={stock_code} exchange={exchange} expiry_iso={expiry_iso}")
         with self._api_lock:
             self.rate_limiter.wait()
             data = self.breeze.get_option_chain_quotes(
-                stock_code=stock_code, exchange_code=exchange, product_type="options",
-                expiry_date=expiry_date, right="", strike_price=""
+                stock_code=stock_code,
+                exchange_code=exchange,
+                product_type="options",
+                expiry_date=expiry_iso,
+                right="",
+                strike_price=""
             )
+        log.info(f"get_option_chain raw response keys: {list(data.keys()) if isinstance(data, dict) else type(data)}")
         return self._ok(data)
 
     @retry_api_call(max_attempts=2, initial_delay=0.5)
     def get_quotes(self, stock_code: str, exchange: str, expiry: str,
                    strike: int, option_type: str):
+        """
+        Fetch LTP and market data for a specific option contract.
+        expiry_date passed as ISO-8601 as required by Breeze API.
+        """
         self._require_connection()
+        expiry_iso = convert_to_breeze_datetime(expiry)
+        right = "call" if option_type.upper() == "CE" else "put"
+        log.info(f"get_quotes: {stock_code} {exchange} {expiry_iso} {strike} {right}")
         with self._api_lock:
             self.rate_limiter.wait()
             data = self.breeze.get_quotes(
-                stock_code=stock_code, exchange_code=exchange,
-                expiry_date=convert_to_breeze_date(expiry), product_type="options",
-                right="call" if option_type.upper() == "CE" else "put",
+                stock_code=stock_code,
+                exchange_code=exchange,
+                expiry_date=expiry_iso,
+                product_type="options",
+                right=right,
                 strike_price=str(strike)
             )
         return self._ok(data)
 
     @retry_api_call(max_attempts=2, initial_delay=0.5)
     def get_spot_price(self, stock_code: str, exchange: str):
-        """Fetch underlying index spot price."""
+        """
+        Fetch underlying index spot price via cash market quote.
+        Uses the spot_code and spot_exchange from InstrumentConfig.
+        """
         self._require_connection()
-        cfg = None
-        for name, c in C.INSTRUMENTS.items():
-            if c.api_code == stock_code:
-                cfg = c
-                break
+        cfg = next((c for c in C.INSTRUMENTS.values() if c.api_code == stock_code), None)
         spot_code = cfg.spot_code if cfg and cfg.spot_code else stock_code
         spot_exchange = cfg.spot_exchange if cfg and cfg.spot_exchange else (
-            "NSE" if exchange == "NFO" else "BSE"
+            "NSE" if exchange in ("NFO", "NSE") else "BSE"
         )
+        log.info(f"get_spot_price: spot_code={spot_code} spot_exchange={spot_exchange}")
         with self._api_lock:
             self.rate_limiter.wait()
             data = self.breeze.get_quotes(
-                stock_code=spot_code, exchange_code=spot_exchange,
-                product_type="cash", expiry_date="", right="", strike_price=""
+                stock_code=spot_code,
+                exchange_code=spot_exchange,
+                expiry_date="",
+                product_type="cash",
+                right="",
+                strike_price=""
             )
         return self._ok(data)
-
-    def _to_breeze_datetime(self, date_str: str, end_of_day: bool = False) -> str:
-        """
-        Breeze API requires datetime strings in ISO-8601 format:
-        '2026-02-26T00:00:00.000Z' for start-of-day
-        '2026-02-26T23:59:59.000Z' for end-of-day
-
-        Accepts plain 'YYYY-MM-DD' strings and ISO-8601 strings.
-        """
-        if not date_str:
-            return ""
-        s = date_str.strip().split("T")[0].strip()  # extract just the date part
-        suffix = "T23:59:59.000Z" if end_of_day else "T00:00:00.000Z"
-        return s + suffix
 
     @retry_api_call(max_attempts=2, initial_delay=0.5)
     def get_order_list(self, exchange="", from_date="", to_date=""):
@@ -294,8 +358,8 @@ class BreezeAPIClient:
             self.rate_limiter.wait()
             return self._ok(self.breeze.get_order_list(
                 exchange_code=exchange,
-                from_date=self._to_breeze_datetime(from_date),
-                to_date=self._to_breeze_datetime(to_date, end_of_day=True)
+                from_date=convert_to_breeze_iso_datetime(from_date),
+                to_date=convert_to_breeze_iso_datetime(to_date, end_of_day=True)
             ))
 
     @retry_api_call(max_attempts=2, initial_delay=0.5)
@@ -305,26 +369,46 @@ class BreezeAPIClient:
             self.rate_limiter.wait()
             return self._ok(self.breeze.get_trade_list(
                 exchange_code=exchange,
-                from_date=self._to_breeze_datetime(from_date),
-                to_date=self._to_breeze_datetime(to_date, end_of_day=True)
+                from_date=convert_to_breeze_iso_datetime(from_date),
+                to_date=convert_to_breeze_iso_datetime(to_date, end_of_day=True)
             ))
 
     @retry_api_call(max_attempts=2, initial_delay=0.5)
     def get_margin(self, stock_code, exchange, expiry, strike, option_type, action, quantity):
         self._require_connection()
+        expiry_iso = convert_to_breeze_datetime(expiry)
+        right = "call" if option_type.upper() == "CE" else "put"
+        log.info(f"get_margin: {stock_code} {exchange} {expiry_iso} {strike} {right} {action} qty={quantity}")
         with self._api_lock:
             self.rate_limiter.wait()
             return self._ok(self.breeze.get_margin(
-                exchange_code=exchange, stock_code=stock_code, product_type="options",
-                right="call" if option_type.upper() == "CE" else "put",
-                strike_price=str(strike), expiry_date=convert_to_breeze_date(expiry),
-                quantity=str(quantity), action=action.lower(), order_type="market", price=""
+                exchange_code=exchange,
+                stock_code=stock_code,
+                product_type="options",
+                right=right,
+                strike_price=str(strike),
+                expiry_date=expiry_iso,
+                quantity=str(quantity),
+                action=action.lower(),
+                order_type="market",
+                price=""
             ))
 
     # ─── Order placement (NOT retried, idempotency protected) ─
 
     def place_order(self, stock_code, exchange, expiry, strike, option_type,
                     action, quantity, order_type="market", price=0.0):
+        """
+        Place an option order via Breeze Connect.
+
+        Breeze place_order() parameters:
+          product    = "options"   (NOT product_type)
+          expiry_date = ISO-8601 datetime string
+          right      = "call" or "put"
+          strike_price = string
+          price      = string (empty string for market orders)
+          quantity   = string
+        """
         self._require_connection()
         idem_key = self.idempotency.make_key(stock_code, strike, option_type, action, quantity)
         if not self.idempotency.check_and_reserve(idem_key):
@@ -334,22 +418,37 @@ class BreezeAPIClient:
             )
         try:
             right = "call" if option_type.upper() == "CE" else "put"
-            log.info(f"ORDER: {action.upper()} {stock_code} {strike} {option_type} x{quantity}")
+            expiry_iso = convert_to_breeze_datetime(expiry)
+            price_str = str(price) if order_type.lower() == "limit" and price > 0 else "0"
+            log.info(
+                f"PLACE ORDER: {action.upper()} {stock_code} {exchange} "
+                f"strike={strike} {right} qty={quantity} "
+                f"type={order_type} price={price_str} expiry={expiry_iso}"
+            )
             with self._api_lock:
                 self.rate_limiter.wait()
                 resp = self.breeze.place_order(
-                    stock_code=stock_code, exchange_code=exchange, product="options",
-                    action=action.lower(), order_type=order_type.lower(),
+                    stock_code=stock_code,
+                    exchange_code=exchange,
+                    product="options",
+                    action=action.lower(),
+                    order_type=order_type.lower(),
+                    stoploss="0",
                     quantity=str(quantity),
-                    price=str(price) if order_type.lower() == "limit" else "",
-                    validity="day", validity_date="", disclosed_quantity="", stoploss="",
-                    expiry_date=convert_to_breeze_date(expiry), right=right,
-                    strike_price=str(strike)
+                    price=price_str,
+                    validity="day",
+                    validity_date=expiry_iso,
+                    disclosed_quantity="0",
+                    expiry_date=expiry_iso,
+                    right=right,
+                    strike_price=str(strike),
+                    user_remark=""
                 )
+            log.info(f"place_order response: {resp}")
             return self._ok(resp)
         except Exception as e:
             self.idempotency.release(idem_key)
-            log.error(f"Order failed: {e}")
+            log.error(f"Order failed: {e}", exc_info=True)
             return self._err(C.ErrorMessages.ORDER_FAILED.format(error=str(e)), "ORDER_FAILED")
 
     def sell_call(self, stock_code, exchange, expiry, strike, quantity,
@@ -373,7 +472,8 @@ class BreezeAPIClient:
         try:
             with self._api_lock:
                 self.rate_limiter.wait()
-                return self._ok(self.breeze.cancel_order(exchange_code=exchange, order_id=order_id))
+                return self._ok(self.breeze.cancel_order(
+                    exchange_code=exchange, order_id=order_id))
         except Exception as e:
             return self._err(C.ErrorMessages.CANCEL_FAILED.format(error=str(e)))
 
@@ -383,7 +483,8 @@ class BreezeAPIClient:
             with self._api_lock:
                 self.rate_limiter.wait()
                 return self._ok(self.breeze.modify_order(
-                    order_id=order_id, exchange_code=exchange,
+                    order_id=order_id,
+                    exchange_code=exchange,
                     quantity=str(quantity) if quantity > 0 else "",
                     price=str(price) if price > 0 else "",
                     order_type=None, stoploss=None, validity=None

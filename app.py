@@ -819,11 +819,34 @@ def page_option_chain():
         with st.spinner(f"Loading {inst} option chain..."):
             resp = client.get_option_chain(cfg.api_code, cfg.exchange, expiry)
         if not resp["success"]:
-            st.error(f"❌ {resp.get('message')}")
+            st.error(f"❌ Breeze API error: {resp.get('message')}")
+            raw = resp.get("data", {})
+            if isinstance(raw, dict) and raw.get("Error"):
+                st.error(f"Breeze error detail: {raw['Error']} (Status {raw.get('Status')})")
+            st.info(f"📋 Debug: stock_code={cfg.api_code}, exchange={cfg.exchange}, expiry={expiry}")
             return
-        df = process_option_chain(resp.get("data", {}))
+        raw_data = resp.get("data", {})
+        # Surface Breeze-level errors even when success=True (in case _ok wrapping is bypassed)
+        if isinstance(raw_data, dict) and raw_data.get("Error"):
+            st.error(f"❌ Breeze API returned error: {raw_data['Error']}")
+            st.info(f"📋 Debug: stock_code={cfg.api_code}, exchange={cfg.exchange}, expiry={expiry}")
+            return
+        df = process_option_chain(raw_data)
         if df.empty:
-            st.warning("No chain data returned")
+            st.warning("⚠️ No option chain data returned from Breeze.")
+            st.info(
+                f"📋 **Debug info** — Check that these are correct:
+"
+                f"- stock_code: 
+"
+                f"- exchange: 
+"
+                f"- expiry:  → sent as ISO-8601: 
+"
+                f"- product_type: 
+"
+                f"- Raw Breeze response: "
+            )
             return
         CacheManager.set(ck, df, "option_chain", C.OC_CACHE_TTL_SECONDS)
         SessionState.log_activity("Chain", f"{inst} {format_expiry_short(expiry)}")

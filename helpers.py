@@ -180,19 +180,58 @@ NUMERIC_COLS = [
 
 
 def process_option_chain(raw_data: Dict) -> pd.DataFrame:
-    if not raw_data or "Success" not in raw_data:
+    """
+    Parse raw Breeze API option chain response into a clean DataFrame.
+
+    Breeze returns: {"Status": 200, "Error": None, "Success": [{...}, ...]}
+    On error:      {"Status": 400, "Error": "some message", "Success": None}
+
+    This function logs detailed diagnostics so errors are never silently swallowed.
+    """
+    if not raw_data:
+        log.warning("process_option_chain: received empty/None response")
         return pd.DataFrame()
-    records = raw_data.get("Success", [])
+
+    # Log the Breeze status and error fields for diagnostics
+    breeze_status = raw_data.get("Status")
+    breeze_error = raw_data.get("Error")
+    if breeze_error:
+        log.error(f"process_option_chain: Breeze API error: status={breeze_status}, error={breeze_error}")
+        return pd.DataFrame()
+    if isinstance(breeze_status, int) and breeze_status >= 400:
+        log.error(f"process_option_chain: Breeze API non-200 status: {breeze_status}")
+        return pd.DataFrame()
+
+    if "Success" not in raw_data:
+        log.warning(f"process_option_chain: 'Success' key missing. Keys present: {list(raw_data.keys())}")
+        return pd.DataFrame()
+
+    records = raw_data.get("Success")
     if not records:
+        log.warning(f"process_option_chain: Success is empty or None. Full response: {raw_data}")
         return pd.DataFrame()
+
+    if not isinstance(records, list):
+        log.warning(f"process_option_chain: Success is not a list, got {type(records)}: {records}")
+        return pd.DataFrame()
+
+    log.info(f"process_option_chain: received {len(records)} records")
+    if records:
+        log.debug(f"process_option_chain: sample record keys: {list(records[0].keys()) if isinstance(records[0], dict) else records[0]}")
+
     df = pd.DataFrame(records)
     if df.empty:
+        log.warning("process_option_chain: DataFrame is empty after construction")
         return df
+
     for col in NUMERIC_COLS:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
     if "right" in df.columns:
         df["right"] = df["right"].str.strip().str.capitalize()
+
+    log.info(f"process_option_chain: returning DataFrame shape {df.shape}, columns: {list(df.columns)}")
     return df
 
 
