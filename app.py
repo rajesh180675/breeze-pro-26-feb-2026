@@ -288,6 +288,118 @@ def pnl_metric(label: str, value: float, col=None):
     target.markdown(html, unsafe_allow_html=True)
 
 
+def render_live_feed_status(client: BreezeAPIClient) -> None:
+    """Render a compact live feed status indicator in the sidebar."""
+    mgr = lf.get_live_feed_manager()
+    if mgr is None:
+        st.sidebar.caption("📡 WS: Not initialized")
+        return
+
+    stats = mgr.get_health_stats()
+    state = stats["state"]
+
+    if state == lf.FeedState.CONNECTED:
+        color = "🟢"
+        label = "Connected"
+    elif state == lf.FeedState.RECONNECTING:
+        color = "🟡"
+        label = "Reconnecting..."
+    elif state == lf.FeedState.CONNECTING:
+        color = "🔵"
+        label = "Connecting..."
+    else:
+        color = "🔴"
+        label = "Disconnected"
+
+    subs = stats["total_subscriptions"]
+    ticks = stats["total_ticks"]
+    last = stats["last_tick_secs_ago"]
+    last_str = f"{last:.1f}s ago" if last is not None else "—"
+
+    st.sidebar.markdown(
+        f"**{color} WS {label}** | Subs: {subs} | Ticks: {ticks:,} | Last: {last_str}"
+    )
+
+    if stats["is_stale"] and C.is_market_open():
+        st.sidebar.warning("⚠️ Feed may be stale. Consider reconnecting.")
+
+    col1, col2 = st.sidebar.columns(2)
+    with col1:
+        if state in (lf.FeedState.DISCONNECTED, lf.FeedState.STOPPED):
+            if st.button("▶ Connect", key="ws_connect_btn"):
+                mgr.connect()
+                st.rerun()
+    with col2:
+        if state == lf.FeedState.CONNECTED:
+            if st.button("⏹ Disconnect", key="ws_disconnect_btn"):
+                mgr.disconnect()
+                st.rerun()
+
+
+def render_live_price_badge(stock_token: str, fallback_price: float = 0.0, col=None) -> None:
+    """Display a live LTP badge that reads from TickStore."""
+    tick_store = lf.get_tick_store()
+    tick = tick_store.get_latest(stock_token)
+
+    if tick:
+        ltp = tick.ltp
+        chg = tick.change_pct
+        color = "#28a745" if chg >= 0 else "#dc3545"
+        sign = "+" if chg >= 0 else ""
+        age = time.time() - tick.received_at
+        freshness = "🟢" if age < 5 else ("🟡" if age < 30 else "🔴")
+        html = (
+            f'<span style="color:{color};font-weight:700;font-size:1.1rem">'
+            f'₹{ltp:,.2f}</span> '
+            f'<span style="color:{color};font-size:.85rem">'
+            f'{sign}{chg:.2f}%</span> '
+            f'<span title="{age:.1f}s ago">{freshness}</span>'
+        )
+    else:
+        html = (
+            f'<span style="color:#6c757d;font-size:1.1rem">'
+            f'₹{fallback_price:,.2f}</span> '
+            f'<span title="No live tick">⚫</span>'
+        )
+
+    target = col if col is not None else st
+    target.markdown(html, unsafe_allow_html=True)
+
+
+def auto_subscribe_option_chain(
+    instrument: str,
+    expiry: str,
+    strikes: List[int],
+    client: BreezeAPIClient,
+) -> None:
+    """Subscribe WebSocket feeds for all visible strikes in the option chain."""
+    mgr = lf.get_live_feed_manager()
+    if mgr is None or not mgr.is_connected():
+        return
+
+    resolver = lf.get_token_resolver(client.breeze)
+    cfg = C.INSTRUMENTS.get(instrument)
+    if not cfg:
+        return
+
+    instruments_to_resolve = []
+    for strike in strikes:
+        for right in ["call", "put"]:
+            instruments_to_resolve.append({
+                "exchange": cfg.exchange,
+                "stock_code": cfg.api_code,
+                "product_type": "options",
+                "expiry": expiry,
+                "strike": float(strike),
+                "right": right,
+            })
+
+    token_map = resolver.resolve_batch(instruments_to_resolve, max_workers=8)
+    for token in token_map.values():
+        if token:
+            mgr.subscribe_quote(token, get_market_depth=False)
+
+
 def get_client():
     c = SessionState.get_client()
     if not c or not c.is_connected():
@@ -486,6 +598,10 @@ def render_sidebar():
                 secs = ms["countdown"] % 60
                 st.caption(f"⏱ {ms['next']} in {mins}m {secs:02d}s")
 
+            client = get_client()
+            if client:
+                render_live_feed_status(client)
+
             name = st.session_state.get("user_name", "Trader")
             dur = SessionState.get_login_duration()
             st.markdown(f"**👤 {name}**" + (f"  ·  ⏱ {dur}" if dur else ""))
@@ -496,7 +612,6 @@ def render_sidebar():
                 st.warning("⚠️ Session aging — consider reconnecting")
 
             # Funds summary
-            client = get_client()
             if client:
                 funds = get_cached_funds(client)
                 if funds:
@@ -563,6 +678,9 @@ def _render_login_form(has_secrets: bool):
 
 
 def _cleanup_session():
+    mgr = lf.get_live_feed_manager()
+    if mgr is not None:
+        mgr.disconnect()
     monitor = st.session_state.get("risk_monitor")
     if monitor:
         monitor.stop()
@@ -584,6 +702,7 @@ def do_login(api_key, api_secret, token):
             if resp["success"]:
                 Credentials.save_runtime_credentials(api_key, api_secret, token)
                 SessionState.set_authentication(True, client)
+                lf.initialize_live_feed(client.breeze)
                 st.session_state.user_name = "Trader"
                 SessionState.log_activity("Login", "Connected successfully")
                 _db.log_activity("LOGIN", "Session started")
@@ -889,6 +1008,12 @@ def page_option_chain():
             ddf = df.copy()
     else:
         ddf = df.copy()
+
+    visible_strikes = []
+    if "strike_price" in ddf.columns:
+        visible_strikes = sorted({int(x) for x in ddf["strike_price"].dropna().tolist()})
+    if visible_strikes:
+        auto_subscribe_option_chain(inst, expiry, visible_strikes, client)
 
     spot_for_greeks = atm if atm > 0 else (ddf["strike_price"].median() if "strike_price" in ddf.columns else 0)
 
