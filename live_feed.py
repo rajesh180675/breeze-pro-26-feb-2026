@@ -497,8 +497,8 @@ class LiveFeedManager:
         self._errors: List[Dict] = []
 
     def connect(self) -> None:
-        if self._state == FeedState.STOPPED:
-            raise LiveFeedNotConnectedError("Feed manager has been stopped. Create a new instance.")
+        if self._state in (FeedState.CONNECTED, FeedState.CONNECTING):
+            return
         self._stop_event.clear()
         self._state = FeedState.CONNECTING
         self._breeze.on_ticks = self._on_ticks_raw
@@ -511,7 +511,7 @@ class LiveFeedManager:
             self._breeze.ws_disconnect()
         except Exception:
             pass
-        self._state = FeedState.STOPPED
+        self._state = FeedState.DISCONNECTED
 
     def is_connected(self) -> bool:
         return self._state == FeedState.CONNECTED
@@ -528,6 +528,33 @@ class LiveFeedManager:
             self._subscriptions[stock_token] = SubscriptionRecord(stock_token, SubscriptionType.QUOTE, None,
                                                                   get_market_depth, time.time())
             return True
+
+    def get_health_stats(self) -> Dict[str, Any]:
+        with self._lock:
+            last_tick_secs_ago = None
+            if self._last_tick_time > 0:
+                last_tick_secs_ago = max(0.0, time.time() - self._last_tick_time)
+            queue_size = 0
+            try:
+                queue_size = self._tick_queue.qsize()
+            except Exception:
+                queue_size = 0
+            return {
+                "state": self._state,
+                "total_subscriptions": len(self._subscriptions),
+                "total_ticks": self._total_ticks,
+                "last_tick_secs_ago": last_tick_secs_ago,
+                "is_stale": bool(
+                    self._state == FeedState.CONNECTED
+                    and C.is_market_open()
+                    and last_tick_secs_ago is not None
+                    and last_tick_secs_ago > HEALTH_STALE_SECONDS
+                ),
+                "queue_size": queue_size,
+                "connect_count": self._connect_count,
+                "reconnect_count": self._reconnect_count,
+                "recent_errors": self._errors[-5:],
+            }
 
     def subscribe_ohlcv(self, stock_token: str, interval: str, exchange_code: str, stock_code: str, product_type: str,
                         expiry_date: str = "", strike_price: str = "", right: str = "") -> bool:
@@ -561,6 +588,7 @@ class LiveFeedManager:
                 self._breeze.ws_connect()
                 self._state = FeedState.CONNECTED
                 self._connect_count += 1
+                self._restore_subscriptions()
                 attempt = 0
                 self._wait_for_disconnect()
             except Exception as exc:
@@ -569,6 +597,21 @@ class LiveFeedManager:
                 self._errors.append({"time": datetime.now().isoformat(), "error": str(exc), "attempt": attempt})
                 time.sleep(backoff)
                 attempt += 1
+
+    def _restore_subscriptions(self) -> None:
+        """Re-subscribe all previous feed subscriptions after reconnect."""
+        with self._lock:
+            subs = list(self._subscriptions.values())
+        for rec in subs:
+            try:
+                if rec.sub_type == SubscriptionType.QUOTE:
+                    depth = DEPTH_L2 if rec.get_market_depth else DEPTH_L1
+                    token = self._adjust_depth(rec.stock_token, depth)
+                    self._breeze.subscribe_feeds(stock_token=token)
+                elif rec.sub_type == SubscriptionType.ORDER_NOTIFY:
+                    self._breeze.subscribe_feeds(get_order_notification=True)
+            except Exception as exc:
+                self._errors.append({"time": datetime.now().isoformat(), "error": str(exc), "subscription": rec.sub_type})
 
     def _wait_for_disconnect(self) -> None:
         while not self._stop_event.is_set() and self.is_connected():
