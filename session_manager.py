@@ -229,3 +229,17 @@ class Notifications:
             st.toast(msg, icon="❌")
         except Exception:
             pass
+
+    @staticmethod
+    def warning(msg):
+        try:
+            st.toast(msg, icon="⚠️")
+        except Exception:
+            pass
+
+    @staticmethod
+    def info(msg):
+        try:
+            st.toast(msg, icon="ℹ️")
+        except Exception:
+            pass

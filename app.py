@@ -56,6 +56,12 @@ from persistence import TradeDB
 from risk_monitor import RiskMonitor, Alert
 
 # ─── Logging ──────────────────────────────────────────────────
+# Ensure logs directory exists before FileHandler is created.
+# logging.basicConfig with FileHandler("logs/app.log") will crash with
+# FileNotFoundError if the directory does not exist yet — and main() creates
+# it too late because this code runs at import / module level.
+import os as _os
+_os.makedirs("logs", exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s %(name)s %(levelname)s %(message)s',
@@ -1018,7 +1024,7 @@ def page_sell_options():
         quote_ltp = 0.0
         if st.button("📊 Get Quote", disabled=not valid, use_container_width=True):
             with st.spinner("Fetching quote..."):
-                r = client.get_quotes(cfg.api_code, cfg.exchange, expiry, int(strike), oc)
+                r = client.get_option_quote(cfg.api_code, cfg.exchange, expiry, int(strike), oc)
                 if r["success"]:
                     items = APIResponse(r).items
                     if items:
@@ -1095,7 +1101,10 @@ def page_sell_options():
                         _db.log_trade(
                             stock_code=cfg.api_code, exchange=cfg.exchange,
                             strike=int(strike), option_type=oc, expiry=expiry,
-                            action="sell", quantity=qty, price=lp,
+                            action="sell", quantity=qty,
+                            # For market orders lp==0; log quote_ltp as best-estimate price.
+                            # This makes trade history meaningful instead of all zeros.
+                            price=lp if lp > 0 else st.session_state.get("s_quote_ltp", 0),
                             order_type=otp.lower(), trade_id=str(order_id),
                             notes=f"Sold {inst}"
                         )
@@ -1636,7 +1645,7 @@ def page_strategy_builder():
                     with st.spinner("Fetching quotes for all legs..."):
                         for leg in legs:
                             try:
-                                r = client.get_quotes(scfg.api_code, scfg.exchange,
+                                r = client.get_option_quote(scfg.api_code, scfg.exchange,
                                                       sexpiry, leg.strike, leg.option_type)
                                 if r["success"]:
                                     items = APIResponse(r).items
@@ -2135,7 +2144,7 @@ def page_watchlist():
                "LTP ₹": "—", "Bid ₹": "—", "Ask ₹": "—", "IV%": "—", "OI": "—"}
         try:
             cfg = C.get_instrument(item["instrument"])
-            r = client.get_quotes(cfg.api_code, cfg.exchange, item["expiry"],
+            r = client.get_option_quote(cfg.api_code, cfg.exchange, item["expiry"],
                                   item["strike"], item["option_type"])
             if r["success"]:
                 items_resp = APIResponse(r).items
@@ -2308,10 +2317,6 @@ PAGE_FN = {
 
 def main():
     try:
-        # Ensure logs dir
-        import os
-        os.makedirs("logs", exist_ok=True)
-
         SessionState.initialize()
         render_sidebar()
         render_alert_banners()

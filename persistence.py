@@ -173,27 +173,26 @@ class TradeDB:
     def _update_daily_pnl(self, date_str: str, action: str, price: float,
                           quantity: int, pnl: float):
         try:
-            conn = self._get_conn()
-            existing = conn.execute(
-                "SELECT * FROM pnl_history WHERE date=?", (date_str,)
-            ).fetchone()
-            if existing:
-                premium_sold = (existing['premium_sold'] or 0) + (price * quantity if action == 'sell' else 0)
-                premium_bought = (existing['premium_bought'] or 0) + (price * quantity if action == 'buy' else 0)
-                realized = (existing['realized_pnl'] or 0) + pnl
-                num_trades = (existing['num_trades'] or 0) + 1
-                conn.execute("""
-                    UPDATE pnl_history SET premium_sold=?, premium_bought=?,
-                    realized_pnl=?, num_trades=? WHERE date=?
-                """, (premium_sold, premium_bought, realized, num_trades, date_str))
-            else:
-                conn.execute("""
-                    INSERT INTO pnl_history (date, realized_pnl, premium_sold, premium_bought, num_trades)
-                    VALUES (?,?,?,?,?)
-                """, (date_str, pnl,
-                      price * quantity if action == 'sell' else 0,
-                      price * quantity if action == 'buy' else 0, 1))
-            conn.commit()
+            with self._tx() as conn:
+                existing = conn.execute(
+                    "SELECT * FROM pnl_history WHERE date=?", (date_str,)
+                ).fetchone()
+                if existing:
+                    premium_sold = (existing['premium_sold'] or 0) + (price * quantity if action == 'sell' else 0)
+                    premium_bought = (existing['premium_bought'] or 0) + (price * quantity if action == 'buy' else 0)
+                    realized = (existing['realized_pnl'] or 0) + pnl
+                    num_trades = (existing['num_trades'] or 0) + 1
+                    conn.execute("""
+                        UPDATE pnl_history SET premium_sold=?, premium_bought=?,
+                        realized_pnl=?, num_trades=? WHERE date=?
+                    """, (premium_sold, premium_bought, realized, num_trades, date_str))
+                else:
+                    conn.execute("""
+                        INSERT INTO pnl_history (date, realized_pnl, premium_sold, premium_bought, num_trades)
+                        VALUES (?,?,?,?,?)
+                    """, (date_str, pnl,
+                          price * quantity if action == 'sell' else 0,
+                          price * quantity if action == 'buy' else 0, 1))
         except Exception as e:
             log.error(f"_update_daily_pnl failed: {e}")
 

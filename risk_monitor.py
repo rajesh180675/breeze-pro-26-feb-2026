@@ -237,7 +237,7 @@ class RiskMonitor:
 
     def _update_price(self, pos: MonitoredPosition):
         try:
-            resp = self._client.get_quotes(
+            resp = self._client.get_option_quote(
                 pos.stock_code, pos.exchange, pos.expiry, pos.strike, pos.option_type
             )
             if resp.get("success"):

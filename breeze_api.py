@@ -379,16 +379,25 @@ class BreezeAPIClient:
         return {"success": True, "data": combined, "message": "", "error_code": None}
 
     @retry_api_call(max_attempts=2, initial_delay=0.5)
-    def get_quotes(self, stock_code: str, exchange: str, expiry: str,
-                   strike: int, option_type: str):
+    def get_option_quote(self, stock_code: str, exchange: str, expiry: str,
+                         strike: int, option_type: str):
         """
         Fetch LTP and market data for a specific option contract.
-        expiry_date passed as ISO-8601 as required by Breeze API.
+
+        This is the convenience method for callers that use human-friendly
+        positional args: (stock_code, exchange, expiry, strike, option_type).
+        It converts option_type (CE/PE) and expiry to Breeze API format internally.
+
+        BUG FIX: Previously this was named get_quotes(), which was silently
+        overridden by a second get_quotes() definition (lines below) that has
+        a completely different signature. Any caller using the 5-arg positional
+        form (risk_monitor, watchlist, sell page) was actually calling the wrong
+        method and passing garbage arguments to Breeze.
         """
         self._require_connection()
         expiry_iso = convert_to_breeze_datetime(expiry)
         right = "call" if option_type.upper() == "CE" else "put"
-        log.info(f"get_quotes: {stock_code} {exchange} {expiry_iso} {strike} {right}")
+        log.info(f"get_option_quote: {stock_code} {exchange} {expiry_iso} {strike} {right}")
         with self._api_lock:
             self.rate_limiter.wait()
             data = self.breeze.get_quotes(
@@ -494,7 +503,7 @@ class BreezeAPIClient:
         try:
             right = "call" if option_type.upper() == "CE" else "put"
             expiry_iso = convert_to_breeze_datetime(expiry)
-            price_str = str(price) if order_type.lower() == "limit" and price > 0 else "0"
+            price_str = str(price) if order_type.lower() == "limit" and price > 0 else ""
             log.info(
                 f"PLACE ORDER: {action.upper()} {stock_code} {exchange} "
                 f"strike={strike} {right} qty={quantity} "

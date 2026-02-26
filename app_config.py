@@ -148,9 +148,9 @@ def get_monthly_expiries(instrument_name: str, count: int = 3) -> List[str]:
     for m in range(count):
         month = (now.month + m - 1) % 12 + 1
         year = now.year + (now.month + m - 1) // 12
-        # Last day of month
+        # Last day of month — use first day of NEXT month minus 1 day, works for all months
         if month == 12:
-            last_day = datetime(year, month, 31)
+            last_day = datetime(year + 1, 1, 1) - timedelta(days=1)
         else:
             last_day = datetime(year, month + 1, 1) - timedelta(days=1)
         # Go back to last expiry day
