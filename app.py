@@ -3,8 +3,8 @@ Breeze Options Trader PRO v10.0
 Production-grade terminal for ICICI Breeze Options Trading.
 
 Enhanced features:
-- 11 pages: Dashboard, Option Chain, Sell, Square Off, Orders, Positions,
-            Strategy Builder, Analytics, Risk Monitor, Watchlist, Settings
+- 12 pages: Dashboard, Option Chain, Sell, Square Off, Orders, Positions,
+            Strategy Builder, Analytics, Historical Data, Risk Monitor, Watchlist, Settings
 - Auto-refresh with live countdown
 - IV Smile + Term Structure charts
 - Stress Testing / Scenario Analysis
@@ -196,14 +196,14 @@ st.markdown(THEME_CSS, unsafe_allow_html=True)
 PAGES = [
     "Dashboard", "Option Chain", "Sell Options", "Square Off",
     "Orders & Trades", "Positions", "Strategy Builder",
-    "Analytics", "Risk Monitor", "Watchlist", "Settings"
+    "Analytics", "📊 Historical Data", "Risk Monitor", "Watchlist", "Settings"
 ]
 
 ICONS = {
     "Dashboard": "🏠", "Option Chain": "📊",
     "Sell Options": "💰", "Square Off": "🔄",
     "Orders & Trades": "📋", "Positions": "📍",
-    "Strategy Builder": "🎯", "Analytics": "📈",
+    "Strategy Builder": "🎯", "Analytics": "📈", "📊 Historical Data": "📊",
     "Risk Monitor": "🛡️", "Watchlist": "👁️", "Settings": "⚙️"
 }
 
@@ -1201,11 +1201,11 @@ def page_square_off():
                     continue
                 # Clamp to exact multiple of lot size
                 qty_to_close = lots_to_close * lot_size
-                r = client.square_off(
-                    sc, e.get("exchange_code"),
-                    e.get("expiry_date"), safe_int(e.get("strike_price")),
-                    C.normalize_option_type(e.get("right", "")),
-                    qty_to_close, e["_pt"], "market", 0.0
+                r = client.square_off_option_position(
+                    e,
+                    quantity=qty_to_close,
+                    order_type="market",
+                    limit_price=0.0,
                 )
                 if r["success"]:
                     success_count += 1
@@ -1338,11 +1338,11 @@ def page_square_off():
         st.session_state._order_busy = True
         try:
             with st.spinner("Squaring off..."):
-                r = client.square_off(
-                    sel.get("stock_code"), sel.get("exchange_code"),
-                    sel.get("expiry_date"), safe_int(sel.get("strike_price")),
-                    C.normalize_option_type(sel.get("right", "")),
-                    sq, sel["_pt"], ot.lower(), pr
+                r = client.square_off_option_position(
+                    sel,
+                    quantity=sq,
+                    order_type=ot.lower(),
+                    limit_price=pr,
                 )
                 if r["success"]:
                     oid = APIResponse(r).get("order_id", "?")
@@ -1938,6 +1938,247 @@ def page_analytics():
                              use_container_width=True)
 
 
+
+# ═══════════════════════════════════════════════════════════════
+# PAGE: HISTORICAL DATA
+# ═══════════════════════════════════════════════════════════════
+
+@error_handler
+@require_auth
+def page_historical_data():
+    """Historical Data & Technical Analysis page."""
+    st.markdown('<div class="page-header">📊 Historical Data & Charts</div>', unsafe_allow_html=True)
+
+    from historical import HistoricalDataFetcher, get_historical_cache
+    from charts import render_candlestick, render_technical_subplot
+    import ta_indicators as ta
+    import plotly.graph_objects as go
+
+    client: BreezeAPIClient = st.session_state.get("client")
+    if not client or not client.is_connected():
+        st.warning("Connect to Breeze API first.")
+        return
+
+    fetcher = HistoricalDataFetcher(client)
+
+    tab1, tab2, tab3, tab4 = st.tabs(["📊 Price Chart", "📈 Options History", "🔢 Technical Analysis", "📥 Data Export"])
+
+    with st.expander("⚙️ Instrument Settings", expanded=True):
+        col1, col2, col3 = st.columns([2, 1, 1])
+        with col1:
+            instrument = st.selectbox("Instrument", list(C.INSTRUMENTS.keys()), key="hist_instrument")
+            cfg = C.INSTRUMENTS[instrument]
+        with col2:
+            product_type = st.selectbox("Product", ["cash", "futures", "options"], key="hist_product")
+        with col3:
+            exchange = st.text_input("Exchange", value=cfg.exchange, key="hist_exchange")
+
+        if product_type == "options":
+            col4, col5, col6 = st.columns(3)
+            with col4:
+                expiry_options = C.get_next_expiries(instrument, count=6)
+                expiry = st.selectbox("Expiry", expiry_options, key="hist_expiry")
+            with col5:
+                right = st.selectbox("Right", ["call", "put"], key="hist_right")
+            with col6:
+                atm = st.number_input(
+                    "Strike",
+                    value=int(st.session_state.get("last_spot", 22000) // cfg.strike_gap * cfg.strike_gap),
+                    step=cfg.strike_gap,
+                    key="hist_strike",
+                )
+            expiry_date = expiry
+            right_param = right
+            strike_param = str(int(atm))
+        else:
+            expiry_date = right_param = strike_param = ""
+
+        col7, col8, col9 = st.columns(3)
+        with col7:
+            from_date = st.date_input("From Date", value=date.today() - timedelta(days=365), key="hist_from")
+        with col8:
+            to_date = st.date_input("To Date", value=date.today(), key="hist_to")
+        with col9:
+            interval = st.selectbox("Interval", ["1day", "30minute", "5minute", "1minute"], key="hist_interval")
+
+        fetch_btn = st.button("📥 Fetch Data", type="primary", key="hist_fetch")
+
+    if "hist_df" not in st.session_state:
+        st.session_state["hist_df"] = None
+
+    if fetch_btn:
+        with st.spinner("Fetching historical data..."):
+            try:
+                df = fetcher.fetch(
+                    stock_code=cfg.api_code,
+                    exchange_code=exchange,
+                    product_type=product_type,
+                    from_date=str(from_date),
+                    to_date=str(to_date),
+                    interval=interval,
+                    expiry_date=expiry_date,
+                    right=right_param,
+                    strike_price=strike_param,
+                )
+                st.session_state["hist_df"] = df
+                if df.empty:
+                    st.warning("No data returned for the selected parameters.")
+                else:
+                    st.success(f"✅ Fetched {len(df):,} candles ({from_date} → {to_date})")
+                    st.caption(f"API calls used: {fetcher.last_api_calls}")
+            except Exception as e:
+                st.error(f"Fetch failed: {e}")
+                log.error(f"Historical fetch error: {e}", exc_info=True)
+
+    df = st.session_state.get("hist_df")
+
+    with tab1:
+        if df is None:
+            st.info("Configure instrument settings above and click **Fetch Data**.")
+        elif df.empty:
+            st.warning("No data available for the selected parameters.")
+        else:
+            col_a, col_b, col_c = st.columns(3)
+            with col_a:
+                st.radio("Chart Type", ["Candlestick", "Line", "OHLC"], horizontal=True, key="chart_type")
+            with col_b:
+                emas = st.multiselect("EMA Overlays", [9, 20, 50, 100, 200], default=[20, 50], key="chart_emas")
+            with col_c:
+                show_bb = st.checkbox("Bollinger Bands", key="chart_bb")
+                show_vwap = st.checkbox("VWAP", key="chart_vwap")
+                show_sr = st.checkbox("Support/Resistance", key="chart_sr")
+
+            title = (
+                f"{instrument} {'CALL' if right_param == 'call' else 'PUT' if right_param == 'put' else ''}"
+                f"{' ' + strike_param if strike_param else ''} | {interval} | {str(from_date)} → {str(to_date)}"
+            ).strip()
+
+            fig = render_candlestick(
+                df,
+                title=title,
+                show_volume=True,
+                show_ema=emas if emas else None,
+                show_bb=show_bb,
+                show_vwap=show_vwap,
+                support_resistance=show_sr,
+                height=550,
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+            col1, col2, col3, col4, col5 = st.columns(5)
+            col1.metric("Period High", f"₹{df['high'].max():,.2f}")
+            col2.metric("Period Low", f"₹{df['low'].min():,.2f}")
+            col3.metric("Period Change", f"{(df['close'].iloc[-1] / df['close'].iloc[0] - 1) * 100:.2f}%")
+            col4.metric("Avg Volume", f"{df['volume'].mean():,.0f}")
+            col5.metric("Candles", f"{len(df):,}")
+
+    with tab2:
+        st.markdown("**Compare historical option price vs underlying index spot.**")
+        if df is None or df.empty:
+            st.info("Fetch data in the Price Chart tab first.")
+        elif product_type == "options":
+            try:
+                with st.spinner("Fetching spot data for comparison..."):
+                    spot_df = fetcher.fetch(
+                        stock_code=cfg.spot_code or cfg.api_code,
+                        exchange_code=cfg.spot_exchange or "NSE",
+                        product_type="cash",
+                        from_date=str(from_date),
+                        to_date=str(to_date),
+                        interval=interval,
+                    )
+                if not spot_df.empty:
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter(x=df["datetime"], y=df["close"], name=f"{instrument} {strike_param} {'CE' if right_param == 'call' else 'PE'}", line=dict(color="#388bfd", width=2), yaxis="y"))
+                    fig.add_trace(go.Scatter(x=spot_df["datetime"], y=spot_df["close"], name=f"{instrument} Spot", line=dict(color="#f78166", width=1.5, dash="dot"), yaxis="y2"))
+                    fig.update_layout(
+                        title="Option Price vs Underlying Spot",
+                        yaxis=dict(title="Option Price ₹", side="left"),
+                        yaxis2=dict(title="Spot Price ₹", side="right", overlaying="y"),
+                        height=450,
+                        plot_bgcolor="#0d1117",
+                        paper_bgcolor="#161b22",
+                        font=dict(color="#e6edf3"),
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+            except Exception as e:
+                st.warning(f"Could not fetch spot data: {e}")
+        else:
+            st.info("Switch to 'options' product type for options history comparison.")
+
+    with tab3:
+        if df is None or df.empty:
+            st.info("Fetch data in the Price Chart tab first.")
+        else:
+            indicators = st.multiselect("Indicators to Display", ["RSI", "MACD", "Stochastic", "ATR"], default=["RSI", "MACD"], key="ta_indicators")
+            fig_main = render_candlestick(df, show_volume=False, height=350)
+            st.plotly_chart(fig_main, use_container_width=True)
+
+            for ind in indicators:
+                if ind == "RSI":
+                    rsi_period = st.slider("RSI Period", 5, 30, 14, key="rsi_period")
+                    fig_ind = render_technical_subplot(df, "rsi", {"period": rsi_period}, height=180)
+                elif ind == "MACD":
+                    fig_ind = render_technical_subplot(df, "macd", height=200)
+                elif ind == "Stochastic":
+                    fig_ind = render_technical_subplot(df, "stochastic", height=180)
+                elif ind == "ATR":
+                    atr_vals = ta.atr(df["high"], df["low"], df["close"])
+                    fig_ind = go.Figure()
+                    fig_ind.add_trace(go.Scatter(x=df["datetime"], y=atr_vals, name="ATR(14)", line=dict(color="#FF6F00", width=1.5)))
+                    fig_ind.update_layout(height=180, plot_bgcolor="#0d1117", paper_bgcolor="#161b22", font=dict(color="#e6edf3"), margin=dict(l=10, r=10, t=25, b=10), title=dict(text="ATR(14)", font=dict(size=12)))
+                else:
+                    continue
+                st.plotly_chart(fig_ind, use_container_width=True)
+
+            with st.expander("📍 Pivot Points (based on last bar)"):
+                last = df.iloc[-1]
+                pivots = ta.pivot_points(last["high"], last["low"], last["close"])
+                pcols = st.columns(7)
+                labels = ["S3", "S2", "S1", "P", "R1", "R2", "R3"]
+                colors = ["#dc3545", "#e06c75", "#e5ac00", "#28a745", "#61afef", "#56b6c2", "#98c379"]
+                for col, label, color in zip(pcols, labels, colors):
+                    col.markdown(
+                        f'<div style="text-align:center;color:{color};font-weight:700">{label}<br>₹{pivots[label]:,.2f}</div>',
+                        unsafe_allow_html=True,
+                    )
+
+    with tab4:
+        if df is None or df.empty:
+            st.info("Fetch data in the Price Chart tab first.")
+        else:
+            st.markdown(f"**{len(df):,} rows** available for export.")
+            csv_buf = io.StringIO()
+            df.to_csv(csv_buf, index=False)
+            st.download_button("📥 Download CSV", data=csv_buf.getvalue(), file_name=f"{instrument}_{interval}_{from_date}_{to_date}.csv", mime="text/csv")
+
+            excel_buf = io.BytesIO()
+            with pd.ExcelWriter(excel_buf, engine="openpyxl") as writer:
+                df.to_excel(writer, sheet_name="OHLCV", index=False)
+                ta_df = df.copy()
+                ta_df["ema_20"] = ta.ema(df["close"], 20)
+                ta_df["ema_50"] = ta.ema(df["close"], 50)
+                ta_df["rsi_14"] = ta.rsi(df["close"])
+                macd_l, sig_l, _ = ta.macd(df["close"])
+                ta_df["macd"] = macd_l
+                ta_df["macd_signal"] = sig_l
+                ta_df["atr_14"] = ta.atr(df["high"], df["low"], df["close"])
+                ta_df.to_excel(writer, sheet_name="Technical Indicators", index=False)
+
+            st.download_button(
+                "📥 Download Excel (with indicators)",
+                data=excel_buf.getvalue(),
+                file_name=f"{instrument}_{interval}_{from_date}_{to_date}_with_ta.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+
+            with st.expander("🗄️ Cache Statistics"):
+                cache_stats = get_historical_cache().stats()
+                st.json(cache_stats)
+                if st.button("🗑️ Purge Expired Cache"):
+                    n = get_historical_cache().purge_expired()
+                    st.success(f"Purged {n} expired entries.")
+
 # ═══════════════════════════════════════════════════════════════
 # PAGE: RISK MONITOR
 # ═══════════════════════════════════════════════════════════════
@@ -2309,6 +2550,7 @@ PAGE_FN = {
     "Positions": page_positions,
     "Strategy Builder": page_strategy_builder,
     "Analytics": page_analytics,
+    "📊 Historical Data": page_historical_data,
     "Risk Monitor": page_risk_monitor,
     "Watchlist": page_watchlist,
     "Settings": page_settings,
