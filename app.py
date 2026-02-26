@@ -833,19 +833,14 @@ def page_option_chain():
             return
         df = process_option_chain(raw_data)
         if df.empty:
+            from breeze_api import convert_to_breeze_datetime
             st.warning("⚠️ No option chain data returned from Breeze.")
             st.info(
-                f"📋 **Debug info** — Check that these are correct:
-"
-                f"- stock_code: 
-"
-                f"- exchange: 
-"
-                f"- expiry:  → sent as ISO-8601: 
-"
-                f"- product_type: 
-"
-                f"- Raw Breeze response: "
+                f"📋 Debug info — stock_code: {cfg.api_code} | "
+                f"exchange: {cfg.exchange} | "
+                f"expiry: {expiry} → ISO: {convert_to_breeze_datetime(expiry)} | "
+                f"product_type: options | "
+                f"Raw response: {raw_data}"
             )
             return
         CacheManager.set(ck, df, "option_chain", C.OC_CACHE_TTL_SECONDS)
