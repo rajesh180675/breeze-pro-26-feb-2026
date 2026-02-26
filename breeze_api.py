@@ -545,11 +545,129 @@ class BreezeAPIClient:
         return self.place_order(stock_code, exchange, expiry, strike, "PE", "sell",
                                 quantity, order_type, price)
 
-    def square_off(self, stock_code, exchange, expiry, strike, option_type,
-                   quantity, position_type, order_type="market", price=0.0):
-        action = "buy" if position_type == "short" else "sell"
-        return self.place_order(stock_code, exchange, expiry, strike, option_type,
-                                action, quantity, order_type, price)
+    def square_off(
+        self,
+        exchange_code: str,
+        product: str,
+        stock_code: str,
+        quantity: str,
+        price: str,
+        action: str,
+        order_type: str,
+        validity: str = "day",
+        stoploss: str = "0",
+        disclosed_quantity: str = "0",
+        protection_percentage: str = "",
+        settlement_id: str = "",
+        cover_quantity: str = "",
+        open_quantity: str = "",
+        margin_amount: str = "",
+        expiry_date: str = "",
+        right: str = "",
+        strike_price: str = "",
+    ) -> Dict:
+        """
+        Square off an open position using Breeze SDK native square_off() API.
+
+        Idempotency:
+            - This method does NOT use IdempotencyGuard.
+            - Do NOT retry this method automatically.
+        """
+        self._require_connection()
+        if expiry_date:
+            expiry_date = convert_to_breeze_datetime(expiry_date)
+
+        log.info(
+            f"SQUARE OFF: {action.upper()} {stock_code} {exchange_code} "
+            f"strike={strike_price} {right} qty={quantity} "
+            f"type={order_type} price={price!r} expiry={expiry_date}"
+        )
+        try:
+            with self._api_lock:
+                self.rate_limiter.wait()
+                resp = self.breeze.square_off(
+                    exchange_code=exchange_code,
+                    product=product,
+                    stock_code=stock_code,
+                    quantity=str(quantity),
+                    price=price,
+                    action=action.lower(),
+                    order_type=order_type.lower(),
+                    validity=validity,
+                    stoploss=stoploss,
+                    disclosed_quantity=disclosed_quantity,
+                    protection_percentage=protection_percentage,
+                    settlement_id=settlement_id,
+                    cover_quantity=cover_quantity,
+                    open_quantity=open_quantity,
+                    margin_amount=margin_amount,
+                    expiry_date=expiry_date,
+                    right=right.lower() if right else "",
+                    strike_price=str(strike_price) if strike_price else "",
+                )
+            log.info(f"square_off response: {resp}")
+            return self._ok(resp)
+        except Exception as e:
+            log.error(f"square_off failed: {e}", exc_info=True)
+            return self._err(
+                C.ErrorMessages.ORDER_FAILED.format(error=str(e)), "SQUAREOFF_FAILED"
+            )
+
+    def square_off_option_position(
+        self,
+        position: Dict,
+        quantity: Optional[int] = None,
+        order_type: str = "market",
+        limit_price: float = 0.0,
+    ) -> Dict:
+        """Square off one option position entry from get_positions()."""
+        def _safe_str(value: Any, default: str = "") -> str:
+            if value is None:
+                return default
+            return str(value).strip()
+
+        def _safe_int(value: Any, default: int = 0) -> int:
+            if value is None:
+                return default
+            try:
+                if isinstance(value, str):
+                    value = value.replace(",", "").strip()
+                return int(float(value))
+            except (ValueError, TypeError):
+                return default
+
+        stock_code = _safe_str(position.get("stock_code", ""))
+        exchange_code = _safe_str(position.get("exchange_code", ""))
+        expiry_date = _safe_str(position.get("expiry_date", ""))
+        strike_price = str(_safe_int(position.get("strike_price", 0)))
+        right_raw = _safe_str(position.get("right", position.get("option_type", "")))
+        right = "call" if C.normalize_option_type(right_raw) == "CE" else "put"
+
+        full_qty = _safe_int(position.get("quantity", 0))
+        sq_qty = quantity if quantity and 0 < quantity <= abs(full_qty) else abs(full_qty)
+
+        position_action = _safe_str(position.get("action", "")).lower()
+        net_qty = _safe_int(position.get("quantity", 0))
+        if position_action == "sell" or net_qty < 0:
+            closing_action = "buy"
+        else:
+            closing_action = "sell"
+
+        order_type = order_type.lower()
+        price_str = str(limit_price) if order_type == "limit" and limit_price > 0 else ""
+
+        return self.square_off(
+            exchange_code=exchange_code,
+            product="options",
+            stock_code=stock_code,
+            quantity=str(sq_qty),
+            price=price_str,
+            action=closing_action,
+            order_type=order_type,
+            expiry_date=expiry_date,
+            right=right,
+            strike_price=strike_price,
+        )
 
     def cancel_order(self, order_id, exchange):
         self._require_connection()
@@ -692,6 +810,47 @@ class BreezeAPIClient:
     def get_names(self, stock_code: str):
         return self.call_sdk("get_names", retryable=True, stock_code=stock_code)
 
+    def set_funds(
+        self,
+        transaction_type: str,
+        amount: str,
+        segment: str,
+    ) -> Dict:
+        """Transfer funds between segments or initiate deposit/withdrawal."""
+        self._require_connection()
+        log.info(f"SET FUNDS: {transaction_type} ₹{amount} segment={segment}")
+        return self.call_sdk(
+            "set_funds",
+            retryable=False,
+            transaction_type=transaction_type,
+            amount=str(amount),
+            segment=segment,
+        )
+
+    def add_margin(
+        self,
+        product_type: str,
+        stock_code: str,
+        exchange_code: str,
+        settlement_id: str = "",
+        add_amount: str = "",
+        margin_from_segment: str = "",
+        margin_to_segment: str = "",
+    ) -> Dict:
+        """Add margin for an existing position."""
+        self._require_connection()
+        return self.call_sdk(
+            "add_margin",
+            retryable=False,
+            product_type=product_type,
+            stock_code=stock_code,
+            exchange_code=exchange_code,
+            settlement_id=settlement_id,
+            add_amount=str(add_amount),
+            margin_from_segment=margin_from_segment,
+            margin_to_segment=margin_to_segment,
+        )
+
     # ---- Funds and limits wrappers ----
 
     @retry_api_call(max_attempts=2, initial_delay=0.5)
@@ -711,6 +870,154 @@ class BreezeAPIClient:
             order_type=order_type,
             quantity=str(quantity),
             price=str(price) if price else "",
+        )
+
+
+
+    def preview_order(
+        self,
+        stock_code: str,
+        exchange_code: str,
+        product: str,
+        order_type: str,
+        price: str,
+        action: str,
+        quantity: str,
+        special_flag: str = "N",
+        stoploss: str = "",
+        order_rate_fresh: str = "",
+        expiry_date: str = "",
+        right: str = "",
+        strike_price: str = "",
+    ) -> Dict:
+        """Preview order charges before placement."""
+        self._require_connection()
+        if expiry_date:
+            expiry_date = convert_to_breeze_datetime(expiry_date)
+
+        return self.call_sdk(
+            "preview_order",
+            retryable=True,
+            stock_code=stock_code,
+            exchange_code=exchange_code,
+            product=product,
+            order_type=order_type.lower(),
+            price=price,
+            action=action.lower(),
+            quantity=str(quantity),
+            special_flag=special_flag,
+            stoploss=stoploss,
+            order_rate_fresh=order_rate_fresh,
+            expiry_date=expiry_date,
+            right=right.lower() if right else "",
+            strike_price=str(strike_price) if strike_price else "",
+        )
+
+    def limit_calculator(
+        self,
+        strike_price: str,
+        product_type: str,
+        expiry_date: str,
+        underlying: str,
+        exchange_code: str,
+        order_flow: str,
+        stop_loss_trigger: str,
+        option_type: str,
+        source_flag: str = "P",
+        limit_rate: str = "",
+        order_reference: str = "",
+        available_quantity: str = "",
+        market_type: str = "limit",
+        fresh_order_limit: str = "",
+    ) -> Dict:
+        """Calculate valid limit price for OptionPlus orders."""
+        self._require_connection()
+        return self.call_sdk(
+            "limit_calculator",
+            retryable=True,
+            strike_price=str(strike_price),
+            product_type=product_type,
+            expiry_date=convert_to_breeze_datetime(expiry_date) if expiry_date else "",
+            underlying=underlying,
+            exchange_code=exchange_code,
+            order_flow=order_flow,
+            stop_loss_trigger=str(stop_loss_trigger),
+            option_type=option_type,
+            source_flag=source_flag,
+            limit_rate=str(limit_rate),
+            order_reference=order_reference,
+            available_quantity=str(available_quantity),
+            market_type=market_type,
+            fresh_order_limit=str(fresh_order_limit),
+        )
+
+
+
+    def get_futures_quote(
+        self,
+        stock_code: str,
+        exchange_code: str,
+        expiry_date: str,
+    ) -> Dict:
+        """Get real-time futures quote."""
+        self._require_connection()
+        expiry_iso = convert_to_breeze_datetime(expiry_date) if expiry_date else ""
+        return self.call_sdk(
+            "get_quotes",
+            retryable=True,
+            stock_code=stock_code,
+            exchange_code=exchange_code,
+            expiry_date=expiry_iso,
+            product_type="futures",
+            right="",
+            strike_price="",
+        )
+
+    def place_futures_order(
+        self,
+        stock_code: str,
+        exchange_code: str,
+        expiry: str,
+        action: str,
+        quantity: int,
+        order_type: str,
+        price: float = 0.0,
+        stoploss: float = 0.0,
+    ) -> Dict:
+        """Place futures order via Breeze place_order endpoint."""
+        self._require_connection()
+        expiry_iso = convert_to_breeze_datetime(expiry) if expiry else ""
+        order_type = order_type.lower()
+        if order_type == "market":
+            price_str = ""
+            stoploss_str = "0"
+            sdk_order_type = "market"
+        elif order_type == "limit":
+            price_str = str(price)
+            stoploss_str = "0"
+            sdk_order_type = "limit"
+        else:
+            sdk_order_type = "stoploss"
+            price_str = str(price) if price > 0 else ""
+            stoploss_str = str(stoploss) if stoploss > 0 else "0"
+
+        return self.call_sdk(
+            "place_order",
+            retryable=False,
+            stock_code=stock_code,
+            exchange_code=exchange_code,
+            product="futures",
+            action=action.lower(),
+            order_type=sdk_order_type,
+            stoploss=stoploss_str,
+            quantity=str(quantity),
+            price=price_str,
+            validity="day",
+            disclosed_quantity="0",
+            expiry_date=expiry_iso,
+            right="",
+            strike_price="",
+            user_remark="Futures",
         )
 
     # ---- Trading utility wrappers ----
