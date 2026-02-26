@@ -16,6 +16,7 @@ import logging
 import os
 import sys
 import time
+import random
 import hashlib
 import threading
 from pathlib import Path
@@ -1020,6 +1021,89 @@ class BreezeAPIClient:
             user_remark="Futures",
         )
 
+    def place_amo_order(
+        self,
+        stock_code: str,
+        exchange_code: str,
+        product: str,
+        action: str,
+        quantity: str,
+        order_type: str,
+        price: str = "",
+        expiry_date: str = "",
+        right: str = "",
+        strike_price: str = "",
+    ) -> Dict:
+        """
+        Place an After-Market Order (AMO).
+
+        Identical to place_order but with special_flag="Y".
+        This method must NOT be retried.
+        """
+        self._require_connection()
+        expiry_iso = convert_to_breeze_datetime(expiry_date) if expiry_date else ""
+        return self.call_sdk(
+            "place_order",
+            retryable=False,
+            stock_code=stock_code,
+            exchange_code=exchange_code,
+            product=product,
+            action=action,
+            quantity=str(quantity),
+            order_type=order_type,
+            price=str(price) if price else "",
+            stoploss="0",
+            validity="day",
+            disclosed_quantity="0",
+            expiry_date=expiry_iso,
+            right=right,
+            strike_price=str(strike_price) if strike_price else "",
+            special_flag="Y",
+            user_remark="AMO",
+        )
+
+    def place_option_plus_order(
+        self,
+        stock_code: str,
+        exchange_code: str,
+        action: str,
+        quantity: str,
+        price: str,
+        expiry_date: str,
+        right: str,
+        strike_price: str,
+        stoploss: str,
+        order_type: str = "limit",
+    ) -> Dict:
+        """
+        Place an OptionPlus cover order.
+
+        stoploss is mandatory for OptionPlus and validated before placement.
+        """
+        self._require_connection()
+        if not str(stoploss or "").strip():
+            return self._err("OptionPlus requires a non-empty stoploss.", "VALIDATION_ERROR")
+
+        expiry_iso = convert_to_breeze_datetime(expiry_date) if expiry_date else ""
+        return self.call_sdk(
+            "place_order",
+            retryable=False,
+            stock_code=stock_code,
+            exchange_code=exchange_code,
+            product="optionplus",
+            action=action,
+            quantity=str(quantity),
+            order_type=order_type,
+            price=str(price),
+            stoploss=str(stoploss),
+            validity="day",
+            disclosed_quantity="0",
+            expiry_date=expiry_iso,
+            right=right,
+            strike_price=str(strike_price),
+            user_remark="OptionPlus",
+        )
+
     # ---- Trading utility wrappers ----
 
     def place_order_raw(self, **kwargs):
@@ -1044,6 +1128,7 @@ class BreezeAPIClient:
         """Close Breeze websocket connection."""
         return self.call_sdk("ws_disconnect", retryable=False)
 
+
     def subscribe_feeds(self, **kwargs):
         """Subscribe feeds using Breeze SDK-compatible kwargs."""
         return self.call_sdk("subscribe_feeds", retryable=False, **kwargs)
@@ -1065,3 +1150,75 @@ class BreezeAPIClient:
             if callable(attr):
                 methods.append(name)
         return sorted(methods)
+
+
+class OrderSlicer:
+    """Execute a large order in smaller slices."""
+
+    def __init__(
+        self,
+        client: "BreezeAPIClient",
+        n_slices: int = 3,
+        interval_seconds: float = 1.0,
+        jitter_pct: float = 0.2,
+    ):
+        self._client = client
+        self._n = max(1, int(n_slices))
+        self._interval = max(0.0, float(interval_seconds))
+        self._jitter = max(0.0, float(jitter_pct))
+
+    def execute(self, place_order_kwargs: Dict, total_quantity: int) -> Dict:
+        """Execute an order in slices and stop on first failure."""
+        total_qty = int(total_quantity)
+        if total_qty <= 0:
+            return {
+                "success": False,
+                "slices_placed": 0,
+                "slices_failed": 0,
+                "total_quantity_placed": 0,
+                "order_ids": [],
+                "responses": [],
+            }
+
+        base_qty = total_qty // self._n
+        remainder = total_qty % self._n
+        quantities = [base_qty] * self._n
+        quantities[0] += remainder
+
+        order_ids: List[str] = []
+        responses: List[Dict] = []
+        slices_placed = 0
+        slices_failed = 0
+        total_quantity_placed = 0
+
+        for i, qty in enumerate(quantities):
+            if qty <= 0:
+                continue
+            kwargs = dict(place_order_kwargs)
+            kwargs["quantity"] = str(qty)
+            resp = self._client.place_order_raw(**kwargs)
+            responses.append(resp)
+
+            if resp.get("success"):
+                slices_placed += 1
+                total_quantity_placed += qty
+                success_data = (resp.get("data", {}) or {}).get("Success")
+                if isinstance(success_data, list) and success_data:
+                    order_ids.append(str(success_data[0].get("order_id", "")))
+            else:
+                slices_failed += 1
+                log.warning(f"Slice {i + 1}/{self._n} failed: {resp.get('message')}")
+                break
+
+            if i < self._n - 1:
+                jitter = self._interval * self._jitter * (random.random() * 2 - 1)
+                time.sleep(max(0.1, self._interval + jitter))
+
+        return {
+            "success": slices_placed > 0,
+            "slices_placed": slices_placed,
+            "slices_failed": slices_failed,
+            "total_quantity_placed": total_quantity_placed,
+            "order_ids": order_ids,
+            "responses": responses,
+        }
