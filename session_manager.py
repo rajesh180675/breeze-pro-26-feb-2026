@@ -3,6 +3,8 @@
 import streamlit as st
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 import hashlib
 import base64
@@ -83,7 +85,7 @@ class Credentials:
 
 class SessionState:
     DEFAULTS = {
-        "authenticated": False, "breeze_client": None, "current_page": "Dashboard",
+        "authenticated": False, "breeze_client": None, "current_page": "🏠 Dashboard",
         "selected_instrument": "NIFTY", "api_key": "", "api_secret": "",
         "session_token": "", "login_time": None, "user_name": "", "user_id": "",
         "debug_mode": False, "activity_log": [], "_order_in_progress": False,
@@ -110,7 +112,7 @@ class SessionState:
 
     @staticmethod
     def get_current_page():
-        return st.session_state.get("current_page", "Dashboard")
+        return st.session_state.get("current_page", "🏠 Dashboard")
 
     @staticmethod
     def navigate_to(page):
@@ -278,3 +280,55 @@ def auto_connect_with_totp(client, api_key: str, session_token: str, totp_secret
         token = generate_totp(totp_secret)
         log.info("Auto-generated TOTP for login")
     return client.connect(token)
+
+
+class AppWarmupManager:
+    """Background prefetch manager to reduce first-page latency after login."""
+
+    WARMUP_TIMEOUT = 30
+
+    def __init__(self, client: Any):
+        self._client = client
+        self._done = threading.Event()
+        self._results: Dict[str, Any] = {}
+        self._errors: Dict[str, str] = {}
+
+    def start(self) -> None:
+        threading.Thread(target=self._run_warmup, name="AppWarmup", daemon=True).start()
+
+    def wait(self, timeout: float = 5.0) -> bool:
+        """Wait for warmup to complete."""
+        return self._done.wait(timeout=timeout)
+
+    def get_result(self, key: str) -> Optional[Any]:
+        return self._results.get(key)
+
+    @property
+    def errors(self) -> Dict[str, str]:
+        return dict(self._errors)
+
+    def _run_warmup(self) -> None:
+        tasks = [
+            ("funds", getattr(self._client, "get_funds", None)),
+            ("positions", getattr(self._client, "get_positions", None)),
+            ("orders", getattr(self._client, "get_order_list", None)),
+        ]
+        callable_tasks = [(k, fn) for k, fn in tasks if callable(fn)]
+        if not callable_tasks:
+            self._done.set()
+            return
+
+        with ThreadPoolExecutor(max_workers=min(3, len(callable_tasks))) as pool:
+            futures = {pool.submit(fn): key for key, fn in callable_tasks}
+            try:
+                for future in as_completed(futures, timeout=self.WARMUP_TIMEOUT):
+                    key = futures[future]
+                    try:
+                        self._results[key] = future.result()
+                    except Exception as exc:  # pragma: no cover
+                        self._errors[key] = str(exc)
+                        log.warning("Warmup %s failed: %s", key, exc)
+            except Exception as exc:  # pragma: no cover
+                log.warning("Warmup timeout/error: %s", exc)
+        self._done.set()
+        log.info("App warmup complete. Results: %s", list(self._results.keys()))

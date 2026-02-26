@@ -411,3 +411,23 @@ def calculate_days_to_expiry(expiry_date: str) -> int:
 def pnl_badge(value: float) -> str:
     color = "#28a745" if value >= 0 else "#dc3545"
     return f'<span style="color:{color};font-weight:700">{format_currency(value)}</span>'
+
+
+def optimize_dataframe_dtypes(df: pd.DataFrame) -> pd.DataFrame:
+    """Reduce DataFrame memory usage by downcasting and categorical conversion."""
+    if df is None or df.empty:
+        return df
+
+    optimized = df.copy()
+    for col in optimized.select_dtypes(include=["float64"]).columns:
+        optimized[col] = pd.to_numeric(optimized[col], downcast="float")
+    for col in optimized.select_dtypes(include=["int64"]).columns:
+        optimized[col] = pd.to_numeric(optimized[col], downcast="integer")
+    for col in optimized.select_dtypes(include=["object"]).columns:
+        series = optimized[col]
+        if len(series) == 0:
+            continue
+        unique_ratio = series.nunique(dropna=False) / len(series)
+        if unique_ratio < 0.1:
+            optimized[col] = series.astype("category")
+    return optimized

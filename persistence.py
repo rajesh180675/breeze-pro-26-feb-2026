@@ -8,10 +8,13 @@ import json
 import threading
 import time
 import logging
+import io
 from datetime import datetime, date
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from contextlib import contextmanager
+
+import pandas as pd
 
 log = logging.getLogger(__name__)
 
@@ -513,3 +516,61 @@ class AccountProfileDB:
             "SELECT * FROM account_profiles WHERE is_active=1 LIMIT 1"
         ).fetchone()
         return dict(row) if row else None
+
+
+def export_trades_for_tax(
+    db: TradeDB,
+    financial_year: str,
+    format: str = "csv",
+) -> bytes:
+    """Export trade history for one financial year as CSV or Excel bytes."""
+    year_start_str, year_end_str = financial_year.split("-")
+    fy_start = f"{year_start_str}-04-01"
+    fy_end = f"20{year_end_str}-03-31"
+
+    trades = db.get_trades(limit=100000, date_from=fy_start, date_to=fy_end)
+    if not trades:
+        return b""
+
+    rows = []
+    for trade in trades:
+        quantity = float(trade.get("quantity", 0) or 0)
+        price = float(trade.get("price", 0) or 0)
+        value = quantity * price
+        rows.append(
+            {
+                "Trade Date": trade.get("date", ""),
+                "Settlement No": trade.get("settlement_no", ""),
+                "Order ID": trade.get("trade_id", ""),
+                "Stock Code": trade.get("stock_code", ""),
+                "Exchange": trade.get("exchange", ""),
+                "Right": trade.get("option_type", ""),
+                "Strike": trade.get("strike", ""),
+                "Expiry": (trade.get("expiry") or "")[:10],
+                "Action": str(trade.get("action", "")).upper(),
+                "Quantity": int(quantity),
+                "Price": price,
+                "Value": value,
+                "STT": trade.get("stt", ""),
+                "Brokerage": trade.get("brokerage", ""),
+                "Net Amount": trade.get("net_amount", value),
+            }
+        )
+
+    df = pd.DataFrame(rows)
+    export_format = format.lower().strip()
+    if export_format == "csv":
+        buf = io.StringIO()
+        df.to_csv(buf, index=False)
+        return buf.getvalue().encode("utf-8")
+
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df.to_excel(writer, sheet_name="Trades", index=False)
+        summary = (
+            df.groupby("Action")
+            .agg(total_quantity=("Quantity", "sum"), total_value=("Value", "sum"))
+            .reset_index()
+        )
+        summary.to_excel(writer, sheet_name="Summary", index=False)
+    return buf.getvalue()

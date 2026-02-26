@@ -6,8 +6,9 @@ import logging
 import threading
 import time
 import uuid
-from collections import deque
+from collections import defaultdict, deque
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Any
 
 import requests
@@ -23,6 +24,8 @@ except ImportError:  # pragma: no cover
             return None
         def observe(self, _value):
             return None
+        def set(self, _value):
+            return None
     def Counter(*_args, **_kwargs):
         return _Metric()
     def Gauge(*_args, **_kwargs):
@@ -34,6 +37,13 @@ from urllib3.util.retry import Retry
 
 from lib.auth import AuthManager, FileTokenStore, InMemoryTokenStore, TokenRecord, TokenStore
 from lib.config import Settings, get_settings
+try:
+    from alerting import AlertDispatcher, AlertEvent, AlertLevel
+except Exception:  # pragma: no cover
+    AlertDispatcher = None
+    AlertEvent = None
+    AlertLevel = None
+
 from lib.errors import (
     AuthenticationError,
     BadRequestError,
@@ -47,6 +57,8 @@ from lib.errors import (
 REQUEST_COUNTER = Counter("breeze_requests_total", "Breeze requests", ["method", "endpoint", "result"])
 REQUEST_LATENCY = Histogram("breeze_request_duration_seconds", "Breeze request duration", ["method", "endpoint"])
 INFLIGHT = Gauge("breeze_client_inflight_requests", "Inflight Breeze requests")
+CIRCUIT_STATE = Gauge("breeze_circuit_state", "Circuit state by endpoint", ["endpoint"])
+CIRCUIT_FAILURES = Gauge("breeze_circuit_failures", "Circuit failures by endpoint", ["endpoint"])
 
 LOGGER = logging.getLogger(__name__)
 
@@ -76,33 +88,79 @@ class SlidingWindowRateLimiter:
             self._day_events.append(now)
 
 
-class CircuitBreaker:
-    """Consecutive transient-failure circuit breaker."""
+class CircuitBreakerState(str, Enum):
+    CLOSED = "CLOSED"
+    OPEN = "OPEN"
+    HALF_OPEN = "HALF_OPEN"
 
-    def __init__(self, threshold: int, window_seconds: int, open_seconds: int) -> None:
+
+class CircuitBreaker:
+    """Endpoint-aware circuit breaker with half-open health probe."""
+
+    def __init__(self, threshold: int, window_seconds: int, open_seconds: int, alert_dispatcher: Any = None) -> None:
         self.threshold = threshold
         self.window_seconds = window_seconds
-        self.open_seconds = open_seconds
-        self._errors: deque[float] = deque()
-        self._opened_at: float | None = None
+        self.base_open_seconds = open_seconds
+        self._alert_dispatcher = alert_dispatcher
+        self._errors: dict[str, deque[float]] = defaultdict(deque)
+        self._state: dict[str, CircuitBreakerState] = defaultdict(lambda: CircuitBreakerState.CLOSED)
+        self._opened_at: dict[str, float | None] = defaultdict(lambda: None)
+        self._recovery_timeout: dict[str, int] = defaultdict(lambda: self.base_open_seconds)
 
-    def before_request(self) -> None:
-        if self._opened_at and (time.time() - self._opened_at) < self.open_seconds:
-            raise CircuitOpenError("Circuit breaker open", operation="request")
-        if self._opened_at and (time.time() - self._opened_at) >= self.open_seconds:
-            self._opened_at = None
-            self._errors.clear()
+    def _emit_metrics(self, endpoint: str) -> None:
+        state = self._state[endpoint]
+        state_value = 0 if state == CircuitBreakerState.CLOSED else 1 if state == CircuitBreakerState.OPEN else 2
+        CIRCUIT_STATE.labels(endpoint=endpoint).set(state_value)
+        CIRCUIT_FAILURES.labels(endpoint=endpoint).set(len(self._errors[endpoint]))
 
-    def record_success(self) -> None:
-        self._errors.clear()
+    def _notify_open(self, endpoint: str) -> None:
+        if not self._alert_dispatcher or not AlertEvent or not AlertLevel:
+            return
+        event = AlertEvent(
+            alert_type="api_circuit_open",
+            level=AlertLevel.CRITICAL,
+            title="API Circuit Open",
+            body=f"Circuit opened for endpoint {endpoint}",
+            metadata={"endpoint": endpoint},
+        )
+        self._alert_dispatcher.dispatch(event)
 
-    def record_failure(self) -> None:
+    def before_request(self, endpoint: str) -> bool:
         now = time.time()
-        self._errors.append(now)
-        while self._errors and now - self._errors[0] > self.window_seconds:
-            self._errors.popleft()
-        if len(self._errors) >= self.threshold:
-            self._opened_at = now
+        state = self._state[endpoint]
+        opened_at = self._opened_at[endpoint]
+        if state == CircuitBreakerState.OPEN:
+            if opened_at and (now - opened_at) >= self._recovery_timeout[endpoint]:
+                self._state[endpoint] = CircuitBreakerState.HALF_OPEN
+                self._emit_metrics(endpoint)
+                return True
+            raise CircuitOpenError("Circuit breaker open", operation=endpoint)
+        self._emit_metrics(endpoint)
+        return state == CircuitBreakerState.HALF_OPEN
+
+    def record_success(self, endpoint: str) -> None:
+        self._errors[endpoint].clear()
+        self._state[endpoint] = CircuitBreakerState.CLOSED
+        self._opened_at[endpoint] = None
+        self._recovery_timeout[endpoint] = self.base_open_seconds
+        self._emit_metrics(endpoint)
+
+    def record_failure(self, endpoint: str) -> None:
+        now = time.time()
+        errors = self._errors[endpoint]
+        errors.append(now)
+        while errors and now - errors[0] > self.window_seconds:
+            errors.popleft()
+        if self._state[endpoint] == CircuitBreakerState.HALF_OPEN:
+            self._state[endpoint] = CircuitBreakerState.OPEN
+            self._opened_at[endpoint] = now
+            self._recovery_timeout[endpoint] = max(self.base_open_seconds, self._recovery_timeout[endpoint] * 2)
+            self._notify_open(endpoint)
+        elif len(errors) >= self.threshold:
+            self._state[endpoint] = CircuitBreakerState.OPEN
+            self._opened_at[endpoint] = now
+            self._notify_open(endpoint)
+        self._emit_metrics(endpoint)
 
 
 class BreezeClient:
@@ -137,6 +195,7 @@ class BreezeClient:
             threshold=self.settings.circuit_failures_threshold,
             window_seconds=self.settings.circuit_window_seconds,
             open_seconds=self.settings.circuit_open_seconds,
+            alert_dispatcher=None,
         )
 
         self.session = requests.Session()
@@ -178,12 +237,25 @@ class BreezeClient:
         idempotency_key: str | None = None,
     ) -> dict:
         """Execute a Breeze request with auth, quotas, retries and mapped errors."""
-        self.circuit.before_request()
+        endpoint = f"/{path.lstrip('/')}"
+        half_open_probe = self.circuit.before_request(endpoint)
         self.rate_limiter.check()
         self.ensure_authenticated()
         record = self.auth_manager.current()
         if not record:
             raise AuthenticationError("No auth token loaded", operation=path)
+
+        if half_open_probe:
+            probe_url = f"{self.base_url}/customerdetails"
+            probe_headers = {
+                "X-SessionToken": record.access_token,
+                "X-AppKey": self.client_id or "",
+            }
+            probe_resp = self.session.get(probe_url, headers=probe_headers, timeout=self.settings.request_timeout_seconds)
+            if probe_resp.status_code >= 400:
+                self.circuit.record_failure(endpoint)
+                raise CircuitOpenError("Circuit breaker probe failed", operation=endpoint)
+            self.circuit.record_success(endpoint)
 
         request_headers = {
             "X-SessionToken": record.access_token,
@@ -196,7 +268,6 @@ class BreezeClient:
             request_headers["Idempotency-Key"] = idempotency_key
 
         url = f"{self.base_url}/{path.lstrip('/')}"
-        endpoint = f"/{path.lstrip('/')}"
         started = time.perf_counter()
         INFLIGHT.inc()
         try:
@@ -212,7 +283,7 @@ class BreezeClient:
             REQUEST_LATENCY.labels(method=method.upper(), endpoint=endpoint).observe(duration)
             request_id = resp.headers.get("X-Request-ID")
             if resp.status_code >= 500:
-                self.circuit.record_failure()
+                self.circuit.record_failure(endpoint)
                 REQUEST_COUNTER.labels(method=method.upper(), endpoint=endpoint, result="5xx").inc()
                 raise TransientBreezeError("Transient server error", operation=path, http_status=resp.status_code, request_id=request_id)
             if resp.status_code == 429:
@@ -229,11 +300,11 @@ class BreezeClient:
                 REQUEST_COUNTER.labels(method=method.upper(), endpoint=endpoint, result="not_found").inc()
                 raise NotFoundError("Resource not found", operation=path, http_status=404, request_id=request_id)
             resp.raise_for_status()
-            self.circuit.record_success()
+            self.circuit.record_success(endpoint)
             REQUEST_COUNTER.labels(method=method.upper(), endpoint=endpoint, result="ok").inc()
             return resp.json() if resp.content else {}
         except requests.RequestException as exc:
-            self.circuit.record_failure()
+            self.circuit.record_failure(endpoint)
             REQUEST_COUNTER.labels(method=method.upper(), endpoint=endpoint, result="transport_error").inc()
             raise TransientBreezeError(str(exc), operation=path) from exc
         finally:
@@ -242,6 +313,11 @@ class BreezeClient:
 
     def _idempotency(self) -> str:
         return str(uuid.uuid4())
+
+
+    def get_customer_details(self) -> dict:
+        """Fetch customer profile details (health probe endpoint)."""
+        return self.request("GET", "/customerdetails")
 
     def get_instruments(self, exchange: str | None = None) -> dict:
         """Fetch instruments.
