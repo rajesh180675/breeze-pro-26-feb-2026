@@ -273,13 +273,30 @@ class BreezeAPIClient:
             )
         return self._ok(data)
 
+    def _to_breeze_datetime(self, date_str: str, end_of_day: bool = False) -> str:
+        """
+        Breeze API requires datetime strings in ISO-8601 format:
+        '2026-02-26T00:00:00.000Z' for start-of-day
+        '2026-02-26T23:59:59.000Z' for end-of-day
+
+        Accepts plain 'YYYY-MM-DD' strings and ISO-8601 strings.
+        """
+        if not date_str:
+            return ""
+        s = date_str.strip().split("T")[0].strip()  # extract just the date part
+        suffix = "T23:59:59.000Z" if end_of_day else "T00:00:00.000Z"
+        return s + suffix
+
     @retry_api_call(max_attempts=2, initial_delay=0.5)
     def get_order_list(self, exchange="", from_date="", to_date=""):
         self._require_connection()
         with self._api_lock:
             self.rate_limiter.wait()
             return self._ok(self.breeze.get_order_list(
-                exchange_code=exchange, from_date=from_date, to_date=to_date))
+                exchange_code=exchange,
+                from_date=self._to_breeze_datetime(from_date),
+                to_date=self._to_breeze_datetime(to_date, end_of_day=True)
+            ))
 
     @retry_api_call(max_attempts=2, initial_delay=0.5)
     def get_trade_list(self, exchange="", from_date="", to_date=""):
@@ -287,7 +304,10 @@ class BreezeAPIClient:
         with self._api_lock:
             self.rate_limiter.wait()
             return self._ok(self.breeze.get_trade_list(
-                exchange_code=exchange, from_date=from_date, to_date=to_date))
+                exchange_code=exchange,
+                from_date=self._to_breeze_datetime(from_date),
+                to_date=self._to_breeze_datetime(to_date, end_of_day=True)
+            ))
 
     @retry_api_call(max_attempts=2, initial_delay=0.5)
     def get_margin(self, stock_code, exchange, expiry, strike, option_type, action, quantity):

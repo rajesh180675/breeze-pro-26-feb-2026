@@ -340,14 +340,32 @@ def format_expiry_short(date_str: str) -> str:
 
 
 def calculate_days_to_expiry(expiry_date: str) -> int:
+    """
+    Parse expiry date in any common format and return calendar days remaining.
+
+    Supports:
+      - YYYY-MM-DD            (e.g. "2026-03-04")
+      - DD-Mon-YYYY           (e.g. "04-Mar-2026") — Breeze API response format
+      - DD-Month-YYYY         (e.g. "04-March-2026")
+      - YYYY-MM-DDTHH:MM:SS   (e.g. "2026-03-04T00:00:00.000Z")
+
+    BUG FIX: Previous code sliced both the date string AND the format pattern
+    to the same length [:10], which corrupted "DD-Mon-YYYY" strings to "DD-Mon-YYY"
+    and always returned 0 for Breeze-formatted dates.
+    """
     if not expiry_date:
         return 0
-    for fmt in ["%Y-%m-%d", "%d-%b-%Y", "%d-%B-%Y", "%Y-%m-%dT%H:%M:%S"]:
+    s = expiry_date.strip()
+    # Normalise ISO-8601 with timezone suffix: "2026-03-04T00:00:00.000Z" -> "2026-03-04"
+    if "T" in s:
+        s = s.split("T")[0].strip()
+    for fmt in ["%Y-%m-%d", "%d-%b-%Y", "%d-%B-%Y", "%d-%m-%Y"]:
         try:
-            expiry = datetime.strptime(expiry_date.strip()[:10], fmt[:len(expiry_date.strip()[:10])])
-            return max(0, (expiry - datetime.now()).days)
+            expiry = datetime.strptime(s, fmt)
+            return max(0, (expiry.date() - datetime.now().date()).days)
         except ValueError:
             continue
+    log.warning(f"calculate_days_to_expiry: could not parse date '{expiry_date}'")
     return 0
 
 

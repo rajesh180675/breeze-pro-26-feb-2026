@@ -1135,6 +1135,27 @@ def page_square_off():
     # Bulk confirm
     if st.session_state.get("confirm_bulk_sqoff"):
         st.error("🚨 **CONFIRM: Square off ALL option positions at MARKET price?**")
+        # Preview positions before confirming
+        _prev_pos = get_cached_positions(client)
+        _prev_opt, _ = split_positions(_prev_pos or [])
+        _prev_ep = enrich_positions(_prev_opt)
+        if _prev_ep:
+            preview_rows = []
+            for _pe in _prev_ep:
+                _sc = _pe.get("stock_code", "")
+                _ic = next((c for c in C.INSTRUMENTS.values() if c.api_code == _sc), None)
+                _ls = _ic.lot_size if _ic else 1
+                _lots = _pe["_qty"] // _ls
+                preview_rows.append({
+                    "Instrument": C.api_code_to_display(_sc),
+                    "Strike": _pe.get("strike_price"),
+                    "Type": C.normalize_option_type(_pe.get("right", "")),
+                    "Lots": _lots,
+                    "Qty": _pe["_qty"],
+                    "Lot Size": _ls,
+                    "P&L ₹": f"{_pe['_pnl']:+,.2f}"
+                })
+            st.dataframe(pd.DataFrame(preview_rows), hide_index=True, use_container_width=True)
         cc1, cc2 = st.columns(2)
         if cc1.button("✅ Yes, Square Off All", type="primary"):
             all_pos = get_cached_positions(client)
@@ -1142,23 +1163,37 @@ def page_square_off():
             ep = enrich_positions(opt_pos)
             success_count = 0
             for e in ep:
+                sc = e.get("stock_code", "")
+                ic = next((c for c in C.INSTRUMENTS.values() if c.api_code == sc), None)
+                lot_size = ic.lot_size if ic else 1
+                qty_to_close = e["_qty"]
+                # Ensure qty is a valid multiple of lot size
+                lots_to_close = qty_to_close // lot_size
+                if lots_to_close < 1:
+                    st.warning(f"⚠️ Skipping {C.api_code_to_display(sc)}: qty {qty_to_close} < 1 lot ({lot_size})")
+                    continue
+                # Clamp to exact multiple of lot size
+                qty_to_close = lots_to_close * lot_size
                 r = client.square_off(
-                    e.get("stock_code"), e.get("exchange_code"),
+                    sc, e.get("exchange_code"),
                     e.get("expiry_date"), safe_int(e.get("strike_price")),
                     C.normalize_option_type(e.get("right", "")),
-                    e["_qty"], e["_pt"], "market", 0.0
+                    qty_to_close, e["_pt"], "market", 0.0
                 )
                 if r["success"]:
                     success_count += 1
                     _db.log_trade(
-                        stock_code=e.get("stock_code", ""),
+                        stock_code=sc,
                         exchange=e.get("exchange_code", ""),
                         strike=safe_int(e.get("strike_price", 0)),
                         option_type=C.normalize_option_type(e.get("right", "")),
                         expiry=e.get("expiry_date", ""),
-                        action=e["_close"], quantity=e["_qty"], price=0,
-                        order_type="market", notes="Bulk square off"
+                        action=e["_close"], quantity=qty_to_close, price=0,
+                        order_type="market",
+                        notes=f"Bulk square off ({lots_to_close} lots × {lot_size})"
                     )
+                else:
+                    st.warning(f"⚠️ Failed: {C.api_code_to_display(sc)} {e.get('strike_price')} — {r.get('message', 'error')}")
             st.success(f"✅ Squared off {success_count}/{len(ep)} positions!")
             _db.log_activity("BULK_SQOFF", f"Squared off {success_count} positions")
             st.session_state["confirm_bulk_sqoff"] = False
@@ -1186,18 +1221,31 @@ def page_square_off():
               delta=f"{'▲' if total_pnl >= 0 else '▼'}")
 
     # Position table
-    rows = [{"#": i+1,
-             "Instrument": C.api_code_to_display(e.get("stock_code", "")),
-             "Strike": e.get("strike_price"),
-             "Type": C.normalize_option_type(e.get("right", "")),
-             "Position": e["_pt"].upper(),
-             "Qty": e["_qty"],
-             "Avg ₹": f"{e['_avg']:.2f}",
-             "LTP ₹": f"{e['_ltp']:.2f}",
-             "P&L ₹": f"{e['_pnl']:+,.2f}",
-             "Action": e["_close"].upper(),
-             "Expiry": format_expiry_short(e.get("expiry_date", ""))
-             } for i, e in enumerate(ep)]
+    # Build rows with lot information
+    def _lot_info(e):
+        sc = e.get("stock_code", "")
+        ic = next((c for c in C.INSTRUMENTS.values() if c.api_code == sc), None)
+        ls = ic.lot_size if ic else 1
+        return ls, e["_qty"] // ls
+
+    rows = []
+    for i, e in enumerate(ep):
+        ls, lots = _lot_info(e)
+        rows.append({
+            "#": i+1,
+            "Instrument": C.api_code_to_display(e.get("stock_code", "")),
+            "Strike": e.get("strike_price"),
+            "Type": C.normalize_option_type(e.get("right", "")),
+            "Position": e["_pt"].upper(),
+            "Lots": lots,
+            "Lot Size": ls,
+            "Total Qty": e["_qty"],
+            "Avg ₹": f"{e['_avg']:.2f}",
+            "LTP ₹": f"{e['_ltp']:.2f}",
+            "P&L ₹": f"{e['_pnl']:+,.2f}",
+            "Action": e["_close"].upper(),
+            "Expiry": format_expiry_short(e.get("expiry_date", ""))
+        })
     st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
 
     st.markdown("---")
@@ -1205,25 +1253,61 @@ def page_square_off():
     labels = [
         f"{C.api_code_to_display(e.get('stock_code', ''))} "
         f"{e.get('strike_price')} {C.normalize_option_type(e.get('right', ''))} "
-        f"({e['_pt'].upper()}) — P&L: {format_currency(e['_pnl'])}"
+        f"({e['_pt'].upper()}) — Qty: {e['_qty']} — P&L: {format_currency(e['_pnl'])}"
         for e in ep
     ]
     si = st.selectbox("Position", range(len(labels)), format_func=lambda i: labels[i], key="sq_s")
     sel = ep[si]
 
+    # ── Lot-size lookup for selected position ────────────────
+    sel_stock_code = sel.get("stock_code", "")
+    sel_inst_cfg = next((c for c in C.INSTRUMENTS.values() if c.api_code == sel_stock_code), None)
+    sel_lot_size = sel_inst_cfg.lot_size if sel_inst_cfg else 1
+    sel_max_lots = max(1, sel["_qty"] // sel_lot_size)
+
+    info_box(
+        f"ℹ️ <b>{C.api_code_to_display(sel_stock_code)}</b>: "        f"1 lot = <b>{sel_lot_size} qty</b> | "        f"Total position = <b>{sel['_qty']} qty ({sel_max_lots} lots)</b>"
+    )
+
     c1, c2, c3 = st.columns(3)
     with c1:
         ot = st.radio("Order Type", ["Market", "Limit"], horizontal=True, key="sq_o")
     with c2:
-        sq = st.slider("Quantity", 1, sel["_qty"], sel["_qty"], key="sq_q")
+        sq_lots = st.number_input(
+            f"Lots to Square Off",
+            min_value=1,
+            max_value=sel_max_lots,
+            value=sel_max_lots,
+            step=1,
+            key="sq_lots",
+            help=(
+                f"Enter number of lots to close. "
+                f"1 lot = {sel_lot_size} qty for {C.api_code_to_display(sel_stock_code)}. "
+                f"Max = {sel_max_lots} lots."
+            )
+        )
+        sq = sq_lots * sel_lot_size
+        # Safety clamp — never exceed actual held quantity
+        sq = min(sq, sel["_qty"])
+        st.caption(f"📦 **{sq_lots} lot{'s' if sq_lots > 1 else ''} × {sel_lot_size} = {sq} units**")
     with c3:
         pr = 0.0
         if ot == "Limit":
             pr = st.number_input("Price ₹", value=float(sel["_ltp"]), min_value=0.01, step=0.05)
 
+    # Validate quantity is exact multiple of lot size
+    if sq % sel_lot_size != 0 or sq < sel_lot_size or sq > sel["_qty"]:
+        st.error(
+            f"❌ Quantity {sq} is invalid. Must be a multiple of lot size {sel_lot_size}. "
+            f"Max = {sel['_qty']} ({sel_max_lots} lots)."
+        )
+
     order_busy = st.session_state.get("_order_busy", False)
-    if st.button(f"🔄 {sel['_close'].upper()} {sq} units — {C.api_code_to_display(sel.get('stock_code', ''))} {sel.get('strike_price')} {C.normalize_option_type(sel.get('right', ''))}",
-                 type="primary", disabled=order_busy, use_container_width=True):
+    btn_label = (
+        f"🔄 {sel['_close'].upper()} {sq_lots} lot{'s' if sq_lots > 1 else ''} "        f"({sq} qty) — {C.api_code_to_display(sel.get('stock_code', ''))} "        f"{sel.get('strike_price')} {C.normalize_option_type(sel.get('right', ''))}"
+    )
+    can_square = (not order_busy) and (sq % sel_lot_size == 0) and (sq <= sel["_qty"]) and (sq >= sel_lot_size)
+    if st.button(btn_label, type="primary", disabled=not can_square, use_container_width=True):
         st.session_state._order_busy = True
         try:
             with st.spinner("Squaring off..."):

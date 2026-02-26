@@ -69,7 +69,7 @@ class InstrumentConfig:
 
 INSTRUMENTS: Dict[str, InstrumentConfig] = {
     "NIFTY": InstrumentConfig(
-        "NIFTY", "NIFTY", "NFO", 75, 0.05, 50, "Thursday",
+        "NIFTY", "NIFTY", "NFO", 65, 0.05, 50, "Tuesday",
         "NIFTY 50 Index Options", "index", "NIFTY", "NSE",
         15000, 30000, True, True, "#1f77b4"),
     "BANKNIFTY": InstrumentConfig(
@@ -85,7 +85,7 @@ INSTRUMENTS: Dict[str, InstrumentConfig] = {
         "NIFTY Midcap Select Options", "index", "MIDCPNIFTY", "NSE",
         8000, 20000, True, True, "#d62728"),
     "SENSEX": InstrumentConfig(
-        "SENSEX", "BSESEN", "BFO", 10, 0.05, 100, "Friday",
+        "SENSEX", "BSESEN", "BFO", 20, 0.05, 100, "Thursday",
         "BSE SENSEX Options", "index", "BSESEN", "BSE",
         50000, 100000, True, True, "#9467bd"),
     "BANKEX": InstrumentConfig(
@@ -104,6 +104,16 @@ def get_instrument(name: str) -> InstrumentConfig:
 
 
 def get_next_expiries(instrument_name: str, count: int = 6) -> List[str]:
+    """
+    Return the next  weekly expiry dates for the given instrument.
+
+    Rules:
+    - If today IS the expiry day AND market is still open (before 15:30 IST),
+      today is included as expiries[0].
+    - If today IS the expiry day AND market is closed (>= 15:30 IST),
+      skip to next week.
+    - Always returns clean calendar dates (no time component) in YYYY-MM-DD format.
+    """
     try:
         inst = get_instrument(instrument_name)
     except KeyError:
@@ -111,11 +121,18 @@ def get_next_expiries(instrument_name: str, count: int = 6) -> List[str]:
     target_day = DAY_NUM[inst.expiry_day]
     now = datetime.now(IST)
     days_ahead = (target_day - now.weekday()) % 7
-    # If today is expiry day but market is closed, go to next week
-    if days_ahead == 0 and now.hour >= 15 and now.minute >= 30:
-        days_ahead = 7
-    base = now + timedelta(days=days_ahead) if days_ahead > 0 else now
-    expiries = [(base + timedelta(weeks=i)).strftime("%Y-%m-%d") for i in range(count)]
+
+    # If today is expiry day: include today if market open, else jump to next week
+    if days_ahead == 0:
+        if now.hour > 15 or (now.hour == 15 and now.minute >= 30):
+            days_ahead = 7  # market closed — skip to next week
+
+    # Compute a clean date (no time) for the base expiry
+    base_date = (now + timedelta(days=days_ahead)).date()
+    expiries = [
+        (base_date + timedelta(weeks=i)).strftime("%Y-%m-%d")
+        for i in range(count)
+    ]
     return expiries
 
 
