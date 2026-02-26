@@ -1,0 +1,62 @@
+version: "3.9"
+
+services:
+  breeze-pro:
+    image: breeze-pro:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8501:8501"
+    environment:
+      - ENV=production
+      - LOG_LEVEL=INFO
+      - MAX_CACHED_TICKS=10000
+      - WS_RECONNECT_MAX_DELAY=30
+    volumes:
+      - breeze-data:/app/data
+      - breeze-logs:/app/logs
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "2.0"
+
+  fastapi:
+    image: breeze-pro:latest
+    command: ["uvicorn", "app.api.main:app", "--host", "0.0.0.0", "--port", "8080"]
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - breeze-data:/app/data
+    depends_on:
+      - breeze-pro
+
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=breezepro
+    volumes:
+      - grafana-data:/var/lib/grafana
+
+volumes:
+  breeze-data:
+  breeze-logs:
+  grafana-data:

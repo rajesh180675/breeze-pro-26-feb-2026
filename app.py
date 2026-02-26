@@ -18,6 +18,7 @@ Enhanced features:
 """
 
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta, date
@@ -45,7 +46,7 @@ from analytics import (
 )
 from session_manager import (
     Credentials, SessionState, CacheManager, Notifications,
-    generate_totp, auto_connect_with_totp
+    generate_totp, auto_connect_with_totp, AppWarmupManager
 )
 from breeze_api import BreezeAPIClient
 from validators import validate_date_range
@@ -193,27 +194,87 @@ header {visibility:hidden}
 }
 </style>
 """
+
+BREEZE_PRO_CSS = """
+<style>
+:root {
+  --bg-primary:#0d1117; --bg-secondary:#161b22; --bg-card:#1c2128;
+  --border:#30363d; --text-primary:#e6edf3; --text-muted:#8b949e;
+  --accent:#388bfd; --success:#3fb950; --warning:#d29922; --danger:#f85149;
+}
+.stApp { background-color: var(--bg-primary); color: var(--text-primary); }
+.stSidebar { background-color: var(--bg-secondary) !important; }
+.page-header { color: var(--text-primary); border-bottom: 2px solid var(--accent); }
+.metric-card { background: var(--bg-card); border:1px solid var(--border); border-radius:8px; }
+.metric-label { color: var(--text-muted); }
+.metric-value { color: var(--text-primary); font-weight:700; }
+.stDataFrame thead { background: var(--bg-secondary) !important; }
+.stDataFrame tbody tr:hover { background: var(--bg-card) !important; }
+.stButton > button[kind="primary"] { background-color: var(--accent); border:none; font-weight:600; }
+.stButton > button[kind="primary"]:hover { background-color:#58a6ff; box-shadow:0 0 8px rgba(56,139,253,.4); }
+.badge-success { color: var(--success); font-weight:600; }
+.badge-danger { color: var(--danger); font-weight:600; }
+.badge-warning { color: var(--warning); font-weight:600; }
+.badge-muted { color: var(--text-muted); }
+.scroll-table { max-height:400px; overflow-y:auto; border:1px solid var(--border); border-radius:6px; }
+</style>
+"""
+
+KEYBOARD_SHORTCUTS_JS = """
+<script>
+document.addEventListener('keydown', function(e) {
+  if (e.altKey && e.key >= '1' && e.key <= '9') {
+    e.preventDefault();
+    const pages = document.querySelectorAll('[data-testid="stRadio"] label');
+    const idx = parseInt(e.key) - 1;
+    if (pages[idx]) pages[idx].click();
+  }
+  if (e.altKey && (e.key === 'r' || e.key === 'R')) {
+    e.preventDefault();
+    const refreshBtns = document.querySelectorAll('button');
+    for (const btn of refreshBtns) {
+      if (btn.textContent.includes('Refresh') || btn.textContent.includes('🔄')) { btn.click(); break; }
+    }
+  }
+});
+</script>
+"""
+
+RESPONSIVE_CSS = """
+<style>
+@media (max-width: 768px) {
+  section[data-testid="stSidebar"] { width: 0 !important; }
+  .page-header { font-size: 1.2rem; }
+  .stColumns { flex-direction: column !important; }
+}
+</style>
+"""
+
 st.markdown(THEME_CSS, unsafe_allow_html=True)
 
 # ═══════════════════════════════════════════════════════════════
 # CONSTANTS
 # ═══════════════════════════════════════════════════════════════
 
-PAGES = [
-    "Dashboard", "Option Chain", "Sell Options", "Square Off",
-    "Orders & Trades", "Positions", "Strategy Builder",
-    "Analytics", "📈 Futures Trading", "📊 Historical Data", "⏰ GTT Orders", "Risk Monitor", "Watchlist", "Settings"
-]
-
-ICONS = {
-    "Dashboard": "🏠", "Option Chain": "📊",
-    "Sell Options": "💰", "Square Off": "🔄",
-    "Orders & Trades": "📋", "Positions": "📍",
-    "Strategy Builder": "🎯", "Analytics": "📈", "📈 Futures Trading": "📈", "📊 Historical Data": "📊", "⏰ GTT Orders": "⏰",
-    "Risk Monitor": "🛡️", "Watchlist": "👁️", "Settings": "⚙️"
+PAGES = {
+    "🏠 Dashboard": page_dashboard if "page_dashboard" in globals() else None,
+    "⛓️ Option Chain": page_option_chain if "page_option_chain" in globals() else None,
+    "💸 Sell Options": page_sell_options if "page_sell_options" in globals() else None,
+    "❌ Square Off": page_square_off if "page_square_off" in globals() else None,
+    "📋 Orders & Trades": page_orders_trades if "page_orders_trades" in globals() else None,
+    "💼 Positions": page_positions if "page_positions" in globals() else None,
+    "📊 Historical Data": page_historical_data if "page_historical_data" in globals() else None,
+    "📈 Futures Trading": page_futures_trading if "page_futures_trading" in globals() else None,
+    "⏰ GTT Orders": page_gtt_orders if "page_gtt_orders" in globals() else None,
+    "🧠 Strategy Builder": page_strategy_builder if "page_strategy_builder" in globals() else None,
+    "🔬 Analytics": page_analytics if "page_analytics" in globals() else None,
+    "🚨 Risk Monitor": page_risk_monitor if "page_risk_monitor" in globals() else None,
+    "👁️ Watchlist": page_watchlist if "page_watchlist" in globals() else None,
+    "📄 Paper Trading": None,
+    "⚙️ Settings": page_settings if "page_settings" in globals() else None,
 }
 
-AUTH_PAGES = set(PAGES[1:])
+AUTH_PAGES = set([k for k in PAGES.keys() if k != "🏠 Dashboard"])
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -239,7 +300,7 @@ def require_auth(f):
         if not SessionState.is_authenticated():
             st.warning("🔒 Please connect your account first")
             if st.button("Go to Login →"):
-                SessionState.navigate_to("Dashboard")
+                SessionState.navigate_to("🏠 Dashboard")
                 st.rerun()
             return
         return f(*a, **k)
@@ -572,10 +633,10 @@ def render_sidebar():
             """, unsafe_allow_html=True)
 
         has_secrets = Credentials.has_stored_credentials()
-        avail = PAGES if SessionState.is_authenticated() else ["Dashboard"]
+        avail = list(PAGES.keys()) if SessionState.is_authenticated() else ["🏠 Dashboard"]
         cur = SessionState.get_current_page()
         if cur not in avail:
-            cur = "Dashboard"
+            cur = "🏠 Dashboard"
             SessionState.navigate_to(cur)
         try:
             idx = avail.index(cur)
@@ -584,7 +645,7 @@ def render_sidebar():
 
         sel = st.radio(
             "Nav", avail, index=idx,
-            format_func=lambda p: f"{ICONS.get(p, '')} {p}",
+            format_func=lambda p: p,
             label_visibility="collapsed", key="nav"
         )
         if sel != cur:
@@ -710,7 +771,7 @@ def _cleanup_session():
     SessionState.set_authentication(False, None)
     Credentials.clear_runtime_credentials()
     CacheManager.clear_all()
-    SessionState.navigate_to("Dashboard")
+    SessionState.navigate_to("🏠 Dashboard")
     _db.log_activity("LOGOUT", "Session ended")
 
 
@@ -848,7 +909,7 @@ def page_dashboard():
         if not opt_pos:
             empty_state("📭", "No option positions", "Use Sell Options to open positions")
             if st.button("💰 Go to Sell Options"):
-                SessionState.navigate_to("Sell Options")
+                SessionState.navigate_to("💸 Sell Options")
                 st.rerun()
         else:
             ep = enrich_positions(opt_pos)
@@ -894,9 +955,9 @@ def page_dashboard():
     st.markdown("---")
     section("⚡ Quick Actions")
     c1, c2, c3, c4, c5, c6 = st.columns(6)
-    actions = [("📊 Chain", "Option Chain"), ("💰 Sell", "Sell Options"),
-               ("🔄 Square Off", "Square Off"), ("🎯 Strategies", "Strategy Builder"),
-               ("🛡️ Risk", "Risk Monitor"), ("👁️ Watchlist", "Watchlist")]
+    actions = [("📊 Chain", "⛓️ Option Chain"), ("💰 Sell", "💸 Sell Options"),
+               ("🔄 Square Off", "❌ Square Off"), ("🎯 Strategies", "🧠 Strategy Builder"),
+               ("🛡️ Risk", "🚨 Risk Monitor"), ("👁️ Watchlist", "👁️ Watchlist")]
     for col, (label, page) in zip([c1, c2, c3, c4, c5, c6], actions):
         with col:
             if st.button(label, use_container_width=True):
@@ -1710,7 +1771,7 @@ def page_positions():
             losers = [e for e in ep if e["_pnl"] < 0]
             mc = st.columns(5)
             mc[0].metric("Total P&L", format_currency(total_pnl))
-            mc[1].metric("Positions", len(ep))
+            mc[1].metric("💼 Positions", len(ep))
             mc[2].metric("Winners", len(winners))
             mc[3].metric("Losers", len(losers))
             mc[4].metric("Win Rate", f"{len(winners)/len(ep)*100:.0f}%" if ep else "N/A")
@@ -3504,6 +3565,14 @@ def render_tax_export_tab(db: TradeDB) -> None:
         )
 
 
+
+
+@error_handler
+def page_paper_trading():
+    page_header("📄 Paper Trading")
+    render_paper_trading_section(get_client())
+
+
 # ═══════════════════════════════════════════════════════════════
 # PAGE: SETTINGS
 # ═══════════════════════════════════════════════════════════════
@@ -3665,37 +3734,69 @@ def page_settings():
 # ═══════════════════════════════════════════════════════════════
 
 PAGE_FN = {
-    "Dashboard": page_dashboard,
-    "Option Chain": page_option_chain,
-    "Sell Options": page_sell_options,
-    "Square Off": page_square_off,
-    "Orders & Trades": page_orders_trades,
-    "Positions": page_positions,
-    "Strategy Builder": page_strategy_builder,
-    "Analytics": page_analytics,
-    "📈 Futures Trading": page_futures_trading,
+    "🏠 Dashboard": page_dashboard,
+    "⛓️ Option Chain": page_option_chain,
+    "💸 Sell Options": page_sell_options,
+    "❌ Square Off": page_square_off,
+    "📋 Orders & Trades": page_orders_trades,
+    "💼 Positions": page_positions,
     "📊 Historical Data": page_historical_data,
+    "📈 Futures Trading": page_futures_trading,
     "⏰ GTT Orders": page_gtt_orders,
-    "Risk Monitor": page_risk_monitor,
-    "Watchlist": page_watchlist,
-    "Settings": page_settings,
+    "🧠 Strategy Builder": page_strategy_builder,
+    "🔬 Analytics": page_analytics,
+    "🚨 Risk Monitor": page_risk_monitor,
+    "👁️ Watchlist": page_watchlist,
+    "📄 Paper Trading": page_paper_trading,
+    "⚙️ Settings": page_settings,
 }
 
 
 def main():
     try:
         SessionState.initialize()
+        st.markdown(BREEZE_PRO_CSS, unsafe_allow_html=True)
+        st.markdown(RESPONSIVE_CSS, unsafe_allow_html=True)
+        components.html(KEYBOARD_SHORTCUTS_JS, height=0)
+
+        if not SessionState.is_authenticated():
+            render_sidebar()
+            render_alert_banners()
+            st.markdown("---")
+            page_dashboard()
+            return
+
+        client = get_client()
+        if client and "live_feed_initialized" not in st.session_state:
+            mgr = lf.initialize_live_feed(client.breeze)
+            st.session_state["live_feed_initialized"] = True
+            st.session_state["live_feed_manager"] = mgr
+
+        if client and "app_warmup" not in st.session_state:
+            warmup = AppWarmupManager(client)
+            warmup.start()
+            st.session_state["app_warmup"] = warmup
+
+        if "paper_engine" not in st.session_state and client:
+            tick_store = lf.get_tick_store() if st.session_state.get("live_feed_initialized") else None
+            st.session_state["paper_engine"] = PaperTradingEngine(client, tick_store)
+
+        if "gtt_manager" not in st.session_state and client:
+            from gtt_manager import GTTManager
+            gtt_mgr = GTTManager(client, TradeDB())
+            gtt_mgr.start_sync()
+            st.session_state["gtt_manager"] = gtt_mgr
+
         render_sidebar()
         render_alert_banners()
         st.markdown("---")
 
         page = SessionState.get_current_page()
-
         if page in AUTH_PAGES and not SessionState.is_authenticated():
             st.warning("🔒 Please login from the sidebar to access this page.")
             return
 
-        if (SessionState.is_authenticated() and SessionState.is_session_expired()):
+        if SessionState.is_session_expired():
             st.error("🔴 Session expired (8 hours). Please reconnect.")
             if st.button("🔄 Reconnect", type="primary"):
                 _cleanup_session()
