@@ -13,9 +13,12 @@ Critical fixes from v10/v11:
 """
 
 import logging
+import os
+import sys
 import time
 import hashlib
 import threading
+from pathlib import Path
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Callable
 from functools import wraps
@@ -24,6 +27,18 @@ from breeze_connect import BreezeConnect
 import app_config as C
 
 log = logging.getLogger(__name__)
+
+
+def _load_production_breeze_client_class():
+    """Load the production REST wrapper class from app/lib when available."""
+    app_lib_path = Path(__file__).resolve().parent / "app"
+    if app_lib_path.exists() and str(app_lib_path) not in sys.path:
+        sys.path.insert(0, str(app_lib_path))
+    try:
+        from lib.breeze_client import BreezeClient  # type: ignore
+        return BreezeClient
+    except Exception:
+        return None
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -217,6 +232,8 @@ class BreezeAPIClient:
         self.idempotency = IdempotencyGuard(60)
         self._api_lock = threading.Lock()
         self._connection_time: Optional[float] = None
+        self.use_production_client = os.getenv("BREEZE_USE_PRODUCTION_CLIENT", "false").lower() in {"1", "true", "yes"}
+        self._production_client = None
 
     def is_connected(self) -> bool:
         return self.connected and self.breeze is not None
@@ -256,6 +273,21 @@ class BreezeAPIClient:
         self.breeze.generate_session(api_secret=self.api_secret, session_token=session_token)
         self.connected = True
         self._connection_time = time.time()
+
+        if self.use_production_client:
+            breeze_client_class = _load_production_breeze_client_class()
+            if breeze_client_class is not None:
+                os.environ["BREEZE_CLIENT_ID"] = self.api_key
+                os.environ["BREEZE_CLIENT_SECRET"] = self.api_secret
+                os.environ["BREEZE_SESSION_TOKEN"] = session_token
+                try:
+                    self._production_client = breeze_client_class(client_id=self.api_key, client_secret=self.api_secret)
+                    self._production_client.authenticate()
+                    log.info("Production BreezeClient bridge enabled for Streamlit UI")
+                except Exception as exc:
+                    self._production_client = None
+                    log.warning(f"Could not initialize production BreezeClient bridge: {exc}")
+
         log.info("Connected to Breeze API")
         return self._ok({"message": "Connected"})
 
@@ -271,6 +303,11 @@ class BreezeAPIClient:
     @retry_api_call(max_attempts=3, initial_delay=0.5)
     def get_positions(self):
         self._require_connection()
+        if self._production_client is not None:
+            try:
+                return self._ok(self._production_client.get_positions())
+            except Exception as exc:
+                log.warning(f"Production client get_positions failed, falling back to SDK: {exc}")
         with self._api_lock:
             self.rate_limiter.wait()
             return self._ok(self.breeze.get_portfolio_positions())
@@ -538,3 +575,177 @@ class BreezeAPIClient:
                 return self._ok(self.breeze.get_customer_details())
         except Exception as e:
             return self._err(str(e))
+
+    # ─── Generic SDK bridge and extended API surface ───────────
+
+    def call_sdk(self, method_name: str, *, retryable: bool = True, **kwargs):
+        """
+        Call any public method from BreezeConnect with consistent guardrails.
+
+        This enables quick parity with new Breeze SDK methods while preserving:
+        - connection checks
+        - serialized API access
+        - local rate limiter
+        - normalized success/error envelope
+        """
+        self._require_connection()
+        try:
+            sdk_method = getattr(self.breeze, method_name)
+        except AttributeError:
+            return self._err(f"Breeze SDK method not found: {method_name}", "SDK_METHOD_NOT_FOUND")
+
+        attempts = 3 if retryable else 1
+        delay = 0.5
+        last_error: Exception | None = None
+
+        for attempt in range(1, attempts + 1):
+            try:
+                with self._api_lock:
+                    self.rate_limiter.wait()
+                    result = sdk_method(**kwargs)
+                return self._ok(result)
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+                if not retryable or _is_permanent(exc) or attempt >= attempts:
+                    break
+                if _is_transient(exc):
+                    time.sleep(delay)
+                    delay *= 2
+                    continue
+                break
+
+        return self._err(str(last_error) if last_error else "Unknown SDK error", "SDK_CALL_FAILED")
+
+    # ---- Market data wrappers ----
+
+    @retry_api_call(max_attempts=3, initial_delay=0.5)
+    def get_quotes(self, stock_code: str, exchange_code: str, product_type: str,
+                   right: str = "", strike_price: str = "", expiry_date: str = ""):
+        expiry_iso = convert_to_breeze_datetime(expiry_date) if expiry_date else ""
+        return self.call_sdk(
+            "get_quotes",
+            retryable=True,
+            stock_code=stock_code,
+            exchange_code=exchange_code,
+            product_type=product_type,
+            right=right,
+            strike_price=str(strike_price) if strike_price != "" else "",
+            expiry_date=expiry_iso,
+        )
+
+    @retry_api_call(max_attempts=3, initial_delay=0.5)
+    def get_historical_data_v2(self, interval: str, from_date: str, to_date: str,
+                               stock_code: str, exchange_code: str, product_type: str,
+                               expiry_date: str = "", right: str = "", strike_price: str = ""):
+        return self.call_sdk(
+            "get_historical_data_v2",
+            retryable=True,
+            interval=interval,
+            from_date=convert_to_breeze_iso_datetime(from_date),
+            to_date=convert_to_breeze_iso_datetime(to_date, end_of_day=True),
+            stock_code=stock_code,
+            exchange_code=exchange_code,
+            product_type=product_type,
+            expiry_date=convert_to_breeze_datetime(expiry_date) if expiry_date else "",
+            right=right,
+            strike_price=str(strike_price) if strike_price != "" else "",
+        )
+
+    @retry_api_call(max_attempts=3, initial_delay=0.5)
+    def get_option_chain_quotes(self, stock_code: str, exchange_code: str, expiry_date: str,
+                                right: str, strike_price: str = ""):
+        return self.call_sdk(
+            "get_option_chain_quotes",
+            retryable=True,
+            stock_code=stock_code,
+            exchange_code=exchange_code,
+            product_type="options",
+            expiry_date=convert_to_breeze_datetime(expiry_date),
+            right=right,
+            strike_price=str(strike_price) if strike_price != "" else "",
+        )
+
+    # ---- Portfolio and order wrappers ----
+
+    @retry_api_call(max_attempts=3, initial_delay=0.5)
+    def get_portfolio_holdings(self, exchange_code: str = ""):
+        return self.call_sdk("get_portfolio_holdings", retryable=True, exchange_code=exchange_code)
+
+    @retry_api_call(max_attempts=3, initial_delay=0.5)
+    def get_order_detail(self, exchange_code: str, order_id: str):
+        return self.call_sdk("get_order_detail", retryable=True, exchange_code=exchange_code, order_id=order_id)
+
+    @retry_api_call(max_attempts=3, initial_delay=0.5)
+    def get_demat_holdings(self):
+        return self.call_sdk("get_demat_holdings", retryable=True)
+
+    @retry_api_call(max_attempts=2, initial_delay=0.5)
+    def get_names(self, stock_code: str):
+        return self.call_sdk("get_names", retryable=True, stock_code=stock_code)
+
+    # ---- Funds and limits wrappers ----
+
+    @retry_api_call(max_attempts=2, initial_delay=0.5)
+    def get_margin_calculator(self, exchange_code: str, product_type: str, stock_code: str,
+                              expiry_date: str, right: str, strike_price: str, action: str,
+                              order_type: str, quantity: str, price: str = ""):
+        return self.call_sdk(
+            "get_margin_calculator",
+            retryable=True,
+            exchange_code=exchange_code,
+            product_type=product_type,
+            stock_code=stock_code,
+            expiry_date=convert_to_breeze_datetime(expiry_date) if expiry_date else "",
+            right=right,
+            strike_price=str(strike_price),
+            action=action,
+            order_type=order_type,
+            quantity=str(quantity),
+            price=str(price) if price else "",
+        )
+
+    # ---- Trading utility wrappers ----
+
+    def place_order_raw(self, **kwargs):
+        """Raw pass-through order API for advanced UI flows (non-retry by design)."""
+        return self.call_sdk("place_order", retryable=False, **kwargs)
+
+    def cancel_order_raw(self, **kwargs):
+        """Raw pass-through cancel API (non-retry by design)."""
+        return self.call_sdk("cancel_order", retryable=False, **kwargs)
+
+    def modify_order_raw(self, **kwargs):
+        """Raw pass-through modify API (non-retry by design)."""
+        return self.call_sdk("modify_order", retryable=False, **kwargs)
+
+    # ---- WebSocket wrappers ----
+
+    def ws_connect(self):
+        """Open Breeze websocket connection."""
+        return self.call_sdk("ws_connect", retryable=False)
+
+    def ws_disconnect(self):
+        """Close Breeze websocket connection."""
+        return self.call_sdk("ws_disconnect", retryable=False)
+
+    def subscribe_feeds(self, **kwargs):
+        """Subscribe feeds using Breeze SDK-compatible kwargs."""
+        return self.call_sdk("subscribe_feeds", retryable=False, **kwargs)
+
+    def unsubscribe_feeds(self, **kwargs):
+        """Unsubscribe feeds using Breeze SDK-compatible kwargs."""
+        return self.call_sdk("unsubscribe_feeds", retryable=False, **kwargs)
+
+    # ---- Discoverability ----
+
+    def list_available_sdk_methods(self) -> List[str]:
+        """List callable public methods exposed by installed Breeze SDK client."""
+        self._require_connection()
+        methods: List[str] = []
+        for name in dir(self.breeze):
+            if name.startswith("_"):
+                continue
+            attr = getattr(self.breeze, name)
+            if callable(attr):
+                methods.append(name)
+        return sorted(methods)
