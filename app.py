@@ -1193,6 +1193,22 @@ def page_sell_options():
                 gc1.metric("Vega/1%", f"₹{abs(greeks['vega'] * qty):.0f}")
                 gc2.metric("IV", f"{iv*100:.1f}%")
 
+    # ── Pre-trade cost preview ───────────────────────────────
+    render_order_cost_preview(
+        client=client,
+        stock_code=cfg.api_code,
+        exchange_code=cfg.exchange,
+        product="options",
+        order_type=otp.lower(),
+        price=lp,
+        action="sell",
+        quantity=qty,
+        expiry_date=expiry,
+        right="call" if oc == "CE" else "put",
+        strike_price=str(int(strike)),
+        key_prefix="sell_preview",
+    )
+
     # ── Order placement ───────────────────────────────────────
     st.markdown("---")
     danger_box("⚠️ <b>RISK WARNING:</b> Option selling carries <b>unlimited risk</b>. "
@@ -1456,6 +1472,21 @@ def page_square_off():
         )
 
     order_busy = st.session_state.get("_order_busy", False)
+    render_order_cost_preview(
+        client=client,
+        stock_code=sel.get("stock_code", ""),
+        exchange_code=sel.get("exchange_code", ""),
+        product="options",
+        order_type=ot.lower(),
+        price=pr,
+        action=sel["_close"],
+        quantity=sq,
+        expiry_date=sel.get("expiry_date", ""),
+        right="call" if C.normalize_option_type(sel.get("right", "")) == "CE" else "put",
+        strike_price=str(safe_int(sel.get("strike_price", 0))),
+        key_prefix="sq_preview",
+    )
+
     btn_label = (
         f"🔄 {sel['_close'].upper()} {sq_lots} lot{'s' if sq_lots > 1 else ''} "        f"({sq} qty) — {C.api_code_to_display(sel.get('stock_code', ''))} "        f"{sel.get('strike_price')} {C.normalize_option_type(sel.get('right', ''))}"
     )
@@ -1874,6 +1905,29 @@ def page_strategy_builder():
         st.write(f"**Strategy:** {sname_exec}")
         st.write(f"**Instrument:** {scfg.display_name} | **Expiry:** {format_expiry_short(sexpiry)}")
         danger_box("⚠️ This will place <b>real orders</b> for all legs simultaneously.")
+
+        st.markdown("**Estimated Charges (per leg):**")
+        total_preview_charges = 0.0
+        for i, leg in enumerate(legs):
+            st.caption(f"Leg {i+1}: {leg.action.upper()} {leg.strike} {leg.option_type} × {leg.quantity}")
+            prev = render_order_cost_preview(
+                client=client,
+                stock_code=scfg.api_code,
+                exchange_code=scfg.exchange,
+                product="options",
+                order_type="market",
+                price=0.0,
+                action=leg.action,
+                quantity=leg.quantity,
+                expiry_date=sexpiry,
+                right="call" if leg.option_type == "CE" else "put",
+                strike_price=str(leg.strike),
+                key_prefix=f"strat_preview_{i}",
+            )
+            if isinstance(prev, dict):
+                total_preview_charges += float(prev.get("total_brokerage", 0) or 0)
+        st.info(f"Approx total previewed charges: ₹{total_preview_charges:,.2f}")
+
         ack = st.checkbox("I confirm all legs and want to execute", key="se_ack")
         if ack and st.button("⚡ Execute All Legs", type="primary", use_container_width=True):
             ok, fail = 0, 0
@@ -2304,6 +2358,104 @@ def page_historical_data():
                 if st.button("🗑️ Purge Expired Cache"):
                     n = get_historical_cache().purge_expired()
                     st.success(f"Purged {n} expired entries.")
+
+
+def render_order_cost_preview(
+    client: BreezeAPIClient,
+    stock_code: str,
+    exchange_code: str,
+    product: str,
+    order_type: str,
+    price: float,
+    action: str,
+    quantity: int,
+    expiry_date: str = "",
+    right: str = "",
+    strike_price: str = "",
+    auto_fetch: bool = False,
+    key_prefix: str = "preview",
+) -> Optional[Dict]:
+    """Render a pre-trade brokerage breakdown widget."""
+    price_str = str(price) if order_type == "limit" and price > 0 else ""
+
+    _, col_btn = st.columns([3, 1])
+    with col_btn:
+        fetch_preview = st.button("💰 Get Cost Estimate", key=f"{key_prefix}_btn") or auto_fetch
+
+    if not fetch_preview:
+        return None
+
+    with st.spinner("Fetching cost estimate..."):
+        resp = client.preview_order(
+            stock_code=stock_code,
+            exchange_code=exchange_code,
+            product=product,
+            order_type=order_type,
+            price=price_str,
+            action=action,
+            quantity=str(quantity),
+            expiry_date=expiry_date,
+            right=right.lower() if right else "",
+            strike_price=str(strike_price) if strike_price else "",
+        )
+
+    if not resp.get("success"):
+        st.warning(f"Could not fetch cost estimate: {resp.get('message', 'Unknown')}")
+        return None
+
+    success = resp.get("data", {})
+    if isinstance(success, dict) and "Success" in success:
+        success = success["Success"]
+    if not isinstance(success, dict):
+        return None
+
+    brokerage = float(success.get("brokerage", 0) or 0)
+    stt = float(success.get("stt", 0) or 0)
+    exchange_charges = float(success.get("exchange_turnover_charges", 0) or 0)
+    stamp_duty = float(success.get("stamp_duty", 0) or 0)
+    sebi = float(success.get("sebi_charges", 0) or 0)
+    gst = float(success.get("gst", 0) or 0)
+    total = float(success.get("total_brokerage", 0) or 0)
+
+    order_value = price * quantity if price > 0 else 0
+    net_value = order_value - total if action == "sell" else order_value + total
+
+    st.markdown("""
+    <style>
+    .cost-preview { background:#1a1f2e; border:1px solid #30363d;
+                    border-radius:8px; padding:1rem; margin:.5rem 0; }
+    .cost-row { display:flex; justify-content:space-between;
+                padding:3px 0; border-bottom:1px solid #30363d22; }
+    .cost-total { font-weight:700; color:#388bfd; font-size:1.1rem;
+                  border-top:2px solid #388bfd; padding-top:6px; margin-top:4px; }
+    </style>
+    """, unsafe_allow_html=True)
+
+    order_value_pct = f" ({total/order_value*100:.2f}%)" if order_value > 0 else ""
+    net_label = "Net Premium Received" if action == "sell" else "Net Cost (incl. charges)"
+
+    st.markdown(f"""
+    <div class="cost-preview">
+      <div style="font-weight:700;margin-bottom:.5rem">💰 Order Cost Preview</div>
+      <div class="cost-row"><span>Order Value</span><span>₹{order_value:,.2f}</span></div>
+      <div class="cost-row"><span>Brokerage</span><span>₹{brokerage:,.2f}</span></div>
+      <div class="cost-row"><span>STT</span><span>₹{stt:,.2f}</span></div>
+      <div class="cost-row"><span>Exchange Charges</span><span>₹{exchange_charges:,.2f}</span></div>
+      <div class="cost-row"><span>Stamp Duty</span><span>₹{stamp_duty:,.2f}</span></div>
+      <div class="cost-row"><span>SEBI Charges</span><span>₹{sebi:,.2f}</span></div>
+      <div class="cost-row"><span>GST (18%)</span><span>₹{gst:,.2f}</span></div>
+      <div class="cost-row cost-total">
+        <span>Total Charges</span>
+        <span>₹{total:,.2f}{order_value_pct}</span>
+      </div>
+      <div class="cost-row" style="color:#28a745;font-weight:600">
+        <span>{net_label}</span>
+        <span>₹{net_value:,.2f}</span>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    return success
 
 
 def render_gtt_order_cost_preview(

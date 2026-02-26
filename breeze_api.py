@@ -831,6 +831,85 @@ class BreezeAPIClient:
             price=str(price) if price else "",
         )
 
+
+
+    def preview_order(
+        self,
+        stock_code: str,
+        exchange_code: str,
+        product: str,
+        order_type: str,
+        price: str,
+        action: str,
+        quantity: str,
+        special_flag: str = "N",
+        stoploss: str = "",
+        order_rate_fresh: str = "",
+        expiry_date: str = "",
+        right: str = "",
+        strike_price: str = "",
+    ) -> Dict:
+        """Preview order charges before placement."""
+        self._require_connection()
+        if expiry_date:
+            expiry_date = convert_to_breeze_datetime(expiry_date)
+
+        return self.call_sdk(
+            "preview_order",
+            retryable=True,
+            stock_code=stock_code,
+            exchange_code=exchange_code,
+            product=product,
+            order_type=order_type.lower(),
+            price=price,
+            action=action.lower(),
+            quantity=str(quantity),
+            special_flag=special_flag,
+            stoploss=stoploss,
+            order_rate_fresh=order_rate_fresh,
+            expiry_date=expiry_date,
+            right=right.lower() if right else "",
+            strike_price=str(strike_price) if strike_price else "",
+        )
+
+    def limit_calculator(
+        self,
+        strike_price: str,
+        product_type: str,
+        expiry_date: str,
+        underlying: str,
+        exchange_code: str,
+        order_flow: str,
+        stop_loss_trigger: str,
+        option_type: str,
+        source_flag: str = "P",
+        limit_rate: str = "",
+        order_reference: str = "",
+        available_quantity: str = "",
+        market_type: str = "limit",
+        fresh_order_limit: str = "",
+    ) -> Dict:
+        """Calculate valid limit price for OptionPlus orders."""
+        self._require_connection()
+        return self.call_sdk(
+            "limit_calculator",
+            retryable=True,
+            strike_price=str(strike_price),
+            product_type=product_type,
+            expiry_date=convert_to_breeze_datetime(expiry_date) if expiry_date else "",
+            underlying=underlying,
+            exchange_code=exchange_code,
+            order_flow=order_flow,
+            stop_loss_trigger=str(stop_loss_trigger),
+            option_type=option_type,
+            source_flag=source_flag,
+            limit_rate=str(limit_rate),
+            order_reference=order_reference,
+            available_quantity=str(available_quantity),
+            market_type=market_type,
+            fresh_order_limit=str(fresh_order_limit),
+        )
+
     # ---- Trading utility wrappers ----
 
     def place_order_raw(self, **kwargs):
