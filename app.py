@@ -3,8 +3,8 @@ Breeze Options Trader PRO v10.0
 Production-grade terminal for ICICI Breeze Options Trading.
 
 Enhanced features:
-- 11 pages: Dashboard, Option Chain, Sell, Square Off, Orders, Positions,
-            Strategy Builder, Analytics, Risk Monitor, Watchlist, Settings
+- 12 pages: Dashboard, Option Chain, Sell, Square Off, Orders, Positions,
+            Strategy Builder, Analytics, Historical Data, Risk Monitor, Watchlist, Settings
 - Auto-refresh with live countdown
 - IV Smile + Term Structure charts
 - Stress Testing / Scenario Analysis
@@ -40,7 +40,8 @@ from helpers import (
 from analytics import (
     calculate_greeks, estimate_implied_volatility,
     calculate_portfolio_greeks, stress_test_portfolio,
-    calculate_iv_smile, calculate_max_drawdown, calculate_var
+    calculate_iv_smile, calculate_max_drawdown, calculate_var,
+    monte_carlo_var, rolling_realized_vol, iv_vs_rv_spread, portfolio_correlation_matrix
 )
 from session_manager import (
     Credentials, SessionState, CacheManager, Notifications
@@ -54,6 +55,9 @@ from strategies import (
 )
 from persistence import TradeDB
 from risk_monitor import RiskMonitor, Alert
+from alerting import (
+    AlertConfig, AlertDispatcher, TelegramDispatcher, EmailDispatcher
+)
 
 # ─── Logging ──────────────────────────────────────────────────
 # Ensure logs directory exists before FileHandler is created.
@@ -196,14 +200,14 @@ st.markdown(THEME_CSS, unsafe_allow_html=True)
 PAGES = [
     "Dashboard", "Option Chain", "Sell Options", "Square Off",
     "Orders & Trades", "Positions", "Strategy Builder",
-    "Analytics", "Risk Monitor", "Watchlist", "Settings"
+    "Analytics", "📈 Futures Trading", "📊 Historical Data", "⏰ GTT Orders", "Risk Monitor", "Watchlist", "Settings"
 ]
 
 ICONS = {
     "Dashboard": "🏠", "Option Chain": "📊",
     "Sell Options": "💰", "Square Off": "🔄",
     "Orders & Trades": "📋", "Positions": "📍",
-    "Strategy Builder": "🎯", "Analytics": "📈",
+    "Strategy Builder": "🎯", "Analytics": "📈", "📈 Futures Trading": "📈", "📊 Historical Data": "📊", "⏰ GTT Orders": "⏰",
     "Risk Monitor": "🛡️", "Watchlist": "👁️", "Settings": "⚙️"
 }
 
@@ -1067,6 +1071,22 @@ def page_sell_options():
                 gc1.metric("Vega/1%", f"₹{abs(greeks['vega'] * qty):.0f}")
                 gc2.metric("IV", f"{iv*100:.1f}%")
 
+    # ── Pre-trade cost preview ───────────────────────────────
+    render_order_cost_preview(
+        client=client,
+        stock_code=cfg.api_code,
+        exchange_code=cfg.exchange,
+        product="options",
+        order_type=otp.lower(),
+        price=lp,
+        action="sell",
+        quantity=qty,
+        expiry_date=expiry,
+        right="call" if oc == "CE" else "put",
+        strike_price=str(int(strike)),
+        key_prefix="sell_preview",
+    )
+
     # ── Order placement ───────────────────────────────────────
     st.markdown("---")
     danger_box("⚠️ <b>RISK WARNING:</b> Option selling carries <b>unlimited risk</b>. "
@@ -1201,11 +1221,11 @@ def page_square_off():
                     continue
                 # Clamp to exact multiple of lot size
                 qty_to_close = lots_to_close * lot_size
-                r = client.square_off(
-                    sc, e.get("exchange_code"),
-                    e.get("expiry_date"), safe_int(e.get("strike_price")),
-                    C.normalize_option_type(e.get("right", "")),
-                    qty_to_close, e["_pt"], "market", 0.0
+                r = client.square_off_option_position(
+                    e,
+                    quantity=qty_to_close,
+                    order_type="market",
+                    limit_price=0.0,
                 )
                 if r["success"]:
                     success_count += 1
@@ -1330,6 +1350,21 @@ def page_square_off():
         )
 
     order_busy = st.session_state.get("_order_busy", False)
+    render_order_cost_preview(
+        client=client,
+        stock_code=sel.get("stock_code", ""),
+        exchange_code=sel.get("exchange_code", ""),
+        product="options",
+        order_type=ot.lower(),
+        price=pr,
+        action=sel["_close"],
+        quantity=sq,
+        expiry_date=sel.get("expiry_date", ""),
+        right="call" if C.normalize_option_type(sel.get("right", "")) == "CE" else "put",
+        strike_price=str(safe_int(sel.get("strike_price", 0))),
+        key_prefix="sq_preview",
+    )
+
     btn_label = (
         f"🔄 {sel['_close'].upper()} {sq_lots} lot{'s' if sq_lots > 1 else ''} "        f"({sq} qty) — {C.api_code_to_display(sel.get('stock_code', ''))} "        f"{sel.get('strike_price')} {C.normalize_option_type(sel.get('right', ''))}"
     )
@@ -1338,11 +1373,11 @@ def page_square_off():
         st.session_state._order_busy = True
         try:
             with st.spinner("Squaring off..."):
-                r = client.square_off(
-                    sel.get("stock_code"), sel.get("exchange_code"),
-                    sel.get("expiry_date"), safe_int(sel.get("strike_price")),
-                    C.normalize_option_type(sel.get("right", "")),
-                    sq, sel["_pt"], ot.lower(), pr
+                r = client.square_off_option_position(
+                    sel,
+                    quantity=sq,
+                    order_type=ot.lower(),
+                    limit_price=pr,
                 )
                 if r["success"]:
                     oid = APIResponse(r).get("order_id", "?")
@@ -1748,6 +1783,29 @@ def page_strategy_builder():
         st.write(f"**Strategy:** {sname_exec}")
         st.write(f"**Instrument:** {scfg.display_name} | **Expiry:** {format_expiry_short(sexpiry)}")
         danger_box("⚠️ This will place <b>real orders</b> for all legs simultaneously.")
+
+        st.markdown("**Estimated Charges (per leg):**")
+        total_preview_charges = 0.0
+        for i, leg in enumerate(legs):
+            st.caption(f"Leg {i+1}: {leg.action.upper()} {leg.strike} {leg.option_type} × {leg.quantity}")
+            prev = render_order_cost_preview(
+                client=client,
+                stock_code=scfg.api_code,
+                exchange_code=scfg.exchange,
+                product="options",
+                order_type="market",
+                price=0.0,
+                action=leg.action,
+                quantity=leg.quantity,
+                expiry_date=sexpiry,
+                right="call" if leg.option_type == "CE" else "put",
+                strike_price=str(leg.strike),
+                key_prefix=f"strat_preview_{i}",
+            )
+            if isinstance(prev, dict):
+                total_preview_charges += float(prev.get("total_brokerage", 0) or 0)
+        st.info(f"Approx total previewed charges: ₹{total_preview_charges:,.2f}")
+
         ack = st.checkbox("I confirm all legs and want to execute", key="se_ack")
         if ack and st.button("⚡ Execute All Legs", type="primary", use_container_width=True):
             ok, fail = 0, 0
@@ -1786,7 +1844,7 @@ def page_analytics():
     if not client:
         return
 
-    t1, t2, t3, t4 = st.tabs(["📊 Portfolio Greeks", "💰 Margin", "📈 Performance", "🧪 Stress Test"])
+    t1, t2, t3, t4, t5 = st.tabs(["📊 Portfolio Greeks", "💰 Margin", "📈 Performance", "🧪 Stress Test", "🎲 Monte Carlo VaR"])
 
     with t1:
         all_pos = get_cached_positions(client)
@@ -1907,6 +1965,27 @@ def page_analytics():
                 mc[2].metric("Worst Day", format_currency(min(daily_pnl)))
                 mc[3].metric("Max Drawdown", format_currency(calculate_max_drawdown(
                     list(hist_df.get("realized_pnl", pd.Series()).cumsum()))))
+
+            close_series = pd.to_numeric(hist_df.get("close", pd.Series(dtype=float)), errors="coerce")
+            if close_series.notna().sum() >= 21:
+                rv20 = rolling_realized_vol(close_series, window=20)
+                rv30 = rolling_realized_vol(close_series, window=30)
+                rv_df = pd.DataFrame({"rv_20": rv20, "rv_30": rv30}).dropna()
+                if not rv_df.empty:
+                    st.line_chart(rv_df, use_container_width=True)
+                    spread = iv_vs_rv_spread(current_iv=15.0, hist_close=close_series, window=20)
+                    st.caption(f"IV-RV Spread: IV {spread['iv']:.2f}% | RV {spread['rv']:.2f}% | Spread {spread['spread']:+.2f}% ({spread['spread_interpretation']})")
+
+            symbol_groups = hist_df.groupby("symbol") if "symbol" in hist_df.columns else []
+            corr_input = {}
+            for sym, gdf in symbol_groups:
+                s_close = pd.to_numeric(gdf.get("close", pd.Series(dtype=float)), errors="coerce").dropna()
+                if len(s_close) >= 15:
+                    corr_input[str(sym)] = s_close.reset_index(drop=True)
+            corr = portfolio_correlation_matrix(corr_input)
+            if not corr.empty:
+                st.markdown("**Symbol Correlation Matrix**")
+                st.dataframe(corr.style.background_gradient(cmap='RdYlGn', axis=None), use_container_width=True)
         else:
             empty_state("📈", "No P&L history yet", "Trade to build history")
 
@@ -1937,6 +2016,841 @@ def page_analytics():
                 st.dataframe(stress_df.style.background_gradient(cmap='RdYlGn', axis=None),
                              use_container_width=True)
 
+
+    with t5:
+        st.markdown("**Monte Carlo Value-at-Risk (1-day, 95% confidence)**")
+        positions = client.get_positions().get("data", {}).get("Success", []) or []
+        if not positions:
+            st.info("No open positions found.")
+        else:
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                mc_days = st.selectbox("Horizon", [1, 3, 5], key="mc_days")
+            with col2:
+                mc_sims = st.selectbox("Simulations", [5_000, 10_000, 50_000], index=1, key="mc_sims")
+            with col3:
+                mc_vol = st.number_input("Portfolio IV %", value=15.0, step=0.5, key="mc_vol")
+
+            spot = st.session_state.get("last_spot", 22000)
+            if st.button("▶ Run Monte Carlo", key="mc_run_btn"):
+                with st.spinner(f"Running {mc_sims:,} simulations..."):
+                    var_result = monte_carlo_var(
+                        positions=positions,
+                        spot_price=float(spot),
+                        volatility_annual=float(mc_vol) / 100,
+                        days=int(mc_days),
+                        simulations=int(mc_sims),
+                    )
+
+                col_a, col_b, col_c, col_d = st.columns(4)
+                col_a.metric("VaR 95%", f"₹{var_result['var_95']:,.0f}", help="Loss not exceeded 95% of the time")
+                col_b.metric("VaR 99%", f"₹{var_result['var_99']:,.0f}", help="Loss not exceeded 99% of the time")
+                col_c.metric("CVaR 95%", f"₹{var_result['cvar_95']:,.0f}", help="Expected loss when VaR is breached")
+                col_d.metric("Expected P&L", f"₹{var_result['expected_pnl']:,.0f}")
+
+                col_e, col_f = st.columns(2)
+                col_e.metric("Worst Case", f"₹{var_result['worst_case']:,.0f}")
+                col_f.metric("Best Case", f"₹{var_result['best_case']:,.0f}")
+
+
+@error_handler
+@require_auth
+def page_futures_trading():
+    """Futures Trading page."""
+    st.markdown('<div class="page-header">📈 Futures Trading</div>', unsafe_allow_html=True)
+    from futures import (
+        get_futures_expiries, calculate_basis, estimate_fair_value_futures,
+        FuturesOrderRequest, validate_futures_order,
+        build_futures_place_order_kwargs, build_roll_plan, execute_roll,
+        render_basis_chart,
+    )
+
+    client: BreezeAPIClient = st.session_state.get("client")
+    if not client or not client.is_connected():
+        st.warning("Connect to Breeze API first.")
+        return
+
+    tab1, tab2, tab3, tab4 = st.tabs(["📊 Quotes", "🛒 Buy / Sell", "🔄 Roll Position", "📉 Basis Chart"])
+
+    col_inst, col_exch = st.columns([2, 1])
+    with col_inst:
+        instrument = st.selectbox("Instrument", list(C.INSTRUMENTS.keys()), key="fut_instrument")
+        cfg = C.INSTRUMENTS[instrument]
+    with col_exch:
+        exchange = st.text_input("Exchange", value="NFO", key="fut_exchange")
+
+    expiries = get_futures_expiries(instrument, count=3, exchange=exchange)
+
+    with tab1:
+        if st.button("🔄 Refresh Quotes", key="fut_refresh_quotes"):
+            with st.spinner("Fetching futures quotes..."):
+                quotes = {}
+                for exp in expiries:
+                    resp = client.get_futures_quote(cfg.api_code, exchange, exp)
+                    if resp.get("success"):
+                        data = (resp.get("data", {}) or {}).get("Success") or []
+                        if isinstance(data, list) and data:
+                            quotes[exp] = data[0]
+
+                spot_resp = client.get_quotes(
+                    stock_code=cfg.spot_code or cfg.api_code,
+                    exchange_code=cfg.spot_exchange or "NSE",
+                    product_type="cash",
+                )
+                spot = 0.0
+                if spot_resp.get("success"):
+                    sd = (spot_resp.get("data", {}) or {}).get("Success") or [{}]
+                    try:
+                        spot = float((sd[0] if sd else {}).get("ltp", 0) or 0)
+                    except Exception:
+                        pass
+                st.session_state["fut_quotes"] = quotes
+                st.session_state["fut_spot"] = spot
+
+        quotes = st.session_state.get("fut_quotes", {})
+        spot = st.session_state.get("fut_spot", 0.0)
+        if not quotes:
+            st.info("Click **Refresh Quotes** to load live futures prices.")
+        else:
+            st.metric("Spot Price", f"₹{spot:,.2f}" if spot else "—")
+            st.divider()
+            for exp, q in quotes.items():
+                ltp = float(q.get("ltp", 0) or 0)
+                chg = float(q.get("change_in_price", 0) or 0)
+                oi = int(float(q.get("open_interest", 0) or 0))
+                basis = calculate_basis(ltp, spot) if spot else 0
+                dte = (datetime.strptime(exp[:10], "%Y-%m-%d") - datetime.now()).days
+                fair = estimate_fair_value_futures(spot, dte) if spot else 0
+                c1, c2, c3, c4, c5 = st.columns(5)
+                label = datetime.strptime(exp[:10], "%Y-%m-%d").strftime("%b %Y")
+                c1.metric(f"{label}", f"₹{ltp:,.2f}", delta=f"{chg:+.2f}")
+                c2.metric("Basis", f"₹{basis:+.2f}")
+                c3.metric("Fair Value", f"₹{fair:,.2f}" if fair else "—")
+                c4.metric("OI", f"{oi:,}")
+                c5.metric("DTE", f"{dte}d")
+
+    with tab2:
+        c1, c2 = st.columns(2)
+        with c1:
+            expiry = st.selectbox("Expiry", expiries, key="fut_expiry_trade")
+            action = st.radio("Action", ["BUY", "SELL"], horizontal=True, key="fut_action")
+        with c2:
+            lots = st.number_input("Lots", min_value=1, value=1, step=1, key="fut_lots")
+            quantity = lots * cfg.lot_size
+            st.caption(f"Qty: {quantity} contracts")
+
+        order_type = st.selectbox("Order Type", ["Market", "Limit", "Stop-Market", "Stop-Limit"], key="fut_order_type")
+        order_type_map = {"Market": "market", "Limit": "limit", "Stop-Market": "stop_market", "Stop-Limit": "stop_limit"}
+        ot = order_type_map[order_type]
+        limit_price = 0.0
+        stop_price = 0.0
+        if ot in ("limit", "stop_limit"):
+            limit_price = st.number_input("Limit Price ₹", min_value=0.01, value=22000.0, step=10.0, key="fut_limit")
+        if ot in ("stop_market", "stop_limit"):
+            stop_price = st.number_input("Stop Trigger ₹", min_value=0.01, value=21800.0, step=10.0, key="fut_stop")
+
+        funds_resp = client.get_funds()
+        available_margin = 0.0
+        if funds_resp.get("success"):
+            d = (funds_resp.get("data", {}) or {}).get("Success") or {}
+            if isinstance(d, list) and d:
+                d = d[0]
+            if isinstance(d, dict):
+                available_margin = float(d.get("total_bank_balance", 0) or 0)
+
+        req = FuturesOrderRequest(cfg.api_code, exchange, expiry, action.lower(), lots, cfg.lot_size, ot, limit_price, stop_price)
+        is_valid, err = validate_futures_order(req, available_margin)
+        if not is_valid:
+            st.error(f"❌ {err}")
+
+        price_proxy = limit_price or stop_price or 22000
+        est_margin = quantity * price_proxy * 0.15
+        st.caption(f"Est. margin required: ₹{est_margin:,.0f} | Available: ₹{available_margin:,.0f}")
+
+        if st.button(f"{'🟢 BUY' if action == 'BUY' else '🔴 SELL'} Futures", type="primary", disabled=not is_valid, key="fut_place_btn"):
+            kwargs = build_futures_place_order_kwargs(req)
+            with st.spinner("Placing futures order..."):
+                resp = client.place_order(**kwargs)
+            if resp.get("success"):
+                st.success("✅ Futures order placed!")
+            else:
+                st.error(f"❌ {resp.get('message', 'Order failed')}")
+
+    with tab3:
+        st.markdown("**Roll a futures position from near-month to far-month expiry.**")
+        c1, c2 = st.columns(2)
+        with c1:
+            near_exp = st.selectbox("Close (Near Month)", expiries, index=0, key="roll_near")
+        with c2:
+            far_opts = [e for e in expiries if e != near_exp]
+            far_exp = st.selectbox("Open (Far Month)", far_opts, key="roll_far")
+
+        roll_lots = st.number_input("Lots to Roll", min_value=1, value=1, key="roll_lots")
+        position_side = st.radio("Current Position", ["Long (Buy)", "Short (Sell)"], horizontal=True, key="roll_side")
+        current_action = "buy" if "Long" in position_side else "sell"
+        roll_order_type = st.selectbox("Roll Order Type", ["market", "limit"], key="roll_ot")
+
+        if st.button("📊 Preview Roll", key="roll_preview_btn"):
+            with st.spinner("Fetching quotes for roll preview..."):
+                st.session_state["roll_plan"] = build_roll_plan(client, cfg.api_code, exchange, near_exp, far_exp, roll_lots, cfg.lot_size)
+
+        roll_plan = st.session_state.get("roll_plan")
+        if roll_plan:
+            sign = "+" if roll_plan.roll_cost >= 0 else ""
+            cost_total = abs(roll_plan.roll_cost) * roll_lots * cfg.lot_size
+            st.info(
+                f"Roll/contract: ₹{sign}{roll_plan.roll_cost:.2f} ({sign}{roll_plan.roll_cost_pct:.2f}%) | "
+                f"Near: ₹{roll_plan.near_ltp:,.2f} | Far: ₹{roll_plan.far_ltp:,.2f} | "
+                f"Total {'Cost' if roll_plan.roll_cost > 0 else 'Credit'}: ₹{cost_total:,.2f}"
+            )
+            if st.button("✅ Execute Roll", type="primary", key="roll_exec_btn"):
+                close_resp, open_resp = execute_roll(client, roll_plan, current_action, roll_order_type)
+                if close_resp.get("success") and open_resp.get("success"):
+                    st.success("✅ Roll executed successfully!")
+                else:
+                    if not close_resp.get("success"):
+                        st.error(f"❌ Close order failed: {close_resp.get('message')}")
+                    if not open_resp.get("success"):
+                        st.error(f"❌ Open order failed: {open_resp.get('message')}")
+
+    with tab4:
+        if st.button("🔄 Load Basis Chart", key="fut_basis_btn"):
+            with st.spinner("Fetching futures quotes..."):
+                futures_data: Dict[str, float] = {}
+                for exp in expiries:
+                    resp = client.get_futures_quote(cfg.api_code, exchange, exp)
+                    if resp.get("success"):
+                        sd = (resp.get("data", {}) or {}).get("Success") or []
+                        if isinstance(sd, list) and sd:
+                            try:
+                                futures_data[exp] = float(sd[0].get("ltp", 0) or 0)
+                            except Exception:
+                                pass
+                spot_ltp = st.session_state.get("fut_spot", 0.0)
+                st.session_state["basis_data"] = (futures_data, spot_ltp)
+
+        basis_data = st.session_state.get("basis_data")
+        if basis_data:
+            futures_data, spot_ltp = basis_data
+            fig = render_basis_chart(futures_data, spot_ltp, instrument)
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Click **Load Basis Chart** above.")
+
+# ═══════════════════════════════════════════════════════════════
+# PAGE: HISTORICAL DATA
+# ═══════════════════════════════════════════════════════════════
+
+@error_handler
+@require_auth
+def page_historical_data():
+    """Historical Data & Technical Analysis page."""
+    st.markdown('<div class="page-header">📊 Historical Data & Charts</div>', unsafe_allow_html=True)
+
+    from historical import HistoricalDataFetcher, get_historical_cache
+    from charts import render_candlestick, render_technical_subplot
+    import ta_indicators as ta
+    import plotly.graph_objects as go
+
+    client: BreezeAPIClient = st.session_state.get("client")
+    if not client or not client.is_connected():
+        st.warning("Connect to Breeze API first.")
+        return
+
+    fetcher = HistoricalDataFetcher(client)
+
+    tab1, tab2, tab3, tab4 = st.tabs(["📊 Price Chart", "📈 Options History", "🔢 Technical Analysis", "📥 Data Export"])
+
+    with st.expander("⚙️ Instrument Settings", expanded=True):
+        col1, col2, col3 = st.columns([2, 1, 1])
+        with col1:
+            instrument = st.selectbox("Instrument", list(C.INSTRUMENTS.keys()), key="hist_instrument")
+            cfg = C.INSTRUMENTS[instrument]
+        with col2:
+            product_type = st.selectbox("Product", ["cash", "futures", "options"], key="hist_product")
+        with col3:
+            exchange = st.text_input("Exchange", value=cfg.exchange, key="hist_exchange")
+
+        if product_type == "options":
+            col4, col5, col6 = st.columns(3)
+            with col4:
+                expiry_options = C.get_next_expiries(instrument, count=6)
+                expiry = st.selectbox("Expiry", expiry_options, key="hist_expiry")
+            with col5:
+                right = st.selectbox("Right", ["call", "put"], key="hist_right")
+            with col6:
+                atm = st.number_input(
+                    "Strike",
+                    value=int(st.session_state.get("last_spot", 22000) // cfg.strike_gap * cfg.strike_gap),
+                    step=cfg.strike_gap,
+                    key="hist_strike",
+                )
+            expiry_date = expiry
+            right_param = right
+            strike_param = str(int(atm))
+        else:
+            expiry_date = right_param = strike_param = ""
+
+        col7, col8, col9 = st.columns(3)
+        with col7:
+            from_date = st.date_input("From Date", value=date.today() - timedelta(days=365), key="hist_from")
+        with col8:
+            to_date = st.date_input("To Date", value=date.today(), key="hist_to")
+        with col9:
+            interval = st.selectbox("Interval", ["1day", "30minute", "5minute", "1minute"], key="hist_interval")
+
+        fetch_btn = st.button("📥 Fetch Data", type="primary", key="hist_fetch")
+
+    if "hist_df" not in st.session_state:
+        st.session_state["hist_df"] = None
+
+    if fetch_btn:
+        with st.spinner("Fetching historical data..."):
+            try:
+                df = fetcher.fetch(
+                    stock_code=cfg.api_code,
+                    exchange_code=exchange,
+                    product_type=product_type,
+                    from_date=str(from_date),
+                    to_date=str(to_date),
+                    interval=interval,
+                    expiry_date=expiry_date,
+                    right=right_param,
+                    strike_price=strike_param,
+                )
+                st.session_state["hist_df"] = df
+                if df.empty:
+                    st.warning("No data returned for the selected parameters.")
+                else:
+                    st.success(f"✅ Fetched {len(df):,} candles ({from_date} → {to_date})")
+                    st.caption(f"API calls used: {fetcher.last_api_calls}")
+            except Exception as e:
+                st.error(f"Fetch failed: {e}")
+                log.error(f"Historical fetch error: {e}", exc_info=True)
+
+    df = st.session_state.get("hist_df")
+
+    with tab1:
+        if df is None:
+            st.info("Configure instrument settings above and click **Fetch Data**.")
+        elif df.empty:
+            st.warning("No data available for the selected parameters.")
+        else:
+            col_a, col_b, col_c = st.columns(3)
+            with col_a:
+                st.radio("Chart Type", ["Candlestick", "Line", "OHLC"], horizontal=True, key="chart_type")
+            with col_b:
+                emas = st.multiselect("EMA Overlays", [9, 20, 50, 100, 200], default=[20, 50], key="chart_emas")
+            with col_c:
+                show_bb = st.checkbox("Bollinger Bands", key="chart_bb")
+                show_vwap = st.checkbox("VWAP", key="chart_vwap")
+                show_sr = st.checkbox("Support/Resistance", key="chart_sr")
+
+            title = (
+                f"{instrument} {'CALL' if right_param == 'call' else 'PUT' if right_param == 'put' else ''}"
+                f"{' ' + strike_param if strike_param else ''} | {interval} | {str(from_date)} → {str(to_date)}"
+            ).strip()
+
+            fig = render_candlestick(
+                df,
+                title=title,
+                show_volume=True,
+                show_ema=emas if emas else None,
+                show_bb=show_bb,
+                show_vwap=show_vwap,
+                support_resistance=show_sr,
+                height=550,
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+            col1, col2, col3, col4, col5 = st.columns(5)
+            col1.metric("Period High", f"₹{df['high'].max():,.2f}")
+            col2.metric("Period Low", f"₹{df['low'].min():,.2f}")
+            col3.metric("Period Change", f"{(df['close'].iloc[-1] / df['close'].iloc[0] - 1) * 100:.2f}%")
+            col4.metric("Avg Volume", f"{df['volume'].mean():,.0f}")
+            col5.metric("Candles", f"{len(df):,}")
+
+    with tab2:
+        st.markdown("**Compare historical option price vs underlying index spot.**")
+        if df is None or df.empty:
+            st.info("Fetch data in the Price Chart tab first.")
+        elif product_type == "options":
+            try:
+                with st.spinner("Fetching spot data for comparison..."):
+                    spot_df = fetcher.fetch(
+                        stock_code=cfg.spot_code or cfg.api_code,
+                        exchange_code=cfg.spot_exchange or "NSE",
+                        product_type="cash",
+                        from_date=str(from_date),
+                        to_date=str(to_date),
+                        interval=interval,
+                    )
+                if not spot_df.empty:
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter(x=df["datetime"], y=df["close"], name=f"{instrument} {strike_param} {'CE' if right_param == 'call' else 'PE'}", line=dict(color="#388bfd", width=2), yaxis="y"))
+                    fig.add_trace(go.Scatter(x=spot_df["datetime"], y=spot_df["close"], name=f"{instrument} Spot", line=dict(color="#f78166", width=1.5, dash="dot"), yaxis="y2"))
+                    fig.update_layout(
+                        title="Option Price vs Underlying Spot",
+                        yaxis=dict(title="Option Price ₹", side="left"),
+                        yaxis2=dict(title="Spot Price ₹", side="right", overlaying="y"),
+                        height=450,
+                        plot_bgcolor="#0d1117",
+                        paper_bgcolor="#161b22",
+                        font=dict(color="#e6edf3"),
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+            except Exception as e:
+                st.warning(f"Could not fetch spot data: {e}")
+        else:
+            st.info("Switch to 'options' product type for options history comparison.")
+
+    with tab3:
+        if df is None or df.empty:
+            st.info("Fetch data in the Price Chart tab first.")
+        else:
+            indicators = st.multiselect("Indicators to Display", ["RSI", "MACD", "Stochastic", "ATR"], default=["RSI", "MACD"], key="ta_indicators")
+            fig_main = render_candlestick(df, show_volume=False, height=350)
+            st.plotly_chart(fig_main, use_container_width=True)
+
+            for ind in indicators:
+                if ind == "RSI":
+                    rsi_period = st.slider("RSI Period", 5, 30, 14, key="rsi_period")
+                    fig_ind = render_technical_subplot(df, "rsi", {"period": rsi_period}, height=180)
+                elif ind == "MACD":
+                    fig_ind = render_technical_subplot(df, "macd", height=200)
+                elif ind == "Stochastic":
+                    fig_ind = render_technical_subplot(df, "stochastic", height=180)
+                elif ind == "ATR":
+                    atr_vals = ta.atr(df["high"], df["low"], df["close"])
+                    fig_ind = go.Figure()
+                    fig_ind.add_trace(go.Scatter(x=df["datetime"], y=atr_vals, name="ATR(14)", line=dict(color="#FF6F00", width=1.5)))
+                    fig_ind.update_layout(height=180, plot_bgcolor="#0d1117", paper_bgcolor="#161b22", font=dict(color="#e6edf3"), margin=dict(l=10, r=10, t=25, b=10), title=dict(text="ATR(14)", font=dict(size=12)))
+                else:
+                    continue
+                st.plotly_chart(fig_ind, use_container_width=True)
+
+            with st.expander("📍 Pivot Points (based on last bar)"):
+                last = df.iloc[-1]
+                pivots = ta.pivot_points(last["high"], last["low"], last["close"])
+                pcols = st.columns(7)
+                labels = ["S3", "S2", "S1", "P", "R1", "R2", "R3"]
+                colors = ["#dc3545", "#e06c75", "#e5ac00", "#28a745", "#61afef", "#56b6c2", "#98c379"]
+                for col, label, color in zip(pcols, labels, colors):
+                    col.markdown(
+                        f'<div style="text-align:center;color:{color};font-weight:700">{label}<br>₹{pivots[label]:,.2f}</div>',
+                        unsafe_allow_html=True,
+                    )
+
+    with tab4:
+        if df is None or df.empty:
+            st.info("Fetch data in the Price Chart tab first.")
+        else:
+            st.markdown(f"**{len(df):,} rows** available for export.")
+            csv_buf = io.StringIO()
+            df.to_csv(csv_buf, index=False)
+            st.download_button("📥 Download CSV", data=csv_buf.getvalue(), file_name=f"{instrument}_{interval}_{from_date}_{to_date}.csv", mime="text/csv")
+
+            excel_buf = io.BytesIO()
+            with pd.ExcelWriter(excel_buf, engine="openpyxl") as writer:
+                df.to_excel(writer, sheet_name="OHLCV", index=False)
+                ta_df = df.copy()
+                ta_df["ema_20"] = ta.ema(df["close"], 20)
+                ta_df["ema_50"] = ta.ema(df["close"], 50)
+                ta_df["rsi_14"] = ta.rsi(df["close"])
+                macd_l, sig_l, _ = ta.macd(df["close"])
+                ta_df["macd"] = macd_l
+                ta_df["macd_signal"] = sig_l
+                ta_df["atr_14"] = ta.atr(df["high"], df["low"], df["close"])
+                ta_df.to_excel(writer, sheet_name="Technical Indicators", index=False)
+
+            st.download_button(
+                "📥 Download Excel (with indicators)",
+                data=excel_buf.getvalue(),
+                file_name=f"{instrument}_{interval}_{from_date}_{to_date}_with_ta.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+
+            with st.expander("🗄️ Cache Statistics"):
+                cache_stats = get_historical_cache().stats()
+                st.json(cache_stats)
+                if st.button("🗑️ Purge Expired Cache"):
+                    n = get_historical_cache().purge_expired()
+                    st.success(f"Purged {n} expired entries.")
+
+
+def render_order_cost_preview(
+    client: BreezeAPIClient,
+    stock_code: str,
+    exchange_code: str,
+    product: str,
+    order_type: str,
+    price: float,
+    action: str,
+    quantity: int,
+    expiry_date: str = "",
+    right: str = "",
+    strike_price: str = "",
+    auto_fetch: bool = False,
+    key_prefix: str = "preview",
+) -> Optional[Dict]:
+    """Render a pre-trade brokerage breakdown widget."""
+    price_str = str(price) if order_type == "limit" and price > 0 else ""
+
+    _, col_btn = st.columns([3, 1])
+    with col_btn:
+        fetch_preview = st.button("💰 Get Cost Estimate", key=f"{key_prefix}_btn") or auto_fetch
+
+    if not fetch_preview:
+        return None
+
+    with st.spinner("Fetching cost estimate..."):
+        resp = client.preview_order(
+            stock_code=stock_code,
+            exchange_code=exchange_code,
+            product=product,
+            order_type=order_type,
+            price=price_str,
+            action=action,
+            quantity=str(quantity),
+            expiry_date=expiry_date,
+            right=right.lower() if right else "",
+            strike_price=str(strike_price) if strike_price else "",
+        )
+
+    if not resp.get("success"):
+        st.warning(f"Could not fetch cost estimate: {resp.get('message', 'Unknown')}")
+        return None
+
+    success = resp.get("data", {})
+    if isinstance(success, dict) and "Success" in success:
+        success = success["Success"]
+    if not isinstance(success, dict):
+        return None
+
+    brokerage = float(success.get("brokerage", 0) or 0)
+    stt = float(success.get("stt", 0) or 0)
+    exchange_charges = float(success.get("exchange_turnover_charges", 0) or 0)
+    stamp_duty = float(success.get("stamp_duty", 0) or 0)
+    sebi = float(success.get("sebi_charges", 0) or 0)
+    gst = float(success.get("gst", 0) or 0)
+    total = float(success.get("total_brokerage", 0) or 0)
+
+    order_value = price * quantity if price > 0 else 0
+    net_value = order_value - total if action == "sell" else order_value + total
+
+    st.markdown("""
+    <style>
+    .cost-preview { background:#1a1f2e; border:1px solid #30363d;
+                    border-radius:8px; padding:1rem; margin:.5rem 0; }
+    .cost-row { display:flex; justify-content:space-between;
+                padding:3px 0; border-bottom:1px solid #30363d22; }
+    .cost-total { font-weight:700; color:#388bfd; font-size:1.1rem;
+                  border-top:2px solid #388bfd; padding-top:6px; margin-top:4px; }
+    </style>
+    """, unsafe_allow_html=True)
+
+    order_value_pct = f" ({total/order_value*100:.2f}%)" if order_value > 0 else ""
+    net_label = "Net Premium Received" if action == "sell" else "Net Cost (incl. charges)"
+
+    st.markdown(f"""
+    <div class="cost-preview">
+      <div style="font-weight:700;margin-bottom:.5rem">💰 Order Cost Preview</div>
+      <div class="cost-row"><span>Order Value</span><span>₹{order_value:,.2f}</span></div>
+      <div class="cost-row"><span>Brokerage</span><span>₹{brokerage:,.2f}</span></div>
+      <div class="cost-row"><span>STT</span><span>₹{stt:,.2f}</span></div>
+      <div class="cost-row"><span>Exchange Charges</span><span>₹{exchange_charges:,.2f}</span></div>
+      <div class="cost-row"><span>Stamp Duty</span><span>₹{stamp_duty:,.2f}</span></div>
+      <div class="cost-row"><span>SEBI Charges</span><span>₹{sebi:,.2f}</span></div>
+      <div class="cost-row"><span>GST (18%)</span><span>₹{gst:,.2f}</span></div>
+      <div class="cost-row cost-total">
+        <span>Total Charges</span>
+        <span>₹{total:,.2f}{order_value_pct}</span>
+      </div>
+      <div class="cost-row" style="color:#28a745;font-weight:600">
+        <span>{net_label}</span>
+        <span>₹{net_value:,.2f}</span>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    return success
+
+
+def render_gtt_order_cost_preview(
+    entry_price: float,
+    target_price: float,
+    stoploss_price: float,
+    quantity: int,
+    lot_size: int,
+) -> None:
+    """Render P&L preview for a GTT trade before placement."""
+    lots = quantity // lot_size if lot_size > 0 else 0
+    entry_value = entry_price * quantity
+    target_pnl = (entry_price - target_price) * quantity
+    stop_pnl = (entry_price - stoploss_price) * quantity
+    rr_ratio = abs(target_pnl / stop_pnl) if stop_pnl != 0 else 0
+
+    st.markdown(
+        """
+        <style>
+        .gtt-preview { background:#1a1f2e; border:1px solid #30363d;
+                       border-radius:8px; padding:1rem; margin:.5rem 0; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    with st.container():
+        st.markdown('<div class="gtt-preview">', unsafe_allow_html=True)
+        st.markdown("**📊 Trade P&L Preview**")
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric(
+            "Premium Collected",
+            f"₹{entry_value:,.0f}",
+            help=f"{lots} lot × ₹{entry_price:.2f} × {lot_size}",
+        )
+        color_target = "#28a745" if target_pnl > 0 else "#dc3545"
+        pct_target = (abs(target_pnl) / entry_value * 100) if entry_value else 0
+        pct_stop = (abs(stop_pnl) / entry_value * 100) if entry_value else 0
+        col2.markdown(
+            f'<div style="text-align:center"><small>Target Profit</small><br>'
+            f'<span style="color:{color_target};font-size:1.3rem;font-weight:700">'
+            f'₹{abs(target_pnl):,.0f}</span><br>'
+            f'<small>{pct_target:.1f}% of premium</small></div>',
+            unsafe_allow_html=True,
+        )
+        col3.markdown(
+            f'<div style="text-align:center"><small>Max Loss (if stop hit)</small><br>'
+            f'<span style="color:#dc3545;font-size:1.3rem;font-weight:700">'
+            f'₹{abs(stop_pnl):,.0f}</span><br>'
+            f'<small>{pct_stop:.1f}% of premium</small></div>',
+            unsafe_allow_html=True,
+        )
+        col4.metric(
+            "Risk:Reward",
+            f"1:{rr_ratio:.2f}",
+            delta="Good" if rr_ratio >= 0.4 else "Low",
+            delta_color="normal" if rr_ratio >= 0.4 else "inverse",
+        )
+        st.markdown('</div>', unsafe_allow_html=True)
+
+
+@error_handler
+@require_auth
+def page_gtt_orders():
+    """GTT Orders management page."""
+    st.markdown('<div class="page-header">⏰ GTT Orders (Good Till Triggered)</div>', unsafe_allow_html=True)
+
+    from gtt_manager import GTTManager, GTTOrderRequest, GTTType, GTTLeg, GTTLegType, GTTStatus, validate_gtt_request
+
+    client: BreezeAPIClient = st.session_state.get("client")
+    if not client or not client.is_connected():
+        st.warning("Connect to Breeze API first.")
+        return
+
+    db = TradeDB()
+    gtt_mgr = GTTManager(client, db)
+
+    tab1, tab2, tab3 = st.tabs(["➕ Place GTT", "📋 Active GTTs", "📜 GTT History"])
+
+    with tab1:
+        st.markdown("**Create a new GTT order for automatic profit booking and stop-loss.**")
+        gtt_type = st.radio("GTT Type", ["🎯 OCO (Entry + Target + Stop-Loss)", "📌 Single Leg (Standalone Trigger)"], horizontal=True, key="gtt_type_select")
+        is_three_leg = "OCO" in gtt_type
+
+        col1, col2, col3 = st.columns([2, 1, 1])
+        with col1:
+            instrument = st.selectbox("Instrument", list(C.INSTRUMENTS.keys()), key="gtt_instrument")
+            cfg = C.INSTRUMENTS[instrument]
+        with col2:
+            exchange = cfg.exchange
+            expiry = st.selectbox("Expiry", C.get_next_expiries(instrument, count=6), key="gtt_expiry")
+        with col3:
+            right = st.selectbox("Right", ["call", "put"], key="gtt_right")
+
+        col4, col5, col6 = st.columns(3)
+        with col4:
+            last_spot = st.session_state.get("last_spot", 22000)
+            atm_guess = int(last_spot // cfg.strike_gap * cfg.strike_gap)
+            strike = st.number_input("Strike Price", value=atm_guess, step=cfg.strike_gap, key="gtt_strike")
+        with col5:
+            lots = st.number_input("Lots", min_value=1, value=1, step=1, key="gtt_lots")
+            quantity = lots * cfg.lot_size
+            st.caption(f"Qty: {quantity} contracts")
+        with col6:
+            trade_date = st.date_input("Valid Till (trade_date)", value=date.today() + timedelta(days=7), key="gtt_trade_date")
+
+        st.divider()
+
+        if is_three_leg:
+            st.markdown("**Entry Order:**")
+            col7, col8, col9 = st.columns(3)
+            with col7:
+                entry_action = st.selectbox("Entry Action", ["sell", "buy"], key="gtt_entry_action")
+            with col8:
+                entry_price = st.number_input("Entry Price ₹", min_value=0.01, value=185.0, step=0.5, key="gtt_entry_price")
+            with col9:
+                entry_order_type = st.selectbox("Entry Order Type", ["limit", "market"], key="gtt_entry_type")
+
+            st.markdown("**Target Leg (Profit Booking):**")
+            col10, col11, col12 = st.columns(3)
+            with col10:
+                target_trigger = st.number_input("Target Trigger ₹", value=round(entry_price * 0.5, 1) if entry_action == "sell" else round(entry_price * 1.5, 1), step=0.5, key="gtt_target_trigger")
+            with col11:
+                target_limit = st.number_input("Target Limit ₹", value=target_trigger - 2.0, step=0.5, key="gtt_target_limit")
+            with col12:
+                target_action = "buy" if entry_action == "sell" else "sell"
+                st.text_input("Target Action", value=target_action.upper(), disabled=True, key="gtt_target_action_disp")
+
+            st.markdown("**Stop-Loss Leg:**")
+            col13, col14, col15 = st.columns(3)
+            with col13:
+                sl_trigger = st.number_input("Stop-Loss Trigger ₹", value=round(entry_price * 2.0, 1) if entry_action == "sell" else round(entry_price * 0.5, 1), step=0.5, key="gtt_sl_trigger")
+            with col14:
+                sl_limit = st.number_input("Stop-Loss Limit ₹", value=sl_trigger + 5.0 if entry_action == "sell" else sl_trigger - 5.0, step=0.5, key="gtt_sl_limit")
+            with col15:
+                sl_action = "buy" if entry_action == "sell" else "sell"
+                st.text_input("Stop-Loss Action", value=sl_action.upper(), disabled=True, key="gtt_sl_action_disp")
+
+            with st.expander("🧮 Auto-Calculate Stops"):
+                calc_method = st.radio("Calculation Method", ["% of Entry", "Fixed ₹", "Multiple of Premium"], horizontal=True, key="gtt_calc_method")
+                if calc_method == "% of Entry":
+                    target_pct = st.slider("Target %", 10, 80, 50, key="gtt_target_pct")
+                    sl_pct = st.slider("Stop-Loss %", 50, 300, 100, key="gtt_sl_pct")
+                    if st.button("Apply", key="gtt_apply_calc") and entry_action == "sell":
+                        st.session_state["gtt_target_trigger"] = round(entry_price * (1 - target_pct / 100), 1)
+                        st.session_state["gtt_sl_trigger"] = round(entry_price * (1 + sl_pct / 100), 1)
+                        st.rerun()
+
+            render_gtt_order_cost_preview(entry_price, target_trigger, sl_trigger, quantity, cfg.lot_size)
+
+            order_details_legs = [
+                GTTLeg(GTTLegType.TARGET, target_action, str(target_trigger), str(target_limit), "limit"),
+                GTTLeg(GTTLegType.STOPLOSS, sl_action, str(sl_trigger), str(sl_limit), "limit"),
+            ]
+
+            req = GTTOrderRequest(
+                exchange_code=exchange,
+                stock_code=cfg.api_code,
+                product="options",
+                quantity=str(quantity),
+                expiry_date=expiry,
+                right=right,
+                strike_price=str(int(strike)),
+                gtt_type=GTTType.THREE_LEG,
+                index_or_stock="index",
+                trade_date=str(trade_date),
+                fresh_order_action=entry_action,
+                fresh_order_price=str(entry_price),
+                fresh_order_type=entry_order_type,
+                order_details=order_details_legs,
+            )
+        else:
+            col16, col17, col18 = st.columns(3)
+            with col16:
+                sl_action_single = st.selectbox("Action", ["buy", "sell"], key="gtt_sl_action_single")
+            with col17:
+                sl_trigger_single = st.number_input("Trigger Price ₹", value=185.0, step=0.5, key="gtt_sl_trigger_single")
+            with col18:
+                sl_limit_single = st.number_input("Limit Price ₹", value=183.0, step=0.5, key="gtt_sl_limit_single")
+
+            leg_type_str = st.selectbox("Leg Type", ["STOPLOSS", "PROFIT"], key="gtt_leg_type")
+            leg_type = GTTLegType.STOPLOSS if leg_type_str == "STOPLOSS" else GTTLegType.TARGET
+
+            req = GTTOrderRequest(
+                exchange_code=exchange,
+                stock_code=cfg.api_code,
+                product="options",
+                quantity=str(quantity),
+                expiry_date=expiry,
+                right=right,
+                strike_price=str(int(strike)),
+                gtt_type=GTTType.SINGLE,
+                index_or_stock="index",
+                trade_date=str(trade_date),
+                order_details=[GTTLeg(leg_type, sl_action_single, str(sl_trigger_single), str(sl_limit_single))],
+            )
+
+        is_valid, err_msg = validate_gtt_request(req)
+        if not is_valid:
+            st.error(f"❌ Validation: {err_msg}")
+
+        place_btn = st.button("✅ Place GTT Order", type="primary", disabled=not is_valid, key="gtt_place_btn")
+        if place_btn and is_valid:
+            with st.spinner("Placing GTT order..."):
+                result = gtt_mgr.place_three_leg(req) if is_three_leg else gtt_mgr.place_single_leg(req)
+            if result.get("success"):
+                st.success("✅ GTT order placed successfully!")
+                st.json(result.get("data", {}))
+            else:
+                st.error(f"❌ Failed: {result.get('message', 'Unknown error')}")
+
+    with tab2:
+        if st.button("🔄 Sync with Breeze", key="gtt_sync_btn"):
+            with st.spinner("Syncing..."):
+                n = gtt_mgr.sync_with_api("NFO")
+            st.info(f"Sync complete: {n} status change(s)")
+
+        active_gtts = gtt_mgr.get_active_gtts()
+        if not active_gtts:
+            st.info("No active GTT orders. Create one in the **Place GTT** tab.")
+        else:
+            for gtt in active_gtts:
+                with st.expander(
+                    f"{'OCO' if gtt.gtt_type == GTTType.THREE_LEG else 'Single'} | "
+                    f"{gtt.stock_code} {gtt.strike} {gtt.right.upper()} | "
+                    f"Entry: ₹{gtt.entry_price:.1f} | Target: ₹{gtt.target_trigger_price:.1f} | "
+                    f"Stop: ₹{gtt.stoploss_trigger_price:.1f} | ID: {gtt.gtt_order_id[:8]}...",
+                    expanded=False,
+                ):
+                    col_a, col_b, col_c, col_d = st.columns(4)
+                    col_a.metric("Entry Price", f"₹{gtt.entry_price:.2f}")
+                    col_b.metric("Target Trigger", f"₹{gtt.target_trigger_price:.2f}")
+                    col_c.metric("Stop Trigger", f"₹{gtt.stoploss_trigger_price:.2f}")
+                    col_d.metric("Qty", f"{gtt.quantity} ({gtt.quantity // max(cfg.lot_size,1)} lots)")
+                    st.caption(f"Created: {gtt.created_at[:19]} | Valid till: {gtt.trade_date}")
+
+                    if st.button("🗑️ Cancel", key=f"gtt_cancel_{gtt.gtt_order_id}"):
+                        if st.session_state.get(f"confirm_cancel_{gtt.gtt_order_id}"):
+                            result = gtt_mgr.cancel(gtt.gtt_order_id)
+                            if result.get("success"):
+                                st.success("GTT cancelled")
+                                st.rerun()
+                            else:
+                                st.error(f"Cancel failed: {result.get('message')}")
+                        else:
+                            st.session_state[f"confirm_cancel_{gtt.gtt_order_id}"] = True
+                            st.warning("Click Cancel again to confirm.")
+
+    with tab3:
+        all_gtts = gtt_mgr.get_all_gtts(limit=200)
+        history_gtts = [g for g in all_gtts if g.status != GTTStatus.ACTIVE]
+        if not history_gtts:
+            st.info("No GTT history yet.")
+        else:
+            history_data = []
+            for g in history_gtts:
+                trigger_leg = g.trigger_leg or "—"
+                if g.status == GTTStatus.TRIGGERED:
+                    triggered_price = g.target_trigger_price if trigger_leg == "target" else g.stoploss_trigger_price
+                    pnl_sign = 1 if trigger_leg == "target" else -1
+                    pnl = pnl_sign * abs(g.entry_price - triggered_price) * g.quantity
+                else:
+                    pnl = None
+
+                history_data.append({
+                    "Status": g.status.value.upper(),
+                    "Type": g.gtt_type.value,
+                    "Instrument": f"{g.stock_code} {g.strike} {g.right.upper()}",
+                    "Entry": f"₹{g.entry_price:.1f}",
+                    "Target": f"₹{g.target_trigger_price:.1f}",
+                    "Stop": f"₹{g.stoploss_trigger_price:.1f}",
+                    "Triggered": trigger_leg.upper() if trigger_leg != "—" else "—",
+                    "P&L": f"₹{pnl:,.0f}" if pnl is not None else "—",
+                    "Created": g.created_at[:10],
+                    "GTT ID": g.gtt_order_id[:12] + "...",
+                })
+            st.dataframe(pd.DataFrame(history_data), use_container_width=True, hide_index=True)
 
 # ═══════════════════════════════════════════════════════════════
 # PAGE: RISK MONITOR
@@ -2181,6 +3095,139 @@ def page_watchlist():
     export_to_csv(df[display_cols], "watchlist.csv")
 
 
+def _load_alert_config_from_db() -> AlertConfig:
+    data = _db.get_setting("alert_config", {}) or {}
+    if isinstance(data, dict):
+        try:
+            return AlertConfig(**data)
+        except Exception:
+            pass
+    return AlertConfig()
+
+
+def _get_alert_dispatcher() -> AlertDispatcher:
+    if "alert_dispatcher" not in st.session_state:
+        st.session_state.alert_dispatcher = AlertDispatcher(_load_alert_config_from_db())
+    return st.session_state.alert_dispatcher
+
+
+def render_alerts_settings_tab(
+    alert_dispatcher: AlertDispatcher,
+    alert_config: AlertConfig,
+) -> AlertConfig:
+    """Render alerts configuration and return updated config."""
+    st.markdown("#### 🔔 Alert Notifications")
+
+    with st.expander("📱 Telegram Alerts", expanded=alert_config.telegram_enabled):
+        tg_enabled = st.toggle("Enable Telegram", value=alert_config.telegram_enabled, key="tg_enabled")
+        if tg_enabled:
+            tg_token = st.text_input("Bot Token", value=alert_config.telegram_bot_token, type="password", key="tg_token")
+            tg_chat = st.text_input("Chat ID", value=alert_config.telegram_chat_id, key="tg_chat")
+            if st.button("🧪 Test Telegram", key="tg_test"):
+                test_dispatcher = TelegramDispatcher(tg_token, tg_chat)
+                ok = test_dispatcher.send("✅ Breeze PRO: Telegram connected!")
+                st.success("Telegram working!") if ok else st.error("Telegram test failed.")
+        else:
+            tg_token = alert_config.telegram_bot_token
+            tg_chat = alert_config.telegram_chat_id
+
+    with st.expander("📧 Email Alerts", expanded=alert_config.email_enabled):
+        em_enabled = st.toggle("Enable Email", value=alert_config.email_enabled, key="em_enabled")
+        if em_enabled:
+            em_host = st.text_input("SMTP Host", value=alert_config.email_smtp_host, key="em_host")
+            em_port = st.number_input("SMTP Port", value=alert_config.email_smtp_port, min_value=1, max_value=65535, key="em_port")
+            em_user = st.text_input("Email (from)", value=alert_config.email_username, key="em_user")
+            em_pass = st.text_input("App Password", value=alert_config.email_password, type="password", key="em_pass")
+            em_to = st.text_input("Email (to)", value=alert_config.email_to, key="em_to")
+            if st.button("🧪 Test Email", key="em_test"):
+                test_email = EmailDispatcher(em_host, int(em_port), em_user, em_pass, em_to)
+                ok = test_email.send("[Breeze PRO] Alert Test", "<p>✅ Email alerts are configured correctly.</p>")
+                st.success("Email working!") if ok else st.error("Email test failed.")
+        else:
+            em_host = alert_config.email_smtp_host
+            em_port = alert_config.email_smtp_port
+            em_user = alert_config.email_username
+            em_pass = alert_config.email_password
+            em_to = alert_config.email_to
+
+    with st.expander("🔗 Webhook Alerts"):
+        wh_enabled = st.toggle("Enable Webhook", value=alert_config.webhook_enabled, key="wh_enabled")
+        wh_url = st.text_input("Webhook URL", value=alert_config.webhook_url, key="wh_url")
+        wh_secret = st.text_input("Webhook Secret (HMAC)", value=alert_config.webhook_secret, type="password", key="wh_secret")
+
+    st.divider()
+    st.markdown("**What to alert on:**")
+    al_fill = st.checkbox("Order fills", value=alert_config.alert_on_fill, key="al_fill")
+    al_sl = st.checkbox("Stop-loss breaches", value=alert_config.alert_on_stop_loss, key="al_sl")
+    al_gtt = st.checkbox("GTT triggers", value=alert_config.alert_on_gtt_trigger, key="al_gtt")
+    al_margin = st.checkbox("Low margin warnings", value=alert_config.alert_on_margin_warning, key="al_margin")
+    al_err = st.checkbox("API connection errors", value=alert_config.alert_on_errors, key="al_err")
+
+    new_cfg = AlertConfig(
+        telegram_enabled=tg_enabled,
+        telegram_bot_token=tg_token if tg_enabled else alert_config.telegram_bot_token,
+        telegram_chat_id=tg_chat if tg_enabled else alert_config.telegram_chat_id,
+        email_enabled=em_enabled,
+        email_smtp_host=em_host,
+        email_smtp_port=int(em_port),
+        email_username=em_user,
+        email_password=em_pass,
+        email_to=em_to,
+        webhook_enabled=wh_enabled,
+        webhook_url=wh_url if wh_enabled else alert_config.webhook_url,
+        webhook_secret=wh_secret,
+        alert_on_fill=al_fill,
+        alert_on_stop_loss=al_sl,
+        alert_on_gtt_trigger=al_gtt,
+        alert_on_margin_warning=al_margin,
+        alert_on_errors=al_err,
+    )
+
+    if st.button("💾 Save Alert Settings", type="primary", key="save_alert_cfg"):
+        _db.set_setting("alert_config", new_cfg.__dict__)
+        alert_dispatcher.update_config(new_cfg)
+        st.success("✅ Alert settings saved")
+
+    return new_cfg
+
+
+def render_funds_management_tab(client: BreezeAPIClient) -> None:
+    """Render the Funds Management sub-tab within Settings."""
+    st.markdown("#### 💰 Fund Transfer Between Segments")
+    st.warning(
+        "⚠️ Fund transfers are real operations and cannot be undone. "
+        "Double-check all values before confirming."
+    )
+
+    with st.form("fund_transfer_form"):
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            txn_type = st.selectbox("Type", ["Deposit", "Withdrawal"], key="ft_type")
+        with col2:
+            amount = st.number_input(
+                "Amount ₹",
+                min_value=1.0,
+                value=10000.0,
+                step=1000.0,
+                key="ft_amount",
+            )
+        with col3:
+            segment = st.selectbox("Segment", ["Equity", "FNO", "Commodity"], key="ft_segment")
+
+        st.caption("Deposit: moves funds INTO segment. Withdrawal: moves funds OUT.")
+        confirm = st.checkbox(f"I confirm: {txn_type} ₹{amount:,.0f} to/from {segment}")
+        submitted = st.form_submit_button("Transfer Funds", type="primary")
+
+        if submitted and confirm:
+            resp = client.set_funds(txn_type, str(amount), segment)
+            if resp.get("success"):
+                st.success(f"✅ Fund transfer successful: {txn_type} ₹{amount:,.0f}")
+            else:
+                st.error(f"❌ Failed: {resp.get('message')}")
+        elif submitted and not confirm:
+            st.warning("Please check the confirmation checkbox.")
+
+
 # ═══════════════════════════════════════════════════════════════
 # PAGE: SETTINGS
 # ═══════════════════════════════════════════════════════════════
@@ -2189,35 +3236,50 @@ def page_watchlist():
 def page_settings():
     page_header("⚙️ Settings")
 
-    t1, t2, t3, t4 = st.tabs(["🎛️ Trading", "🛡️ Risk Limits", "🗄️ Database", "ℹ️ System Info"])
+    t1, t2, t3, t4, t5 = st.tabs(["🎛️ Trading", "🛡️ Risk Limits", "🔔 Alerts", "🗄️ Database", "ℹ️ System Info"])
 
     with t1:
         section("Trading Preferences")
-        c1, c2 = st.columns(2)
-        with c1:
-            default_order = st.selectbox("Default Order Type",
-                                         ["Market", "Limit"],
-                                         index=0 if _db.get_setting("default_order_type", "Market") == "Market" else 1)
-            default_lots = st.number_input("Default Lots", min_value=1, value=int(_db.get_setting("default_lots", 1)))
-            require_ack = st.checkbox("Require confirmation for orders",
-                                      value=_db.get_setting("require_ack", True))
-        with c2:
-            auto_sl = st.checkbox("Auto stop-loss after sell",
-                                  value=_db.get_setting("auto_sl", False))
-            sl_mult = st.slider("Default SL multiplier", 1.5, 5.0,
-                                float(_db.get_setting("sl_multiplier", 2.0)), 0.5)
-            max_lots_per_order = st.number_input("Max Lots Per Order",
-                                                  min_value=1, max_value=1000,
-                                                  value=int(_db.get_setting("max_lots", 100)))
+        settings_tab1, settings_tab2 = st.tabs(["⚙️ Trading", "💰 Funds"])
 
-        if st.button("💾 Save Trading Settings", type="primary"):
-            _db.set_setting("default_order_type", default_order)
-            _db.set_setting("default_lots", default_lots)
-            _db.set_setting("require_ack", require_ack)
-            _db.set_setting("auto_sl", auto_sl)
-            _db.set_setting("sl_multiplier", sl_mult)
-            _db.set_setting("max_lots", max_lots_per_order)
-            st.success("✅ Settings saved")
+        with settings_tab1:
+            c1, c2 = st.columns(2)
+            with c1:
+                default_order = st.selectbox(
+                    "Default Order Type",
+                    ["Market", "Limit"],
+                    index=0 if _db.get_setting("default_order_type", "Market") == "Market" else 1,
+                )
+                default_lots = st.number_input(
+                    "Default Lots", min_value=1, value=int(_db.get_setting("default_lots", 1))
+                )
+                require_ack = st.checkbox(
+                    "Require confirmation for orders", value=_db.get_setting("require_ack", True)
+                )
+            with c2:
+                auto_sl = st.checkbox("Auto stop-loss after sell", value=_db.get_setting("auto_sl", False))
+                sl_mult = st.slider(
+                    "Default SL multiplier", 1.5, 5.0, float(_db.get_setting("sl_multiplier", 2.0)), 0.5
+                )
+                max_lots_per_order = st.number_input(
+                    "Max Lots Per Order", min_value=1, max_value=1000, value=int(_db.get_setting("max_lots", 100))
+                )
+
+            if st.button("💾 Save Trading Settings", type="primary"):
+                _db.set_setting("default_order_type", default_order)
+                _db.set_setting("default_lots", default_lots)
+                _db.set_setting("require_ack", require_ack)
+                _db.set_setting("auto_sl", auto_sl)
+                _db.set_setting("sl_multiplier", sl_mult)
+                _db.set_setting("max_lots", max_lots_per_order)
+                st.success("✅ Settings saved")
+
+        with settings_tab2:
+            client = get_client()
+            if client and client.is_connected():
+                render_funds_management_tab(client)
+            else:
+                st.info("Connect to Breeze API to use fund transfer operations.")
 
     with t2:
         section("Risk Limits")
@@ -2247,6 +3309,20 @@ def page_settings():
             st.success("✅ Risk limits updated")
 
     with t3:
+        section("Alerting")
+        dispatcher = _get_alert_dispatcher()
+        cfg = _load_alert_config_from_db()
+        render_alerts_settings_tab(dispatcher, cfg)
+
+        st.markdown("---")
+        st.markdown("**Recent alert dispatch history**")
+        hist = dispatcher.get_history(limit=20)
+        if hist:
+            st.dataframe(pd.DataFrame(hist), hide_index=True, use_container_width=True)
+        else:
+            st.caption("No dispatched alerts yet.")
+
+    with t4:
         section("Database")
         stats = _db.get_db_stats()
         c1, c2, c3 = st.columns(3)
@@ -2274,7 +3350,7 @@ def page_settings():
                 "PnL History": pd.DataFrame(_db.get_pnl_history(365)),
             }, "breeze_trader_export.xlsx")
 
-    with t4:
+    with t5:
         section("System Information")
         info_items = {
             "App Version": "v10.0 PRO",
@@ -2309,6 +3385,9 @@ PAGE_FN = {
     "Positions": page_positions,
     "Strategy Builder": page_strategy_builder,
     "Analytics": page_analytics,
+    "📈 Futures Trading": page_futures_trading,
+    "📊 Historical Data": page_historical_data,
+    "⏰ GTT Orders": page_gtt_orders,
     "Risk Monitor": page_risk_monitor,
     "Watchlist": page_watchlist,
     "Settings": page_settings,
