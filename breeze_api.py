@@ -951,6 +951,75 @@ class BreezeAPIClient:
             fresh_order_limit=str(fresh_order_limit),
         )
 
+
+
+    def get_futures_quote(
+        self,
+        stock_code: str,
+        exchange_code: str,
+        expiry_date: str,
+    ) -> Dict:
+        """Get real-time futures quote."""
+        self._require_connection()
+        expiry_iso = convert_to_breeze_datetime(expiry_date) if expiry_date else ""
+        return self.call_sdk(
+            "get_quotes",
+            retryable=True,
+            stock_code=stock_code,
+            exchange_code=exchange_code,
+            expiry_date=expiry_iso,
+            product_type="futures",
+            right="",
+            strike_price="",
+        )
+
+    def place_futures_order(
+        self,
+        stock_code: str,
+        exchange_code: str,
+        expiry: str,
+        action: str,
+        quantity: int,
+        order_type: str,
+        price: float = 0.0,
+        stoploss: float = 0.0,
+    ) -> Dict:
+        """Place futures order via Breeze place_order endpoint."""
+        self._require_connection()
+        expiry_iso = convert_to_breeze_datetime(expiry) if expiry else ""
+        order_type = order_type.lower()
+        if order_type == "market":
+            price_str = ""
+            stoploss_str = "0"
+            sdk_order_type = "market"
+        elif order_type == "limit":
+            price_str = str(price)
+            stoploss_str = "0"
+            sdk_order_type = "limit"
+        else:
+            sdk_order_type = "stoploss"
+            price_str = str(price) if price > 0 else ""
+            stoploss_str = str(stoploss) if stoploss > 0 else "0"
+
+        return self.call_sdk(
+            "place_order",
+            retryable=False,
+            stock_code=stock_code,
+            exchange_code=exchange_code,
+            product="futures",
+            action=action.lower(),
+            order_type=sdk_order_type,
+            stoploss=stoploss_str,
+            quantity=str(quantity),
+            price=price_str,
+            validity="day",
+            disclosed_quantity="0",
+            expiry_date=expiry_iso,
+            right="",
+            strike_price="",
+            user_remark="Futures",
+        )
+
     # ---- Trading utility wrappers ----
 
     def place_order_raw(self, **kwargs):

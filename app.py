@@ -197,14 +197,14 @@ st.markdown(THEME_CSS, unsafe_allow_html=True)
 PAGES = [
     "Dashboard", "Option Chain", "Sell Options", "Square Off",
     "Orders & Trades", "Positions", "Strategy Builder",
-    "Analytics", "📊 Historical Data", "⏰ GTT Orders", "Risk Monitor", "Watchlist", "Settings"
+    "Analytics", "📈 Futures Trading", "📊 Historical Data", "⏰ GTT Orders", "Risk Monitor", "Watchlist", "Settings"
 ]
 
 ICONS = {
     "Dashboard": "🏠", "Option Chain": "📊",
     "Sell Options": "💰", "Square Off": "🔄",
     "Orders & Trades": "📋", "Positions": "📍",
-    "Strategy Builder": "🎯", "Analytics": "📈", "📊 Historical Data": "📊", "⏰ GTT Orders": "⏰",
+    "Strategy Builder": "🎯", "Analytics": "📈", "📈 Futures Trading": "📈", "📊 Historical Data": "📊", "⏰ GTT Orders": "⏰",
     "Risk Monitor": "🛡️", "Watchlist": "👁️", "Settings": "⚙️"
 }
 
@@ -2119,6 +2119,191 @@ def page_analytics():
 
 
 
+
+@error_handler
+@require_auth
+def page_futures_trading():
+    """Futures Trading page."""
+    st.markdown('<div class="page-header">📈 Futures Trading</div>', unsafe_allow_html=True)
+    from futures import (
+        get_futures_expiries, calculate_basis, estimate_fair_value_futures,
+        FuturesOrderRequest, validate_futures_order,
+        build_futures_place_order_kwargs, build_roll_plan, execute_roll,
+        render_basis_chart,
+    )
+
+    client: BreezeAPIClient = st.session_state.get("client")
+    if not client or not client.is_connected():
+        st.warning("Connect to Breeze API first.")
+        return
+
+    tab1, tab2, tab3, tab4 = st.tabs(["📊 Quotes", "🛒 Buy / Sell", "🔄 Roll Position", "📉 Basis Chart"])
+
+    col_inst, col_exch = st.columns([2, 1])
+    with col_inst:
+        instrument = st.selectbox("Instrument", list(C.INSTRUMENTS.keys()), key="fut_instrument")
+        cfg = C.INSTRUMENTS[instrument]
+    with col_exch:
+        exchange = st.text_input("Exchange", value="NFO", key="fut_exchange")
+
+    expiries = get_futures_expiries(instrument, count=3, exchange=exchange)
+
+    with tab1:
+        if st.button("🔄 Refresh Quotes", key="fut_refresh_quotes"):
+            with st.spinner("Fetching futures quotes..."):
+                quotes = {}
+                for exp in expiries:
+                    resp = client.get_futures_quote(cfg.api_code, exchange, exp)
+                    if resp.get("success"):
+                        data = (resp.get("data", {}) or {}).get("Success") or []
+                        if isinstance(data, list) and data:
+                            quotes[exp] = data[0]
+
+                spot_resp = client.get_quotes(
+                    stock_code=cfg.spot_code or cfg.api_code,
+                    exchange_code=cfg.spot_exchange or "NSE",
+                    product_type="cash",
+                )
+                spot = 0.0
+                if spot_resp.get("success"):
+                    sd = (spot_resp.get("data", {}) or {}).get("Success") or [{}]
+                    try:
+                        spot = float((sd[0] if sd else {}).get("ltp", 0) or 0)
+                    except Exception:
+                        pass
+                st.session_state["fut_quotes"] = quotes
+                st.session_state["fut_spot"] = spot
+
+        quotes = st.session_state.get("fut_quotes", {})
+        spot = st.session_state.get("fut_spot", 0.0)
+        if not quotes:
+            st.info("Click **Refresh Quotes** to load live futures prices.")
+        else:
+            st.metric("Spot Price", f"₹{spot:,.2f}" if spot else "—")
+            st.divider()
+            for exp, q in quotes.items():
+                ltp = float(q.get("ltp", 0) or 0)
+                chg = float(q.get("change_in_price", 0) or 0)
+                oi = int(float(q.get("open_interest", 0) or 0))
+                basis = calculate_basis(ltp, spot) if spot else 0
+                dte = (datetime.strptime(exp[:10], "%Y-%m-%d") - datetime.now()).days
+                fair = estimate_fair_value_futures(spot, dte) if spot else 0
+                c1, c2, c3, c4, c5 = st.columns(5)
+                label = datetime.strptime(exp[:10], "%Y-%m-%d").strftime("%b %Y")
+                c1.metric(f"{label}", f"₹{ltp:,.2f}", delta=f"{chg:+.2f}")
+                c2.metric("Basis", f"₹{basis:+.2f}")
+                c3.metric("Fair Value", f"₹{fair:,.2f}" if fair else "—")
+                c4.metric("OI", f"{oi:,}")
+                c5.metric("DTE", f"{dte}d")
+
+    with tab2:
+        c1, c2 = st.columns(2)
+        with c1:
+            expiry = st.selectbox("Expiry", expiries, key="fut_expiry_trade")
+            action = st.radio("Action", ["BUY", "SELL"], horizontal=True, key="fut_action")
+        with c2:
+            lots = st.number_input("Lots", min_value=1, value=1, step=1, key="fut_lots")
+            quantity = lots * cfg.lot_size
+            st.caption(f"Qty: {quantity} contracts")
+
+        order_type = st.selectbox("Order Type", ["Market", "Limit", "Stop-Market", "Stop-Limit"], key="fut_order_type")
+        order_type_map = {"Market": "market", "Limit": "limit", "Stop-Market": "stop_market", "Stop-Limit": "stop_limit"}
+        ot = order_type_map[order_type]
+        limit_price = 0.0
+        stop_price = 0.0
+        if ot in ("limit", "stop_limit"):
+            limit_price = st.number_input("Limit Price ₹", min_value=0.01, value=22000.0, step=10.0, key="fut_limit")
+        if ot in ("stop_market", "stop_limit"):
+            stop_price = st.number_input("Stop Trigger ₹", min_value=0.01, value=21800.0, step=10.0, key="fut_stop")
+
+        funds_resp = client.get_funds()
+        available_margin = 0.0
+        if funds_resp.get("success"):
+            d = (funds_resp.get("data", {}) or {}).get("Success") or {}
+            if isinstance(d, list) and d:
+                d = d[0]
+            if isinstance(d, dict):
+                available_margin = float(d.get("total_bank_balance", 0) or 0)
+
+        req = FuturesOrderRequest(cfg.api_code, exchange, expiry, action.lower(), lots, cfg.lot_size, ot, limit_price, stop_price)
+        is_valid, err = validate_futures_order(req, available_margin)
+        if not is_valid:
+            st.error(f"❌ {err}")
+
+        price_proxy = limit_price or stop_price or 22000
+        est_margin = quantity * price_proxy * 0.15
+        st.caption(f"Est. margin required: ₹{est_margin:,.0f} | Available: ₹{available_margin:,.0f}")
+
+        if st.button(f"{'🟢 BUY' if action == 'BUY' else '🔴 SELL'} Futures", type="primary", disabled=not is_valid, key="fut_place_btn"):
+            kwargs = build_futures_place_order_kwargs(req)
+            with st.spinner("Placing futures order..."):
+                resp = client.place_order(**kwargs)
+            if resp.get("success"):
+                st.success("✅ Futures order placed!")
+            else:
+                st.error(f"❌ {resp.get('message', 'Order failed')}")
+
+    with tab3:
+        st.markdown("**Roll a futures position from near-month to far-month expiry.**")
+        c1, c2 = st.columns(2)
+        with c1:
+            near_exp = st.selectbox("Close (Near Month)", expiries, index=0, key="roll_near")
+        with c2:
+            far_opts = [e for e in expiries if e != near_exp]
+            far_exp = st.selectbox("Open (Far Month)", far_opts, key="roll_far")
+
+        roll_lots = st.number_input("Lots to Roll", min_value=1, value=1, key="roll_lots")
+        position_side = st.radio("Current Position", ["Long (Buy)", "Short (Sell)"], horizontal=True, key="roll_side")
+        current_action = "buy" if "Long" in position_side else "sell"
+        roll_order_type = st.selectbox("Roll Order Type", ["market", "limit"], key="roll_ot")
+
+        if st.button("📊 Preview Roll", key="roll_preview_btn"):
+            with st.spinner("Fetching quotes for roll preview..."):
+                st.session_state["roll_plan"] = build_roll_plan(client, cfg.api_code, exchange, near_exp, far_exp, roll_lots, cfg.lot_size)
+
+        roll_plan = st.session_state.get("roll_plan")
+        if roll_plan:
+            sign = "+" if roll_plan.roll_cost >= 0 else ""
+            cost_total = abs(roll_plan.roll_cost) * roll_lots * cfg.lot_size
+            st.info(
+                f"Roll/contract: ₹{sign}{roll_plan.roll_cost:.2f} ({sign}{roll_plan.roll_cost_pct:.2f}%) | "
+                f"Near: ₹{roll_plan.near_ltp:,.2f} | Far: ₹{roll_plan.far_ltp:,.2f} | "
+                f"Total {'Cost' if roll_plan.roll_cost > 0 else 'Credit'}: ₹{cost_total:,.2f}"
+            )
+            if st.button("✅ Execute Roll", type="primary", key="roll_exec_btn"):
+                close_resp, open_resp = execute_roll(client, roll_plan, current_action, roll_order_type)
+                if close_resp.get("success") and open_resp.get("success"):
+                    st.success("✅ Roll executed successfully!")
+                else:
+                    if not close_resp.get("success"):
+                        st.error(f"❌ Close order failed: {close_resp.get('message')}")
+                    if not open_resp.get("success"):
+                        st.error(f"❌ Open order failed: {open_resp.get('message')}")
+
+    with tab4:
+        if st.button("🔄 Load Basis Chart", key="fut_basis_btn"):
+            with st.spinner("Fetching futures quotes..."):
+                futures_data: Dict[str, float] = {}
+                for exp in expiries:
+                    resp = client.get_futures_quote(cfg.api_code, exchange, exp)
+                    if resp.get("success"):
+                        sd = (resp.get("data", {}) or {}).get("Success") or []
+                        if isinstance(sd, list) and sd:
+                            try:
+                                futures_data[exp] = float(sd[0].get("ltp", 0) or 0)
+                            except Exception:
+                                pass
+                spot_ltp = st.session_state.get("fut_spot", 0.0)
+                st.session_state["basis_data"] = (futures_data, spot_ltp)
+
+        basis_data = st.session_state.get("basis_data")
+        if basis_data:
+            futures_data, spot_ltp = basis_data
+            fig = render_basis_chart(futures_data, spot_ltp, instrument)
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Click **Load Basis Chart** above.")
+
 # ═══════════════════════════════════════════════════════════════
 # PAGE: HISTORICAL DATA
 # ═══════════════════════════════════════════════════════════════
@@ -3157,6 +3342,7 @@ PAGE_FN = {
     "Positions": page_positions,
     "Strategy Builder": page_strategy_builder,
     "Analytics": page_analytics,
+    "📈 Futures Trading": page_futures_trading,
     "📊 Historical Data": page_historical_data,
     "⏰ GTT Orders": page_gtt_orders,
     "Risk Monitor": page_risk_monitor,
