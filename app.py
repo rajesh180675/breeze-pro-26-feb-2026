@@ -40,7 +40,8 @@ from helpers import (
 from analytics import (
     calculate_greeks, estimate_implied_volatility,
     calculate_portfolio_greeks, stress_test_portfolio,
-    calculate_iv_smile, calculate_max_drawdown, calculate_var
+    calculate_iv_smile, calculate_max_drawdown, calculate_var,
+    monte_carlo_var, rolling_realized_vol, iv_vs_rv_spread, portfolio_correlation_matrix
 )
 from session_manager import (
     Credentials, SessionState, CacheManager, Notifications
@@ -54,7 +55,9 @@ from strategies import (
 )
 from persistence import TradeDB
 from risk_monitor import RiskMonitor, Alert
-import live_feed as lf
+from alerting import (
+    AlertConfig, AlertDispatcher, TelegramDispatcher, EmailDispatcher
+)
 
 # ─── Logging ──────────────────────────────────────────────────
 # Ensure logs directory exists before FileHandler is created.
@@ -1966,7 +1969,7 @@ def page_analytics():
     if not client:
         return
 
-    t1, t2, t3, t4 = st.tabs(["📊 Portfolio Greeks", "💰 Margin", "📈 Performance", "🧪 Stress Test"])
+    t1, t2, t3, t4, t5 = st.tabs(["📊 Portfolio Greeks", "💰 Margin", "📈 Performance", "🧪 Stress Test", "🎲 Monte Carlo VaR"])
 
     with t1:
         all_pos = get_cached_positions(client)
@@ -2087,6 +2090,27 @@ def page_analytics():
                 mc[2].metric("Worst Day", format_currency(min(daily_pnl)))
                 mc[3].metric("Max Drawdown", format_currency(calculate_max_drawdown(
                     list(hist_df.get("realized_pnl", pd.Series()).cumsum()))))
+
+            close_series = pd.to_numeric(hist_df.get("close", pd.Series(dtype=float)), errors="coerce")
+            if close_series.notna().sum() >= 21:
+                rv20 = rolling_realized_vol(close_series, window=20)
+                rv30 = rolling_realized_vol(close_series, window=30)
+                rv_df = pd.DataFrame({"rv_20": rv20, "rv_30": rv30}).dropna()
+                if not rv_df.empty:
+                    st.line_chart(rv_df, use_container_width=True)
+                    spread = iv_vs_rv_spread(current_iv=15.0, hist_close=close_series, window=20)
+                    st.caption(f"IV-RV Spread: IV {spread['iv']:.2f}% | RV {spread['rv']:.2f}% | Spread {spread['spread']:+.2f}% ({spread['spread_interpretation']})")
+
+            symbol_groups = hist_df.groupby("symbol") if "symbol" in hist_df.columns else []
+            corr_input = {}
+            for sym, gdf in symbol_groups:
+                s_close = pd.to_numeric(gdf.get("close", pd.Series(dtype=float)), errors="coerce").dropna()
+                if len(s_close) >= 15:
+                    corr_input[str(sym)] = s_close.reset_index(drop=True)
+            corr = portfolio_correlation_matrix(corr_input)
+            if not corr.empty:
+                st.markdown("**Symbol Correlation Matrix**")
+                st.dataframe(corr.style.background_gradient(cmap='RdYlGn', axis=None), use_container_width=True)
         else:
             empty_state("📈", "No P&L history yet", "Trade to build history")
 
@@ -2118,6 +2142,40 @@ def page_analytics():
                              use_container_width=True)
 
 
+    with t5:
+        st.markdown("**Monte Carlo Value-at-Risk (1-day, 95% confidence)**")
+        positions = client.get_positions().get("data", {}).get("Success", []) or []
+        if not positions:
+            st.info("No open positions found.")
+        else:
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                mc_days = st.selectbox("Horizon", [1, 3, 5], key="mc_days")
+            with col2:
+                mc_sims = st.selectbox("Simulations", [5_000, 10_000, 50_000], index=1, key="mc_sims")
+            with col3:
+                mc_vol = st.number_input("Portfolio IV %", value=15.0, step=0.5, key="mc_vol")
+
+            spot = st.session_state.get("last_spot", 22000)
+            if st.button("▶ Run Monte Carlo", key="mc_run_btn"):
+                with st.spinner(f"Running {mc_sims:,} simulations..."):
+                    var_result = monte_carlo_var(
+                        positions=positions,
+                        spot_price=float(spot),
+                        volatility_annual=float(mc_vol) / 100,
+                        days=int(mc_days),
+                        simulations=int(mc_sims),
+                    )
+
+                col_a, col_b, col_c, col_d = st.columns(4)
+                col_a.metric("VaR 95%", f"₹{var_result['var_95']:,.0f}", help="Loss not exceeded 95% of the time")
+                col_b.metric("VaR 99%", f"₹{var_result['var_99']:,.0f}", help="Loss not exceeded 99% of the time")
+                col_c.metric("CVaR 95%", f"₹{var_result['cvar_95']:,.0f}", help="Expected loss when VaR is breached")
+                col_d.metric("Expected P&L", f"₹{var_result['expected_pnl']:,.0f}")
+
+                col_e, col_f = st.columns(2)
+                col_e.metric("Worst Case", f"₹{var_result['worst_case']:,.0f}")
+                col_f.metric("Best Case", f"₹{var_result['best_case']:,.0f}")
 
 
 @error_handler
@@ -3162,6 +3220,102 @@ def page_watchlist():
     export_to_csv(df[display_cols], "watchlist.csv")
 
 
+def _load_alert_config_from_db() -> AlertConfig:
+    data = _db.get_setting("alert_config", {}) or {}
+    if isinstance(data, dict):
+        try:
+            return AlertConfig(**data)
+        except Exception:
+            pass
+    return AlertConfig()
+
+
+def _get_alert_dispatcher() -> AlertDispatcher:
+    if "alert_dispatcher" not in st.session_state:
+        st.session_state.alert_dispatcher = AlertDispatcher(_load_alert_config_from_db())
+    return st.session_state.alert_dispatcher
+
+
+def render_alerts_settings_tab(
+    alert_dispatcher: AlertDispatcher,
+    alert_config: AlertConfig,
+) -> AlertConfig:
+    """Render alerts configuration and return updated config."""
+    st.markdown("#### 🔔 Alert Notifications")
+
+    with st.expander("📱 Telegram Alerts", expanded=alert_config.telegram_enabled):
+        tg_enabled = st.toggle("Enable Telegram", value=alert_config.telegram_enabled, key="tg_enabled")
+        if tg_enabled:
+            tg_token = st.text_input("Bot Token", value=alert_config.telegram_bot_token, type="password", key="tg_token")
+            tg_chat = st.text_input("Chat ID", value=alert_config.telegram_chat_id, key="tg_chat")
+            if st.button("🧪 Test Telegram", key="tg_test"):
+                test_dispatcher = TelegramDispatcher(tg_token, tg_chat)
+                ok = test_dispatcher.send("✅ Breeze PRO: Telegram connected!")
+                st.success("Telegram working!") if ok else st.error("Telegram test failed.")
+        else:
+            tg_token = alert_config.telegram_bot_token
+            tg_chat = alert_config.telegram_chat_id
+
+    with st.expander("📧 Email Alerts", expanded=alert_config.email_enabled):
+        em_enabled = st.toggle("Enable Email", value=alert_config.email_enabled, key="em_enabled")
+        if em_enabled:
+            em_host = st.text_input("SMTP Host", value=alert_config.email_smtp_host, key="em_host")
+            em_port = st.number_input("SMTP Port", value=alert_config.email_smtp_port, min_value=1, max_value=65535, key="em_port")
+            em_user = st.text_input("Email (from)", value=alert_config.email_username, key="em_user")
+            em_pass = st.text_input("App Password", value=alert_config.email_password, type="password", key="em_pass")
+            em_to = st.text_input("Email (to)", value=alert_config.email_to, key="em_to")
+            if st.button("🧪 Test Email", key="em_test"):
+                test_email = EmailDispatcher(em_host, int(em_port), em_user, em_pass, em_to)
+                ok = test_email.send("[Breeze PRO] Alert Test", "<p>✅ Email alerts are configured correctly.</p>")
+                st.success("Email working!") if ok else st.error("Email test failed.")
+        else:
+            em_host = alert_config.email_smtp_host
+            em_port = alert_config.email_smtp_port
+            em_user = alert_config.email_username
+            em_pass = alert_config.email_password
+            em_to = alert_config.email_to
+
+    with st.expander("🔗 Webhook Alerts"):
+        wh_enabled = st.toggle("Enable Webhook", value=alert_config.webhook_enabled, key="wh_enabled")
+        wh_url = st.text_input("Webhook URL", value=alert_config.webhook_url, key="wh_url")
+        wh_secret = st.text_input("Webhook Secret (HMAC)", value=alert_config.webhook_secret, type="password", key="wh_secret")
+
+    st.divider()
+    st.markdown("**What to alert on:**")
+    al_fill = st.checkbox("Order fills", value=alert_config.alert_on_fill, key="al_fill")
+    al_sl = st.checkbox("Stop-loss breaches", value=alert_config.alert_on_stop_loss, key="al_sl")
+    al_gtt = st.checkbox("GTT triggers", value=alert_config.alert_on_gtt_trigger, key="al_gtt")
+    al_margin = st.checkbox("Low margin warnings", value=alert_config.alert_on_margin_warning, key="al_margin")
+    al_err = st.checkbox("API connection errors", value=alert_config.alert_on_errors, key="al_err")
+
+    new_cfg = AlertConfig(
+        telegram_enabled=tg_enabled,
+        telegram_bot_token=tg_token if tg_enabled else alert_config.telegram_bot_token,
+        telegram_chat_id=tg_chat if tg_enabled else alert_config.telegram_chat_id,
+        email_enabled=em_enabled,
+        email_smtp_host=em_host,
+        email_smtp_port=int(em_port),
+        email_username=em_user,
+        email_password=em_pass,
+        email_to=em_to,
+        webhook_enabled=wh_enabled,
+        webhook_url=wh_url if wh_enabled else alert_config.webhook_url,
+        webhook_secret=wh_secret,
+        alert_on_fill=al_fill,
+        alert_on_stop_loss=al_sl,
+        alert_on_gtt_trigger=al_gtt,
+        alert_on_margin_warning=al_margin,
+        alert_on_errors=al_err,
+    )
+
+    if st.button("💾 Save Alert Settings", type="primary", key="save_alert_cfg"):
+        _db.set_setting("alert_config", new_cfg.__dict__)
+        alert_dispatcher.update_config(new_cfg)
+        st.success("✅ Alert settings saved")
+
+    return new_cfg
+
+
 def render_funds_management_tab(client: BreezeAPIClient) -> None:
     """Render the Funds Management sub-tab within Settings."""
     st.markdown("#### 💰 Fund Transfer Between Segments")
@@ -3207,7 +3361,7 @@ def render_funds_management_tab(client: BreezeAPIClient) -> None:
 def page_settings():
     page_header("⚙️ Settings")
 
-    t1, t2, t3, t4 = st.tabs(["🎛️ Trading", "🛡️ Risk Limits", "🗄️ Database", "ℹ️ System Info"])
+    t1, t2, t3, t4, t5 = st.tabs(["🎛️ Trading", "🛡️ Risk Limits", "🔔 Alerts", "🗄️ Database", "ℹ️ System Info"])
 
     with t1:
         section("Trading Preferences")
@@ -3280,6 +3434,20 @@ def page_settings():
             st.success("✅ Risk limits updated")
 
     with t3:
+        section("Alerting")
+        dispatcher = _get_alert_dispatcher()
+        cfg = _load_alert_config_from_db()
+        render_alerts_settings_tab(dispatcher, cfg)
+
+        st.markdown("---")
+        st.markdown("**Recent alert dispatch history**")
+        hist = dispatcher.get_history(limit=20)
+        if hist:
+            st.dataframe(pd.DataFrame(hist), hide_index=True, use_container_width=True)
+        else:
+            st.caption("No dispatched alerts yet.")
+
+    with t4:
         section("Database")
         stats = _db.get_db_stats()
         c1, c2, c3 = st.columns(3)
@@ -3307,7 +3475,7 @@ def page_settings():
                 "PnL History": pd.DataFrame(_db.get_pnl_history(365)),
             }, "breeze_trader_export.xlsx")
 
-    with t4:
+    with t5:
         section("System Information")
         info_items = {
             "App Version": "v10.0 PRO",
