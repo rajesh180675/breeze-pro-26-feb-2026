@@ -1,27 +1,43 @@
-# --- Runtime dependencies for Streamlit trading UI ---
-streamlit>=1.40.0
+# requirements.txt — complete production dependencies
+
+# Core
+streamlit>=1.32.0
 breeze-connect>=1.0.65
 pandas>=2.0.0
 numpy>=1.24.0
-scipy>=1.10.0
-plotly>=5.14.0
-openpyxl>=3.1.0
+plotly>=5.17.0
+scipy>=1.11.0
 pytz>=2023.3
-pydantic>=2.0.0
-python-dotenv>=1.0.0
+
+# HTTP / WebSocket
 requests>=2.31.0
+websocket-client>=1.6.4
+
+# Data formats
+openpyxl>=3.1.0
+xlrd>=2.0.1
+
+# Production API
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+
+# Monitoring
+prometheus-client>=0.18.0
+
+# Security
+cryptography>=41.0.0
+
+# Configuration/runtime helpers
+python-dotenv>=1.0.0
 tenacity>=8.2.0
-
-# --- Service/API dependencies (production wrapper) ---
-fastapi>=0.110.0
-uvicorn>=0.30.0
-prometheus-client>=0.22.1
-urllib3>=2.2.0
+pydantic>=2.0.0
 pydantic-settings>=2.0.0
+urllib3>=2.2.0
+typing_extensions>=4.8.0
 
-# --- Testing / quality tooling (used in CI) ---
-pytest>=8.0.0
-pytest-cov>=5.0.0
+# Testing / quality
+pytest>=7.4.0
+pytest-cov>=4.1.0
 requests-mock>=1.12.1
 ruff>=0.6.0
 flake8>=7.0.0

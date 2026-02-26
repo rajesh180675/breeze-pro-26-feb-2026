@@ -219,6 +219,60 @@ def convert_to_breeze_iso_datetime(date_str: str, end_of_day: bool = False) -> s
     return date_str
 
 
+class APIResponseValidator:
+    """Validate and sanitize Breeze API responses."""
+
+    @staticmethod
+    def validate_quote_response(resp: Dict, expected_symbol: str = "") -> tuple[bool, str]:
+        if not resp.get("success"):
+            return False, str(resp.get("message", "Unknown error"))
+        data = resp.get("data") or {}
+        success = data.get("Success") if isinstance(data, dict) else None
+        if not success:
+            return False, "Empty Success in quote response"
+        item = success[0] if isinstance(success, list) and success else success
+        item = item if isinstance(item, dict) else {}
+        ltp = APIResponseValidator.sanitize_price(item.get("ltp"), default=0.0)
+        if ltp < 0:
+            return False, f"Negative LTP: {ltp}"
+        if ltp == 0 and C.is_market_open():
+            return False, "Zero LTP during market hours (possible stale/invalid data)"
+        if expected_symbol:
+            symbol = str(item.get("stock_code", "") or "").strip().upper()
+            if symbol and symbol != expected_symbol.strip().upper():
+                return False, f"Quote symbol mismatch: expected {expected_symbol}, got {symbol}"
+        return True, ""
+
+    @staticmethod
+    def validate_order_response(resp: Dict) -> tuple[bool, str]:
+        if not resp.get("success"):
+            return False, str(resp.get("message", "Unknown error"))
+        data = resp.get("data") or {}
+        success = data.get("Success") if isinstance(data, dict) else data
+        if not success:
+            return False, "No order ID in placement response"
+        if isinstance(success, list):
+            order_id = str((success[0] or {}).get("order_id", "")) if success else ""
+        elif isinstance(success, dict):
+            order_id = str(success.get("order_id", ""))
+        else:
+            order_id = str(success)
+        if not order_id:
+            return False, "Placement response missing order_id"
+        return True, ""
+
+    @staticmethod
+    def sanitize_price(value: Any, default: float = 0.0) -> float:
+        """Convert price-like value safely to non-negative float."""
+        if value is None or value == "" or value == "None":
+            return default
+        try:
+            result = float(str(value).replace(",", ""))
+            return result if result >= 0 else default
+        except (TypeError, ValueError):
+            return default
+
+
 # ═══════════════════════════════════════════════════════════════
 # API CLIENT
 # ═══════════════════════════════════════════════════════════════
