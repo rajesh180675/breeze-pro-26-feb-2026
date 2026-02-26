@@ -3,12 +3,27 @@ Breeze Options Trader PRO v10.0 — Configuration
 All pure logic. No external dependencies.
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Literal, Optional
 from dataclasses import dataclass
-import pytz
 
-IST = pytz.timezone("Asia/Kolkata")
+# Timezone setup: prefer pytz when available; fall back to stdlib zoneinfo (Python 3.9+)
+try:
+    import pytz as _pytz_mod  # type: ignore[import]
+    IST = _pytz_mod.timezone("Asia/Kolkata")
+    def _now_ist() -> datetime:
+        return datetime.now(_pytz_mod.timezone("Asia/Kolkata"))
+except ImportError:
+    try:
+        from zoneinfo import ZoneInfo as _ZoneInfo
+        IST = _ZoneInfo("Asia/Kolkata")
+        def _now_ist() -> datetime:  # type: ignore[misc]
+            return datetime.now(tz=_ZoneInfo("Asia/Kolkata"))
+    except Exception:
+        # Last resort: use UTC offset +5:30
+        IST = timezone(timedelta(hours=5, minutes=30))
+        def _now_ist() -> datetime:  # type: ignore[misc]
+            return datetime.now(tz=timezone(timedelta(hours=5, minutes=30)))
 
 # ─── Market hours ──────────────────────────────────────────────
 MARKET_PRE_OPEN_START = (9, 0)
@@ -30,10 +45,21 @@ HISTORICAL_CACHE_TTL_SECONDS = 300
 
 # ─── Limits ────────────────────────────────────────────────────
 MAX_ACTIVITY_LOG_ENTRIES = 200
-MAX_LOTS_PER_ORDER = 1000
+MAX_LOTS_PER_ORDER = 900    # NSE limit for NIFTY futures per order
 MIN_LOTS_PER_ORDER = 1
-RISK_FREE_RATE = 0.065
-DAYS_PER_YEAR = 365
+RISK_FREE_RATE = 0.065      # Approximate Indian risk-free rate (6.5%)
+DAYS_PER_YEAR = 365.0
+TRADING_DAYS_PER_YEAR = 252  # NSE trading days per year
+
+# ─── Futures lot sizes (NSE — verify against latest NSE circulars) ────────
+FUTURES_LOT_SIZES: Dict[str, int] = {
+    "NIFTY":      75,
+    "BANKNIFTY":  30,
+    "FINNIFTY":   40,
+    "MIDCPNIFTY": 75,
+    "SENSEX":     10,
+    "BANKEX":     15,
+}
 MAX_WATCHLIST_ITEMS = 20
 
 # ─── Auto-refresh ──────────────────────────────────────────────
@@ -119,7 +145,7 @@ def get_next_expiries(instrument_name: str, count: int = 6) -> List[str]:
     except KeyError:
         return []
     target_day = DAY_NUM[inst.expiry_day]
-    now = datetime.now(IST)
+    now = _now_ist()
     days_ahead = (target_day - now.weekday()) % 7
 
     # If today is expiry day: include today if market open, else jump to next week
@@ -143,7 +169,7 @@ def get_monthly_expiries(instrument_name: str, count: int = 3) -> List[str]:
     except KeyError:
         return []
     target_day = DAY_NUM[inst.expiry_day]
-    now = datetime.now(IST)
+    now = _now_ist()
     result = []
     for m in range(count):
         month = (now.month + m - 1) % 12 + 1
@@ -215,7 +241,7 @@ def validate_strike(instrument_name: str, strike: int) -> bool:
 
 
 def is_market_open() -> bool:
-    now = datetime.now(IST)
+    now = _now_ist()
     if now.weekday() >= 5:
         return False
     o = now.replace(hour=MARKET_OPEN[0], minute=MARKET_OPEN[1], second=0, microsecond=0)
@@ -223,9 +249,19 @@ def is_market_open() -> bool:
     return o <= now <= c
 
 
+def is_pre_market() -> bool:
+    """Return True during NSE pre-open session: 9:00 AM – 9:15 AM IST, Mon–Fri."""
+    now = _now_ist()
+    if now.weekday() >= 5:          # Saturday = 5, Sunday = 6
+        return False
+    pre_open  = now.replace(hour=MARKET_PRE_OPEN_START[0], minute=MARKET_PRE_OPEN_START[1], second=0, microsecond=0)
+    pre_close = now.replace(hour=MARKET_OPEN[0], minute=MARKET_OPEN[1], second=0, microsecond=0)
+    return pre_open <= now < pre_close
+
+
 def get_market_status() -> dict:
     """Return rich market status dict."""
-    now = datetime.now(IST)
+    now = _now_ist()
     if now.weekday() >= 5:
         return {"status": "closed", "label": "🔴 Closed (Weekend)", "color": "red"}
     o = now.replace(hour=MARKET_OPEN[0], minute=MARKET_OPEN[1], second=0, microsecond=0)

@@ -61,6 +61,7 @@ from alerting import (
     AlertConfig, AlertDispatcher, TelegramDispatcher, EmailDispatcher
 )
 from paper_trading import PaperTradingEngine
+import live_feed as lf
 
 # ─── Logging ──────────────────────────────────────────────────
 # Ensure logs directory exists before FileHandler is created.
@@ -250,7 +251,9 @@ RESPONSIVE_CSS = """
 </style>
 """
 
-st.markdown(THEME_CSS, unsafe_allow_html=True)
+# NOTE: THEME_CSS / BREEZE_PRO_CSS are injected inside main() to avoid
+# module-level Streamlit calls which execute on every file reload.
+# Do NOT add st.markdown() calls here at module scope.
 
 # ═══════════════════════════════════════════════════════════════
 # CONSTANTS

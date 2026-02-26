@@ -583,8 +583,12 @@ class BreezeAPIClient:
                     strike_price=str(strike),
                     user_remark=""
                 )
+            normalized = self._ok(resp)
+            ok, msg = APIResponseValidator.validate_order_response(normalized)
+            if not ok:
+                log.warning(f"place_order response validation warning: {msg}")
             log.info(f"place_order response: {resp}")
-            return self._ok(resp)
+            return normalized
         except Exception as e:
             self.idempotency.release(idem_key)
             log.error(f"Order failed: {e}", exc_info=True)
@@ -804,7 +808,7 @@ class BreezeAPIClient:
     def get_quotes(self, stock_code: str, exchange_code: str, product_type: str,
                    right: str = "", strike_price: str = "", expiry_date: str = ""):
         expiry_iso = convert_to_breeze_datetime(expiry_date) if expiry_date else ""
-        return self.call_sdk(
+        resp = self.call_sdk(
             "get_quotes",
             retryable=True,
             stock_code=stock_code,
@@ -814,6 +818,10 @@ class BreezeAPIClient:
             strike_price=str(strike_price) if strike_price != "" else "",
             expiry_date=expiry_iso,
         )
+        ok, msg = APIResponseValidator.validate_quote_response(resp, expected_symbol=stock_code)
+        if not ok:
+            log.debug("get_quotes validation notice for %s: %s", stock_code, msg)
+        return resp
 
     @retry_api_call(max_attempts=3, initial_delay=0.5)
     def get_historical_data_v2(self, interval: str, from_date: str, to_date: str,
