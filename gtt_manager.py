@@ -419,65 +419,112 @@ class GTTManager:
                     log.error(f"GTT sync error: {e}")
             self._sync_stop.wait(timeout=self.SYNC_INTERVAL_SECONDS)
 
-    def _extract_gtt_order_id(self, resp: Dict) -> str:
-        data = resp.get("data", {}) if isinstance(resp, dict) else {}
-        succ = data.get("Success") if isinstance(data, dict) else None
-        if isinstance(succ, dict):
-            for k in ("gtt_order_id", "gttOrderId", "id", "order_id"):
-                if succ.get(k):
-                    return str(succ.get(k))
-        if isinstance(succ, list) and succ and isinstance(succ[0], dict):
-            return str(succ[0].get("gtt_order_id", ""))
-        return ""
+    @staticmethod
+    def _extract_gtt_order_id(resp: Dict) -> Optional[str]:
+        """Extract GTT order ID from API response."""
+        success = resp.get("data", {})
+        if isinstance(success, dict):
+            success = success.get("Success") or success
+        if isinstance(success, dict):
+            return str(success.get("gtt_order_id", ""))
+        if isinstance(success, list) and success:
+            return str(success[0].get("gtt_order_id", ""))
+        return None
+
+    # ── SQLite persistence ────────────────────────────────────────────────────
 
     def _save_record(self, record: GTTOrderRecord) -> None:
-        conn = self._db._get_conn()
-        conn.execute(
-            """
-            INSERT OR REPLACE INTO gtt_orders (
-                gtt_order_id, gtt_type, status, instrument, exchange_code, stock_code,
-                expiry, strike, right, quantity, product, fresh_action, entry_price,
-                target_price, target_trigger_price, stoploss_price, stoploss_trigger_price,
-                trade_date, created_at, triggered_at, trigger_leg, cancelled_at, notes, raw_response
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-            """,
-            (
-                record.gtt_order_id, record.gtt_type.value, record.status.value, record.instrument,
-                record.exchange_code, record.stock_code, record.expiry, record.strike, record.right,
-                record.quantity, record.product, record.fresh_action, record.entry_price,
-                record.target_price, record.target_trigger_price, record.stoploss_price,
-                record.stoploss_trigger_price, record.trade_date, record.created_at, record.triggered_at,
-                record.trigger_leg, record.cancelled_at, record.notes, record.raw_response,
-            ),
-        )
-        conn.commit()
-
-    def _update_status(self, gtt_order_id: str, status: GTTStatus, **fields) -> None:
-        conn = self._db._get_conn()
-        updates = ["status = ?"]
-        values: List = [status.value]
-        for k, v in fields.items():
-            updates.append(f"{k} = ?")
-            values.append(v)
-        values.append(gtt_order_id)
-        conn.execute(f"UPDATE gtt_orders SET {', '.join(updates)} WHERE gtt_order_id = ?", values)
-        conn.commit()
+        try:
+            with self._db._tx() as conn:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO gtt_orders (
+                        gtt_order_id, gtt_type, status, instrument, exchange_code,
+                        stock_code, expiry, strike, right, quantity, product,
+                        fresh_action, entry_price, target_price, target_trigger_price,
+                        stoploss_price, stoploss_trigger_price, trade_date,
+                        created_at, triggered_at, trigger_leg, cancelled_at, notes, raw_response
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                    (
+                        record.gtt_order_id,
+                        record.gtt_type.value,
+                        record.status.value,
+                        record.instrument,
+                        record.exchange_code,
+                        record.stock_code,
+                        record.expiry,
+                        record.strike,
+                        record.right,
+                        record.quantity,
+                        record.product,
+                        record.fresh_action,
+                        record.entry_price,
+                        record.target_price,
+                        record.target_trigger_price,
+                        record.stoploss_price,
+                        record.stoploss_trigger_price,
+                        record.trade_date,
+                        record.created_at,
+                        record.triggered_at,
+                        record.trigger_leg,
+                        record.cancelled_at,
+                        record.notes,
+                        record.raw_response,
+                    ),
+                )
+        except Exception as e:
+            log.error(f"GTT save_record failed: {e}")
 
     def _load_record(self, gtt_order_id: str) -> Optional[GTTOrderRecord]:
-        conn = self._db._get_conn()
-        row = conn.execute("SELECT * FROM gtt_orders WHERE gtt_order_id = ?", (gtt_order_id,)).fetchone()
-        return self._row_to_record(row) if row else None
+        try:
+            row = self._db._get_conn().execute(
+                "SELECT * FROM gtt_orders WHERE gtt_order_id=?", (gtt_order_id,)
+            ).fetchone()
+            return self._row_to_record(row) if row else None
+        except Exception as e:
+            log.error(f"GTT load_record failed: {e}")
+            return None
 
-    def _load_records(self, status_filter: Optional[GTTStatus] = None, limit: int = 200) -> List[GTTOrderRecord]:
-        conn = self._db._get_conn()
-        if status_filter:
-            rows = conn.execute("SELECT * FROM gtt_orders WHERE status = ? ORDER BY created_at DESC LIMIT ?", (status_filter.value, limit)).fetchall()
-        else:
-            rows = conn.execute("SELECT * FROM gtt_orders ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
-        return [self._row_to_record(r) for r in rows]
+    def _load_records(
+        self,
+        status_filter: Optional[GTTStatus] = None,
+        limit: int = 200,
+    ) -> List[GTTOrderRecord]:
+        try:
+            query = "SELECT * FROM gtt_orders"
+            params: tuple = ()
+            if status_filter:
+                query += " WHERE status=?"
+                params = (status_filter.value,)
+            query += " ORDER BY created_at DESC LIMIT ?"
+            params = params + (limit,)
+            rows = self._db._get_conn().execute(query, params).fetchall()
+            return [self._row_to_record(row) for row in rows if row]
+        except Exception as e:
+            log.error(f"GTT load_records failed: {e}")
+            return []
+
+    def _update_status(
+        self,
+        gtt_order_id: str,
+        status: GTTStatus,
+        triggered_at: Optional[str] = None,
+        cancelled_at: Optional[str] = None,
+    ) -> None:
+        try:
+            with self._db._tx() as conn:
+                conn.execute(
+                    """UPDATE gtt_orders SET status=?, triggered_at=?,
+                       cancelled_at=? WHERE gtt_order_id=?""",
+                    (status.value, triggered_at, cancelled_at, gtt_order_id),
+                )
+        except Exception as e:
+            log.error(f"GTT update_status failed: {e}")
 
     @staticmethod
     def _row_to_record(row) -> GTTOrderRecord:
+        """Convert an sqlite3.Row to GTTOrderRecord."""
         d = dict(row)
         return GTTOrderRecord(
             gtt_order_id=d["gtt_order_id"],
@@ -491,14 +538,14 @@ class GTTManager:
             right=d["right"],
             quantity=d["quantity"],
             product=d["product"],
-            fresh_action=d["fresh_action"],
-            entry_price=d["entry_price"],
-            target_price=d["target_price"],
-            target_trigger_price=d["target_trigger_price"],
-            stoploss_price=d["stoploss_price"],
-            stoploss_trigger_price=d["stoploss_trigger_price"],
-            trade_date=d["trade_date"],
-            created_at=d["created_at"],
+            fresh_action=d.get("fresh_action", ""),
+            entry_price=d.get("entry_price", 0.0) or 0.0,
+            target_price=d.get("target_price", 0.0) or 0.0,
+            target_trigger_price=d.get("target_trigger_price", 0.0) or 0.0,
+            stoploss_price=d.get("stoploss_price", 0.0) or 0.0,
+            stoploss_trigger_price=d.get("stoploss_trigger_price", 0.0) or 0.0,
+            trade_date=d.get("trade_date", ""),
+            created_at=d.get("created_at", ""),
             triggered_at=d.get("triggered_at"),
             trigger_leg=d.get("trigger_leg"),
             cancelled_at=d.get("cancelled_at"),
