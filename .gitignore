@@ -27,3 +27,7 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
+
+# Key material
+*.pem
+*.key
