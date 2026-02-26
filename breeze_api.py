@@ -275,21 +275,14 @@ class BreezeAPIClient:
             self.rate_limiter.wait()
             return self._ok(self.breeze.get_portfolio_positions())
 
-    @retry_api_call(max_attempts=3, initial_delay=1.0, backoff=1.5)
-    def get_option_chain(self, stock_code: str, exchange: str, expiry: str):
+    def _fetch_one_side(self, stock_code: str, exchange: str,
+                         expiry_iso: str, right: str) -> List[Dict]:
         """
-        Fetch full option chain for a given instrument and expiry.
-
-        Breeze Connect requires:
-          - exchange_code: "NFO" for NSE derivatives, "BFO" for BSE derivatives
-          - product_type: "options"
-          - expiry_date: ISO-8601 format "YYYY-MM-DDTHH:MM:SS.000Z"
-          - right: "" to get both calls and puts
-          - strike_price: "" to get all strikes
+        Fetch all strikes for one side (call or put) of the option chain.
+        Breeze API requires an explicit right= value; it rejects right="".
+        strike_price="" fetches all available strikes for that right.
+        Returns list of records, or [] on error.
         """
-        self._require_connection()
-        expiry_iso = convert_to_breeze_datetime(expiry)
-        log.info(f"get_option_chain: stock={stock_code} exchange={exchange} expiry_iso={expiry_iso}")
         with self._api_lock:
             self.rate_limiter.wait()
             data = self.breeze.get_option_chain_quotes(
@@ -297,11 +290,56 @@ class BreezeAPIClient:
                 exchange_code=exchange,
                 product_type="options",
                 expiry_date=expiry_iso,
-                right="",
+                right=right,
                 strike_price=""
             )
-        log.info(f"get_option_chain raw response keys: {list(data.keys()) if isinstance(data, dict) else type(data)}")
-        return self._ok(data)
+        log.info(
+            f"_fetch_one_side {right}: status={data.get('Status') if isinstance(data, dict) else '?'} "
+            f"error={data.get('Error') if isinstance(data, dict) else '?'} "
+            f"records={len(data.get('Success') or []) if isinstance(data, dict) else '?'}"
+        )
+        if not isinstance(data, dict):
+            return []
+        if data.get("Error"):
+            log.error(f"_fetch_one_side {right} error: {data['Error']}")
+            return []
+        records = data.get("Success") or []
+        return records if isinstance(records, list) else []
+
+    def get_option_chain(self, stock_code: str, exchange: str, expiry: str):
+        """
+        Fetch full option chain by calling Breeze twice — once for calls, once for puts —
+        then merging into a single combined response.
+
+        Root cause of previous failure:
+          Breeze API returns error 500 "Either Right or Strike-Price cannot be empty"
+          when right="" is passed. It requires an explicit right="call" or right="put".
+          strike_price="" is accepted (fetches all strikes) only when right is explicit.
+        """
+        self._require_connection()
+        expiry_iso = convert_to_breeze_datetime(expiry)
+        log.info(f"get_option_chain: stock={stock_code} exchange={exchange} expiry_iso={expiry_iso}")
+
+        calls = self._fetch_one_side(stock_code, exchange, expiry_iso, "call")
+        puts  = self._fetch_one_side(stock_code, exchange, expiry_iso, "put")
+
+        all_records = calls + puts
+        log.info(
+            f"get_option_chain merged: {len(calls)} calls + {len(puts)} puts = {len(all_records)} total"
+        )
+
+        if not all_records:
+            # Both sides empty — surface as a structured error so UI can show it
+            return {
+                "success": False,
+                "data": {"Status": 500, "Error": "No data returned for either calls or puts", "Success": []},
+                "message": "No option chain data returned from Breeze for calls or puts",
+                "error_code": "EMPTY_CHAIN"
+            }
+
+        # Return in the same shape as a normal Breeze response so process_option_chain works
+        combined = {"Status": 200, "Error": None, "Success": all_records}
+        return {"success": True, "data": combined, "message": "", "error_code": None}
 
     @retry_api_call(max_attempts=2, initial_delay=0.5)
     def get_quotes(self, stock_code: str, exchange: str, expiry: str,
