@@ -54,7 +54,7 @@ from strategies import (
     generate_strategy_legs, calculate_strategy_metrics,
     generate_payoff_data, get_strategies_by_category
 )
-from persistence import TradeDB, AccountProfileDB
+from persistence import TradeDB, AccountProfileDB, export_trades_for_tax
 from risk_monitor import RiskMonitor, Alert
 from alerting import (
     AlertConfig, AlertDispatcher, TelegramDispatcher, EmailDispatcher
@@ -3481,6 +3481,29 @@ def render_funds_management_tab(client: BreezeAPIClient) -> None:
             st.warning("Please check the confirmation checkbox.")
 
 
+def render_tax_export_tab(db: TradeDB) -> None:
+    """Render tax export actions in Settings."""
+    st.markdown("#### 🧾 Tax Export")
+    fy = st.selectbox("Financial Year", ["2025-26", "2024-25", "2023-24"], key="tax_fy")
+    fmt = st.radio("Format", ["csv", "excel"], horizontal=True, key="tax_fmt")
+
+    if st.button("📥 Generate Tax Export", key="tax_export_btn"):
+        data = export_trades_for_tax(db, fy, fmt)
+        if not data:
+            st.warning("No trades found for this financial year.")
+            return
+        ext = "csv" if fmt == "csv" else "xlsx"
+        mime = "text/csv" if fmt == "csv" else (
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        st.download_button(
+            f"⬇️ Download {fy} Trade Report",
+            data=data,
+            file_name=f"breeze_trades_{fy}.{ext}",
+            mime=mime,
+        )
+
+
 # ═══════════════════════════════════════════════════════════════
 # PAGE: SETTINGS
 # ═══════════════════════════════════════════════════════════════
@@ -3493,7 +3516,9 @@ def page_settings():
 
     with t1:
         section("Trading Preferences")
-        settings_tab1, settings_tab2, settings_tab3, settings_tab4 = st.tabs(["⚙️ Trading", "💰 Funds", "🔐 TOTP", "👤 Accounts"])
+        settings_tab1, settings_tab2, settings_tab3, settings_tab4, settings_tab5 = st.tabs([
+            "⚙️ Trading", "💰 Funds", "🧾 Tax Export", "🔐 TOTP", "👤 Accounts"
+        ])
 
         with settings_tab1:
             c1, c2 = st.columns(2)
@@ -3535,9 +3560,12 @@ def page_settings():
                 st.info("Connect to Breeze API to use fund transfer operations.")
 
         with settings_tab3:
-            render_totp_section()
+            render_tax_export_tab(_db)
 
         with settings_tab4:
+            render_totp_section()
+
+        with settings_tab5:
             render_account_switcher(_db)
             render_paper_trading_section(get_client())
 
