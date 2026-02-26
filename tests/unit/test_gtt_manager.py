@@ -17,12 +17,11 @@ from gtt_manager import (
 from persistence import TradeDB
 
 
-
-
 def _reset_gtt_table(db: TradeDB):
     conn = db._get_conn()
     conn.execute("DELETE FROM gtt_orders")
     conn.commit()
+
 
 class _FakeClient:
     def __init__(self):
@@ -40,8 +39,8 @@ class _FakeClient:
         return {"success": True, "data": {"Success": {}}}
 
 
-def test_validate_three_leg_sell_rules():
-    req = GTTOrderRequest(
+def _base_three_leg_req() -> GTTOrderRequest:
+    return GTTOrderRequest(
         exchange_code="NFO",
         stock_code="NIFTY",
         product="options",
@@ -59,9 +58,41 @@ def test_validate_three_leg_sell_rules():
             GTTLeg(GTTLegType.STOPLOSS, "buy", "110", "112"),
         ],
     )
-    ok, err = validate_gtt_request(req)
+
+
+def test_validate_three_leg_sell_rules():
+    ok, err = validate_gtt_request(_base_three_leg_req())
     assert ok is True
     assert err == ""
+
+
+def test_validate_rejects_invalid_target_for_sell_entry():
+    req = _base_three_leg_req()
+    req.order_details[0] = GTTLeg(GTTLegType.TARGET, "buy", "105", "103")
+    ok, err = validate_gtt_request(req)
+    assert ok is False
+    assert "Target trigger" in err
+
+
+def test_place_three_leg_calls_sdk_method_with_expected_payload():
+    db = TradeDB()
+    client = _FakeClient()
+    mgr = GTTManager(client, db)
+    _reset_gtt_table(db)
+
+    req = _base_three_leg_req()
+    resp = mgr.place_three_leg(req)
+    assert resp["success"] is True
+
+    method, retryable, kwargs = client.calls[-1]
+    assert method == "gtt_three_leg_place_order"
+    assert retryable is False
+    assert kwargs["gtt_type"] == "THREE_LEG"
+    assert kwargs["stock_code"] == "NIFTY"
+    assert kwargs["quantity"] == "50"
+
+    records = mgr.get_all_gtts()
+    assert any(r.gtt_order_id == "GTT123" and r.entry_price == 100.0 for r in records)
 
 
 def test_place_single_leg_persists_record():
@@ -88,6 +119,21 @@ def test_place_single_leg_persists_record():
     assert resp["success"] is True
     active = mgr.get_active_gtts()
     assert any(r.gtt_order_id == "GTT123" for r in active)
+
+
+def test_cancel_routes_based_on_record_type():
+    db = TradeDB()
+    client = _FakeClient()
+    mgr = GTTManager(client, db)
+    _reset_gtt_table(db)
+
+    req = _base_three_leg_req()
+    mgr.place_three_leg(req)
+
+    result = mgr.cancel("GTT123")
+    assert result["success"] is True
+    method, _, _ = client.calls[-1]
+    assert method == "gtt_three_leg_cancel_order"
 
 
 def test_sync_updates_status_to_triggered():
