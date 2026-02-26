@@ -1,0 +1,29 @@
+# Secrets and credentials — NEVER commit these!
+.streamlit/secrets.toml
+.env
+*.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+venv/
+.venv/
+env/
+*.egg-info/
+
+# Database (contains trade history)
+data/
+
+# Logs
+logs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
