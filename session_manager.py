@@ -5,6 +5,10 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 import logging
 import hashlib
+import base64
+import hmac
+import struct
+import time as _time
 import app_config as C
 
 log = logging.getLogger(__name__)
@@ -243,3 +247,34 @@ class Notifications:
             st.toast(msg, icon="ℹ️")
         except Exception:
             pass
+
+
+def generate_totp(secret: str, digits: int = 6, period: int = 30) -> str:
+    """Generate RFC6238 TOTP from a base32 secret."""
+    secret_clean = str(secret or "").upper().replace(" ", "").replace("-", "")
+    if not secret_clean:
+        raise ValueError("Invalid TOTP secret: secret is empty")
+    padding = (8 - len(secret_clean) % 8) % 8
+    secret_padded = secret_clean + "=" * padding
+
+    try:
+        key = base64.b32decode(secret_padded, casefold=True)
+    except Exception as e:
+        raise ValueError(f"Invalid TOTP secret: {e}") from e
+
+    counter = int(_time.time()) // int(period)
+    msg = struct.pack(">Q", counter)
+    digest = hmac.new(key, msg, hashlib.sha1).digest()
+    offset = digest[-1] & 0x0F
+    code_int = struct.unpack(">I", digest[offset:offset + 4])[0] & 0x7FFFFFFF
+    code = code_int % (10 ** int(digits))
+    return str(code).zfill(int(digits))
+
+
+def auto_connect_with_totp(client, api_key: str, session_token: str, totp_secret: Optional[str] = None) -> Dict:
+    """Connect with explicit token or auto-generated TOTP from secret."""
+    token = str(session_token or "").strip()
+    if totp_secret and not token:
+        token = generate_totp(totp_secret)
+        log.info("Auto-generated TOTP for login")
+    return client.connect(token)

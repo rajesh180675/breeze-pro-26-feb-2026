@@ -44,7 +44,8 @@ from analytics import (
     monte_carlo_var, rolling_realized_vol, iv_vs_rv_spread, portfolio_correlation_matrix
 )
 from session_manager import (
-    Credentials, SessionState, CacheManager, Notifications
+    Credentials, SessionState, CacheManager, Notifications,
+    generate_totp, auto_connect_with_totp
 )
 from breeze_api import BreezeAPIClient
 from validators import validate_date_range
@@ -53,11 +54,12 @@ from strategies import (
     generate_strategy_legs, calculate_strategy_metrics,
     generate_payoff_data, get_strategies_by_category
 )
-from persistence import TradeDB
+from persistence import TradeDB, AccountProfileDB
 from risk_monitor import RiskMonitor, Alert
 from alerting import (
     AlertConfig, AlertDispatcher, TelegramDispatcher, EmailDispatcher
 )
+from paper_trading import PaperTradingEngine
 
 # ─── Logging ──────────────────────────────────────────────────
 # Ensure logs directory exists before FileHandler is created.
@@ -561,6 +563,14 @@ def render_sidebar():
         """, unsafe_allow_html=True)
         st.markdown("---")
 
+        if st.session_state.get("paper_trading_enabled"):
+            st.markdown("""
+            <div style="background:#fd7e14;color:black;padding:.5rem;
+                        border-radius:6px;text-align:center;font-weight:700">
+            📄 PAPER TRADING MODE
+            </div>
+            """, unsafe_allow_html=True)
+
         has_secrets = Credentials.has_stored_credentials()
         avail = PAGES if SessionState.is_authenticated() else ["Dashboard"]
         cur = SessionState.get_current_page()
@@ -648,8 +658,18 @@ def render_sidebar():
                 if k:
                     st.caption(f"API: {k[:4]}...{k[-4:]}")
 
+    if has_secrets:
+                k, _, _ = Credentials.get_all_credentials()
+                if k:
+                    st.caption(f"API: {k[:4]}...{k[-4:]}")
+
 
 def _render_login_form(has_secrets: bool):
+    profile_db = AccountProfileDB(_db)
+    active_profile = profile_db.get_active_profile()
+    if active_profile:
+        st.caption(f"Active Profile: {active_profile.get('profile_name')}")
+
     if has_secrets:
         st.markdown("### 🔑 Daily Login")
         st.success("✅ API Keys loaded from secrets")
@@ -659,7 +679,7 @@ def _render_login_form(has_secrets: bool):
             if st.form_submit_button("🔑 Connect", type="primary", use_container_width=True):
                 if tok and len(tok.strip()) >= 4:
                     k, s, _ = Credentials.get_all_credentials()
-                    do_login(k, s, tok.strip())
+                    do_login(k, s, tok.strip(), st.session_state.get("totp_secret", ""))
                 else:
                     st.warning("Enter a valid session token")
     else:
@@ -667,14 +687,17 @@ def _render_login_form(has_secrets: bool):
         st.warning("No secrets found. Enter credentials.")
         with st.form("full_login"):
             k, s, _ = Credentials.get_all_credentials()
+            if active_profile and not k:
+                k = active_profile.get("api_key", "")
+                st.session_state["totp_secret"] = active_profile.get("totp_secret", st.session_state.get("totp_secret", ""))
             nk = st.text_input("API Key", value=k, type="password")
             ns = st.text_input("API Secret", value=s, type="password")
-            tok = st.text_input("Session Token", type="password")
+            tok = st.text_input("Session Token (optional if TOTP secret set)", type="password")
             if st.form_submit_button("🔑 Connect", type="primary", use_container_width=True):
-                if all([nk, ns, tok]):
-                    do_login(nk.strip(), ns.strip(), tok.strip())
+                if nk and ns and (tok or st.session_state.get("totp_secret")):
+                    do_login(nk.strip(), ns.strip(), tok.strip(), st.session_state.get("totp_secret", ""))
                 else:
-                    st.warning("Fill all fields")
+                    st.warning("Provide API credentials and token or TOTP secret")
 
 
 def _cleanup_session():
@@ -691,18 +714,19 @@ def _cleanup_session():
     _db.log_activity("LOGOUT", "Session ended")
 
 
-def do_login(api_key, api_secret, token):
+def do_login(api_key, api_secret, token, totp_secret=""):
     if not api_key or not api_secret:
         st.error("❌ Missing API credentials")
         return
     with st.spinner("Connecting to Breeze API..."):
         try:
             client = BreezeAPIClient(api_key, api_secret)
-            resp = client.connect(token)
+            resp = auto_connect_with_totp(client, api_key, token, totp_secret=totp_secret)
             if resp["success"]:
                 Credentials.save_runtime_credentials(api_key, api_secret, token)
                 SessionState.set_authentication(True, client)
-                lf.initialize_live_feed(client.breeze)
+                if "paper_engine" not in st.session_state:
+                    st.session_state.paper_engine = PaperTradingEngine(client)
                 st.session_state.user_name = "Trader"
                 SessionState.log_activity("Login", "Connected successfully")
                 _db.log_activity("LOGIN", "Session started")
@@ -3316,6 +3340,110 @@ def render_alerts_settings_tab(
     return new_cfg
 
 
+def render_totp_section() -> None:
+    """Display TOTP generator tool and auto-login helper in Settings."""
+    st.markdown("#### 🔐 TOTP Auto-Login")
+    st.info("Enter your ICICI Direct TOTP base32 secret to auto-generate OTPs.")
+    totp_secret = st.text_input(
+        "TOTP Secret (base32)",
+        type="password",
+        value=st.session_state.get("totp_secret", ""),
+        key="totp_secret_input",
+    )
+    if totp_secret:
+        st.session_state["totp_secret"] = totp_secret
+        try:
+            current_otp = generate_totp(totp_secret)
+            remaining = 30 - (int(time.time()) % 30)
+            st.success(f"Current OTP: **{current_otp}** (valid for {remaining}s)")
+            st.caption("This OTP refreshes every 30 seconds.")
+        except ValueError as e:
+            st.error(f"Invalid TOTP secret: {e}")
+
+
+def render_account_switcher(db: TradeDB) -> None:
+    """Account profile manager in Settings."""
+    profile_db = AccountProfileDB(db)
+    st.markdown("#### 👤 Account Profiles")
+    profiles = profile_db.get_profiles()
+    active = profile_db.get_active_profile()
+
+    if profiles:
+        for p in profiles:
+            name = p["profile_name"]
+            is_active = name == (active or {}).get("profile_name")
+            col1, col2, col3 = st.columns([3, 1, 1])
+            col1.markdown(f"{'🟢 **' if is_active else ''}{name}{' (active)**' if is_active else ''}")
+            with col2:
+                if (not is_active) and st.button("Switch", key=f"switch_{name}"):
+                    profile_db.set_active(name)
+                    _cleanup_session()
+                    st.success(f"Switched to {name}. Re-login required.")
+                    st.rerun()
+            with col3:
+                if st.button("🗑️ Delete", key=f"del_{name}"):
+                    deleting_active = is_active
+                    profile_db.delete_profile(name)
+                    if deleting_active:
+                        _cleanup_session()
+                    st.rerun()
+
+    st.divider()
+    with st.expander("➕ Add New Account Profile"):
+        new_name = st.text_input("Profile Name", key="new_profile_name")
+        new_key = st.text_input("API Key", type="password", key="new_api_key")
+        new_totp = st.text_input("TOTP Secret (optional)", type="password", key="new_totp")
+        if st.button("Save Profile", key="save_profile_btn"):
+            if new_name and new_key:
+                profile_db.save_profile(new_name, new_key, new_totp)
+                if not active:
+                    profile_db.set_active(new_name)
+                st.success(f"Profile '{new_name}' saved.")
+                st.rerun()
+            else:
+                st.error("Profile name and API key are required.")
+
+
+def render_paper_trading_section(client: Optional[BreezeAPIClient]) -> None:
+    st.markdown("#### 📄 Paper Trading Mode")
+    if "paper_engine" not in st.session_state and client:
+        st.session_state.paper_engine = PaperTradingEngine(client)
+    engine: Optional[PaperTradingEngine] = st.session_state.get("paper_engine")
+    enabled = bool(st.session_state.get("paper_trading_enabled", False))
+
+    new_enabled = st.toggle("Enable Paper Trading", value=enabled, key="paper_mode_toggle")
+    if new_enabled != enabled:
+        if new_enabled:
+            if engine and client:
+                if "live_place_order_fn" not in st.session_state:
+                    st.session_state.live_place_order_fn = client.place_order
+                client.place_order = engine.place_order  # intercept live place_order calls
+                engine.enable()
+                st.session_state.paper_trading_enabled = True
+                st.success("Paper mode enabled. Live orders will be intercepted.")
+        else:
+            confirm = st.checkbox("Confirm switch back to LIVE trading", key="paper_to_live_confirm")
+            if confirm:
+                if engine:
+                    engine.disable()
+                if client and st.session_state.get("live_place_order_fn"):
+                    client.place_order = st.session_state.live_place_order_fn
+                st.session_state.paper_trading_enabled = False
+                st.success("Live mode restored.")
+            else:
+                st.warning("Please confirm before switching to live mode.")
+
+    if engine:
+        summary = engine.get_paper_summary()
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Open Positions", summary.get("open_positions", 0))
+        c2.metric("Filled Orders", summary.get("filled_orders", 0))
+        c3.metric("Realized P&L", f"₹{summary.get('realized_pnl', 0):,.2f}")
+        if st.button("Reset Paper Data", key="paper_reset_btn"):
+            engine.reset()
+            st.success("Paper trading data reset")
+
+
 def render_funds_management_tab(client: BreezeAPIClient) -> None:
     """Render the Funds Management sub-tab within Settings."""
     st.markdown("#### 💰 Fund Transfer Between Segments")
@@ -3365,7 +3493,7 @@ def page_settings():
 
     with t1:
         section("Trading Preferences")
-        settings_tab1, settings_tab2 = st.tabs(["⚙️ Trading", "💰 Funds"])
+        settings_tab1, settings_tab2, settings_tab3, settings_tab4 = st.tabs(["⚙️ Trading", "💰 Funds", "🔐 TOTP", "👤 Accounts"])
 
         with settings_tab1:
             c1, c2 = st.columns(2)
@@ -3405,6 +3533,13 @@ def page_settings():
                 render_funds_management_tab(client)
             else:
                 st.info("Connect to Breeze API to use fund transfer operations.")
+
+        with settings_tab3:
+            render_totp_section()
+
+        with settings_tab4:
+            render_account_switcher(_db)
+            render_paper_trading_section(get_client())
 
     with t2:
         section("Risk Limits")
