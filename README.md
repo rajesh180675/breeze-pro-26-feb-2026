@@ -55,3 +55,11 @@ docker run --rm -p 8000:8000 --env-file .env breeze-service:local
 
 ## Kubernetes manifest
 See `k8s/deployment.yaml` for deployment, service, probes, and HPA example.
+
+## UI recommendation and integration status
+- **Yes — Streamlit is the best fit for this project right now** because the app is trader-facing, Python-native, and already implemented as a Streamlit terminal (`app.py`).
+- The frontend is **already integrated** with Breeze via `BreezeAPIClient` (`breeze_api.py`).
+- Optional bridge mode is now available to route supported frontend calls through the new production wrapper (`app/lib/breeze_client.py`) by setting:
+  - `BREEZE_USE_PRODUCTION_CLIENT=true`
+- In bridge mode, `get_positions()` uses the production client first and safely falls back to SDK behavior if needed.
+
