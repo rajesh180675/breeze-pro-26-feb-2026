@@ -88,6 +88,16 @@ CREATE TABLE IF NOT EXISTS settings (
     value TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS account_profiles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    profile_name TEXT UNIQUE NOT NULL,
+    api_key TEXT NOT NULL,
+    totp_secret TEXT DEFAULT '',
+    broker TEXT DEFAULT 'ICICI',
+    is_active INTEGER DEFAULT 0,
+    created_at TEXT NOT NULL,
+    last_used TEXT
+);
 CREATE INDEX IF NOT EXISTS idx_trades_ts ON trades(timestamp);
 CREATE INDEX IF NOT EXISTS idx_trades_date ON trades(date);
 CREATE INDEX IF NOT EXISTS idx_activity_ts ON activity_log(timestamp);
@@ -445,3 +455,61 @@ class TradeDB:
             conn.execute("VACUUM")
         except Exception:
             pass
+
+
+class AccountProfileDB:
+    """Manage multiple account credential profiles."""
+
+    def __init__(self, db: TradeDB):
+        self._db = db
+
+    def save_profile(self, profile_name: str, api_key: str, totp_secret: str = "", broker: str = "ICICI") -> None:
+        now = datetime.now().isoformat()
+        with self._db._tx() as conn:
+            existing = conn.execute(
+                "SELECT created_at FROM account_profiles WHERE profile_name=?", (profile_name,)
+            ).fetchone()
+            created_at = existing["created_at"] if existing and existing["created_at"] else now
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO account_profiles
+                (profile_name, api_key, totp_secret, broker, is_active, created_at, last_used)
+                VALUES (?, ?, ?, ?,
+                    COALESCE((SELECT is_active FROM account_profiles WHERE profile_name=?), 0),
+                    ?,
+                    COALESCE((SELECT last_used FROM account_profiles WHERE profile_name=?), NULL)
+                )
+                """,
+                (profile_name, api_key, totp_secret, broker, profile_name, created_at, profile_name),
+            )
+
+    def get_profiles(self) -> List[Dict]:
+        rows = self._db._get_conn().execute(
+            "SELECT * FROM account_profiles ORDER BY profile_name"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_profile(self, profile_name: str) -> Optional[Dict]:
+        row = self._db._get_conn().execute(
+            "SELECT * FROM account_profiles WHERE profile_name=?",
+            (profile_name,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def delete_profile(self, profile_name: str) -> None:
+        with self._db._tx() as conn:
+            conn.execute("DELETE FROM account_profiles WHERE profile_name=?", (profile_name,))
+
+    def set_active(self, profile_name: str) -> None:
+        with self._db._tx() as conn:
+            conn.execute("UPDATE account_profiles SET is_active=0")
+            conn.execute(
+                "UPDATE account_profiles SET is_active=1, last_used=? WHERE profile_name=?",
+                (datetime.now().isoformat(), profile_name),
+            )
+
+    def get_active_profile(self) -> Optional[Dict]:
+        row = self._db._get_conn().execute(
+            "SELECT * FROM account_profiles WHERE is_active=1 LIMIT 1"
+        ).fetchone()
+        return dict(row) if row else None

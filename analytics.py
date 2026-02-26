@@ -4,15 +4,18 @@ Pure math. Only depends on app_config.
 """
 
 import numpy as np
+import pandas as pd
 from scipy.stats import norm
 from scipy.optimize import brentq
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
 import logging
+from datetime import datetime
 
 import app_config as C
 
 log = logging.getLogger(__name__)
+TRADING_DAYS_PER_YEAR = getattr(C, "TRADING_DAYS_PER_YEAR", 252)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -339,3 +342,132 @@ def stress_test_portfolio(positions: list, spot_prices: dict,
             row[f"{spot_move:+d}%"] = round(total_pnl, 2)
         results[f"IV {iv_move:+d}%"] = row
     return results
+
+
+# ═══════════════════════════════════════════════════════════════
+# ADVANCED PORTFOLIO ANALYTICS
+# ═══════════════════════════════════════════════════════════════
+
+def monte_carlo_var(
+    positions: List[Dict],
+    spot_price: float,
+    volatility_annual: float,
+    days: int = 1,
+    simulations: int = 10_000,
+    confidence_level: float = 0.95,
+    risk_free_rate: float = C.RISK_FREE_RATE,
+) -> Dict:
+    """Monte Carlo Value-at-Risk for an options portfolio."""
+    if not positions or simulations <= 0 or spot_price <= 0:
+        return {
+            "var_95": 0.0, "var_99": 0.0, "cvar_95": 0.0,
+            "expected_pnl": 0.0, "worst_case": 0.0, "best_case": 0.0,
+            "simulations": int(max(simulations, 0)), "confidence_level": confidence_level, "days": days,
+        }
+
+    vol_daily = max(0.0, volatility_annual) / np.sqrt(C.DAYS_PER_YEAR)
+    rng = np.random.default_rng(seed=42)
+    spot_returns = rng.normal(0, vol_daily * np.sqrt(max(days, 1)), int(simulations))
+
+    pnl_distribution = np.zeros(int(simulations), dtype=float)
+
+    for pos in positions:
+        qty = int(float(pos.get("quantity", 0) or 0))
+        if qty == 0:
+            continue
+
+        ltp = float(pos.get("ltp", pos.get("average_price", 0)) or 0)
+        strike = float(pos.get("strike_price", 0) or 0)
+        if strike <= 0:
+            continue
+
+        iv_raw = float(pos.get("iv", volatility_annual * 100) or (volatility_annual * 100))
+        iv = iv_raw / 100 if iv_raw > 1 else iv_raw
+        iv = max(0.01, iv)
+
+        right = str(pos.get("right", pos.get("option_type", "call"))).lower()
+        option_type = "CE" if "c" in right else "PE"
+
+        expiry_str = str(pos.get("expiry_date", ""))
+        try:
+            exp_dt = datetime.strptime(expiry_str[:10], "%Y-%m-%d")
+            dte = max(1, (exp_dt - datetime.now()).days)
+        except Exception:
+            dte = 30
+        tte = dte / C.DAYS_PER_YEAR
+
+        tte_new = max(1e-6, tte - max(days, 1) / C.DAYS_PER_YEAR)
+        for i, ret in enumerate(spot_returns):
+            new_spot = float(spot_price * np.exp(ret))
+            new_price = bs_price(new_spot, strike, tte_new, iv, option_type, risk_free_rate)
+            pnl_distribution[i] += (new_price - ltp) * qty
+
+    pnl_sorted = np.sort(pnl_distribution)
+    tail_count = max(1, int((1 - confidence_level) * simulations))
+
+    q95 = float(np.percentile(pnl_distribution, 5))
+    q99 = float(np.percentile(pnl_distribution, 1))
+
+    # Report VaR as loss magnitudes (positive numbers), which preserves monotonicity:
+    # VaR99 (more conservative) >= VaR95.
+    var_95 = max(0.0, -q95)
+    var_99 = max(var_95, max(0.0, -q99))
+
+    tail = pnl_distribution[pnl_distribution <= q95]
+    cvar_95 = max(0.0, -float(tail.mean())) if len(tail) > 0 else var_95
+
+    return {
+        "var_95": round(var_95, 2),
+        "var_99": round(var_99, 2),
+        "cvar_95": round(cvar_95, 2),
+        "expected_pnl": round(float(pnl_distribution.mean()), 2),
+        "worst_case": round(float(pnl_sorted[0]), 2),
+        "best_case": round(float(pnl_sorted[-1]), 2),
+        "simulations": int(simulations),
+        "confidence_level": confidence_level,
+        "days": int(days),
+    }
+
+
+def rolling_realized_vol(
+    close_prices: pd.Series,
+    window: int = 20,
+    trading_days_per_year: int = TRADING_DAYS_PER_YEAR,
+) -> pd.Series:
+    """Rolling realized volatility annualized in percentage terms."""
+    log_returns = np.log(close_prices / close_prices.shift(1))
+    return (
+        log_returns.rolling(window=window).std() * np.sqrt(trading_days_per_year) * 100
+    ).rename(f"rv_{window}")
+
+
+def iv_vs_rv_spread(current_iv: float, hist_close: pd.Series, window: int = 20) -> Dict:
+    """Compute IV vs realized-vol spread and interpretation."""
+    rv_series = rolling_realized_vol(hist_close, window)
+    rv_valid = rv_series.dropna()
+    rv = float(rv_valid.iloc[-1]) if len(rv_valid) > 0 else float(current_iv)
+    spread = float(current_iv) - rv
+    interp = (
+        "Expensive (sell premium)" if spread > 3
+        else "Cheap (buy premium)" if spread < -3
+        else "Fair Value"
+    )
+    return {
+        "iv": round(float(current_iv), 2),
+        "rv": round(rv, 2),
+        "spread": round(spread, 2),
+        "spread_interpretation": interp,
+    }
+
+
+def portfolio_correlation_matrix(historical_data: Dict[str, pd.Series]) -> pd.DataFrame:
+    """Pairwise log-return correlation matrix for portfolio symbols."""
+    if not historical_data:
+        return pd.DataFrame()
+    returns = pd.DataFrame({
+        sym: np.log(prices / prices.shift(1))
+        for sym, prices in historical_data.items()
+    }).dropna()
+    if returns.empty:
+        return pd.DataFrame()
+    return returns.corr()
