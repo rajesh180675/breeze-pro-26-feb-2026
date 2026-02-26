@@ -1,164 +1,65 @@
-# 📈 Breeze Options Trader PRO v10.0
+# Breeze Production Integration
 
-> **Production-grade** ICICI Breeze Options Trading Terminal built with Streamlit.
-> Complete end-to-end options trading: market data, execution, risk management, analytics.
+Production-ready Breeze integration components for ICICI Direct + Breeze Connect.
 
----
+## Features
+- Typed configuration via environment variables (`app/lib/config.py`).
+- Central REST wrapper with retries, quota enforcement (100/min, 5000/day), circuit breaker, token handling, and typed errors (`app/lib/breeze_client.py`).
+- Session token lifecycle helpers and pluggable token stores (`app/lib/auth.py`).
+- WebSocket feed client with reconnect and subscription cap management (`app/lib/breeze_ws.py`).
+- FastAPI service with `/healthz`, `/ready`, and `/metrics` endpoints (`app/api/main.py`).
+- CI workflow with linting, tests, security scan, and Docker build (`.github/workflows/ci.yml`).
 
-## 🚀 Quick Start
+## Environment variables
+- `BREEZE_CLIENT_ID`
+- `BREEZE_CLIENT_SECRET`
+- `BREEZE_SESSION_TOKEN`
+- `BREEZE_BASE_URL` (optional)
+- `MAX_REQUESTS_PER_MINUTE` (optional; default `100`)
+- `MAX_REQUESTS_PER_DAY` (optional; default `5000`)
 
+For local development only, use `.env` (already gitignored).
+
+## Run locally
 ```bash
-# 1. Clone / unzip
-unzip breeze_trader_pro_v10.zip && cd breeze_trader_pro
-
-# 2. Setup (installs deps, creates dirs)
-chmod +x setup.sh && ./setup.sh
-
-# 3. Add credentials
-nano .streamlit/secrets.toml
-
-# 4. Launch
-./run.sh
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn app.api.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-Open `http://localhost:8501` → enter daily session token → trade!
-
----
-
-## ✨ What's New in v10.0
-
-| Feature | v8 (Original) | v10 PRO |
-|---------|--------------|---------|
-| Pages | 9 | 11 |
-| Strategies | 7 | 15+ |
-| Auto-refresh | ❌ | ✅ Configurable |
-| IV Smile | ❌ | ✅ |
-| Stress Test | ❌ | ✅ |
-| Bulk Square-Off | ❌ | ✅ |
-| Watchlist | ❌ | ✅ Persistent |
-| P&L History | ❌ | ✅ 90-day chart |
-| Export | ❌ | ✅ CSV + Excel |
-| Portfolio Greeks | Basic | ✅ Full aggregation |
-| Portfolio Stop | ❌ | ✅ |
-| Settings Page | ❌ | ✅ |
-| Auto Stop-Loss on Sell | ❌ | ✅ |
-| Dark Mode | ❌ | ✅ |
-| Payoff Diagram | Basic | ✅ Plotly interactive |
-
----
-
-## 📋 Pages
-
-| Page | Description |
-|------|-------------|
-| 🏠 Dashboard | Account overview, positions, P&L, quick actions |
-| 📊 Option Chain | Live chain, Greeks, PCR, IV smile, OI charts |
-| 💰 Sell Options | Place sell orders with auto stop-loss setup |
-| 🔄 Square Off | Individual or bulk square-off with P&L display |
-| 📋 Orders & Trades | Live orders, trades, persistent history, export |
-| 📍 Positions | Current positions with real-time P&L |
-| 🎯 Strategy Builder | 15+ templates + custom legs + payoff diagrams |
-| 📈 Analytics | Greeks, margin, performance, stress test |
-| 🛡️ Risk Monitor | Fixed/trailing stops + portfolio-level limits |
-| 👁️ Watchlist | Track options with live quote updates |
-| ⚙️ Settings | Trading preferences, risk limits, DB management |
-
----
-
-## 🎯 Strategy Templates (15+)
-
-**Neutral Sell** (Premium Collection):
-- Short Straddle, Short Strangle
-- Iron Condor, Wide Iron Condor, Iron Butterfly
-
-**Directional Buy**:
-- Bull Call Spread, Bull Put Spread, Long Call
-- Bear Put Spread, Bear Call Spread, Long Put
-
-**Volatile**:
-- Long Straddle, Long Strangle
-
-**Advanced**:
-- Jade Lizard, Broken Wing Butterfly, Ratio Put Spread
-
----
-
-## 🛡️ Risk Management Features
-
-- **Per-position stops**: Fixed price or trailing % stop-losses
-- **Auto stop-loss**: Set automatically when placing sell orders
-- **Portfolio limit**: Alert + trigger when total loss exceeds limit
-- **Margin monitoring**: Warnings at 75%, critical at 90%
-- **Expiry alerts**: Day-before and same-day warnings
-- **Stress testing**: P&L under various spot & IV scenarios
-
----
-
-## 📁 Project Structure
-
-```
-breeze_trader_pro/
-├── app.py                  # Main Streamlit app (11 pages)
-├── app_config.py           # Instruments, constants, expiry logic
-├── breeze_api.py           # ICICI Breeze API client (retry, rate-limit)
-├── helpers.py              # Utilities, formatting, chain processing
-├── analytics.py            # Black-Scholes, Greeks, IV, portfolio math
-├── strategies.py           # 15+ strategies, payoff diagrams
-├── risk_monitor.py         # Background stop-loss daemon
-├── persistence.py          # SQLite: trades, watchlist, alerts, settings
-├── session_manager.py      # Session, credentials, caching
-├── validators.py           # Pydantic v2 validation
-├── requirements.txt        # Dependencies
-├── setup.sh / setup.bat    # One-click setup
-├── run.sh / run.bat        # Launch scripts
-├── .streamlit/
-│   ├── config.toml         # Dark theme + server config
-│   └── secrets.toml        # API credentials (gitignored)
-├── data/                   # SQLite DB (auto-created)
-└── logs/                   # App logs (auto-created)
-```
-
----
-
-## 🔑 Credentials Setup
-
-### Option A: Streamlit Secrets (Recommended)
-```toml
-# .streamlit/secrets.toml
-BREEZE_API_KEY = "your_key"
-BREEZE_API_SECRET = "your_secret"
-```
-
-### Option B: Environment Variables
+## Tests
 ```bash
-export BREEZE_API_KEY=your_key
-export BREEZE_API_SECRET=your_secret
+pytest tests/unit --cov=app/lib --cov-report=term-missing
+pytest tests/integration -m integration
+```
+Integration tests auto-skip when Breeze credentials are missing.
+
+## Docker
+```bash
+docker build -t breeze-service:local .
+docker run --rm -p 8000:8000 --env-file .env breeze-service:local
 ```
 
-### Option C: Manual Entry
-Enter credentials directly in the login form on first run.
+## Operations runbook
+- **429/RateLimitError spikes**: reduce polling, migrate reads to websocket subscriptions.
+- **AuthenticationError**: rotate and re-issue session token; restart deployment to refresh env-based token.
+- **CircuitOpenError**: upstream is unhealthy; wait for breaker cooldown, monitor 5xx errors.
+- **Websocket disconnect loops**: verify network egress, subscription count, and feed token validity.
 
----
+## Security checklist
+- Never commit secrets (`.env`, `.streamlit/secrets.toml`, `*.pem`, `*.key` are ignored).
+- Keep TLS verification enabled (no `verify=False`).
+- Rotate API keys and session tokens periodically.
+- Run `bandit -q -r app` in CI before deployment.
 
-## 🔄 Daily Workflow
+## Kubernetes manifest
+See `k8s/deployment.yaml` for deployment, service, probes, and HPA example.
 
-1. Login to [ICICI Breeze portal](https://api.icicidirect.com/) → get session token
-2. Open the app → paste token → Connect
-3. Check Dashboard for positions & funds
-4. Use Option Chain to find strikes
-5. Sell Options with auto stop-loss
-6. Monitor in Risk Monitor page
-7. Square off positions as needed
+## UI recommendation and integration status
+- **Yes — Streamlit is the best fit for this project right now** because the app is trader-facing, Python-native, and already implemented as a Streamlit terminal (`app.py`).
+- The frontend is **already integrated** with Breeze via `BreezeAPIClient` (`breeze_api.py`).
+- Optional bridge mode is now available to route supported frontend calls through the new production wrapper (`app/lib/breeze_client.py`) by setting:
+  - `BREEZE_USE_PRODUCTION_CLIENT=true`
+- In bridge mode, `get_positions()` uses the production client first and safely falls back to SDK behavior if needed.
 
----
-
-## ⚠️ Risk Disclaimer
-
-This terminal is for educational/research purposes. Option selling carries **unlimited risk**.
-Always use stop-losses. Never risk more than you can afford to lose.
-
----
-
-## 📜 License
-
-MIT License — Use at your own risk.
