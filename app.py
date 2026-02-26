@@ -3,8 +3,8 @@ Breeze Options Trader PRO v10.0
 Production-grade terminal for ICICI Breeze Options Trading.
 
 Enhanced features:
-- 11 pages: Dashboard, Option Chain, Sell, Square Off, Orders, Positions,
-            Strategy Builder, Analytics, Risk Monitor, Watchlist, Settings
+- 12 pages: Dashboard, Option Chain, Sell, Square Off, Orders, Positions,
+            Strategy Builder, Analytics, Historical Data, Risk Monitor, Watchlist, Settings
 - Auto-refresh with live countdown
 - IV Smile + Term Structure charts
 - Stress Testing / Scenario Analysis
@@ -196,14 +196,14 @@ st.markdown(THEME_CSS, unsafe_allow_html=True)
 PAGES = [
     "Dashboard", "Option Chain", "Sell Options", "Square Off",
     "Orders & Trades", "Positions", "Strategy Builder",
-    "Analytics", "Risk Monitor", "Watchlist", "Settings"
+    "Analytics", "📊 Historical Data", "⏰ GTT Orders", "Risk Monitor", "Watchlist", "Settings"
 ]
 
 ICONS = {
     "Dashboard": "🏠", "Option Chain": "📊",
     "Sell Options": "💰", "Square Off": "🔄",
     "Orders & Trades": "📋", "Positions": "📍",
-    "Strategy Builder": "🎯", "Analytics": "📈",
+    "Strategy Builder": "🎯", "Analytics": "📈", "📊 Historical Data": "📊", "⏰ GTT Orders": "⏰",
     "Risk Monitor": "🛡️", "Watchlist": "👁️", "Settings": "⚙️"
 }
 
@@ -1201,11 +1201,11 @@ def page_square_off():
                     continue
                 # Clamp to exact multiple of lot size
                 qty_to_close = lots_to_close * lot_size
-                r = client.square_off(
-                    sc, e.get("exchange_code"),
-                    e.get("expiry_date"), safe_int(e.get("strike_price")),
-                    C.normalize_option_type(e.get("right", "")),
-                    qty_to_close, e["_pt"], "market", 0.0
+                r = client.square_off_option_position(
+                    e,
+                    quantity=qty_to_close,
+                    order_type="market",
+                    limit_price=0.0,
                 )
                 if r["success"]:
                     success_count += 1
@@ -1338,11 +1338,11 @@ def page_square_off():
         st.session_state._order_busy = True
         try:
             with st.spinner("Squaring off..."):
-                r = client.square_off(
-                    sel.get("stock_code"), sel.get("exchange_code"),
-                    sel.get("expiry_date"), safe_int(sel.get("strike_price")),
-                    C.normalize_option_type(sel.get("right", "")),
-                    sq, sel["_pt"], ot.lower(), pr
+                r = client.square_off_option_position(
+                    sel,
+                    quantity=sq,
+                    order_type=ot.lower(),
+                    limit_price=pr,
                 )
                 if r["success"]:
                     oid = APIResponse(r).get("order_id", "?")
@@ -1938,6 +1938,524 @@ def page_analytics():
                              use_container_width=True)
 
 
+
+# ═══════════════════════════════════════════════════════════════
+# PAGE: HISTORICAL DATA
+# ═══════════════════════════════════════════════════════════════
+
+@error_handler
+@require_auth
+def page_historical_data():
+    """Historical Data & Technical Analysis page."""
+    st.markdown('<div class="page-header">📊 Historical Data & Charts</div>', unsafe_allow_html=True)
+
+    from historical import HistoricalDataFetcher, get_historical_cache
+    from charts import render_candlestick, render_technical_subplot
+    import ta_indicators as ta
+    import plotly.graph_objects as go
+
+    client: BreezeAPIClient = st.session_state.get("client")
+    if not client or not client.is_connected():
+        st.warning("Connect to Breeze API first.")
+        return
+
+    fetcher = HistoricalDataFetcher(client)
+
+    tab1, tab2, tab3, tab4 = st.tabs(["📊 Price Chart", "📈 Options History", "🔢 Technical Analysis", "📥 Data Export"])
+
+    with st.expander("⚙️ Instrument Settings", expanded=True):
+        col1, col2, col3 = st.columns([2, 1, 1])
+        with col1:
+            instrument = st.selectbox("Instrument", list(C.INSTRUMENTS.keys()), key="hist_instrument")
+            cfg = C.INSTRUMENTS[instrument]
+        with col2:
+            product_type = st.selectbox("Product", ["cash", "futures", "options"], key="hist_product")
+        with col3:
+            exchange = st.text_input("Exchange", value=cfg.exchange, key="hist_exchange")
+
+        if product_type == "options":
+            col4, col5, col6 = st.columns(3)
+            with col4:
+                expiry_options = C.get_next_expiries(instrument, count=6)
+                expiry = st.selectbox("Expiry", expiry_options, key="hist_expiry")
+            with col5:
+                right = st.selectbox("Right", ["call", "put"], key="hist_right")
+            with col6:
+                atm = st.number_input(
+                    "Strike",
+                    value=int(st.session_state.get("last_spot", 22000) // cfg.strike_gap * cfg.strike_gap),
+                    step=cfg.strike_gap,
+                    key="hist_strike",
+                )
+            expiry_date = expiry
+            right_param = right
+            strike_param = str(int(atm))
+        else:
+            expiry_date = right_param = strike_param = ""
+
+        col7, col8, col9 = st.columns(3)
+        with col7:
+            from_date = st.date_input("From Date", value=date.today() - timedelta(days=365), key="hist_from")
+        with col8:
+            to_date = st.date_input("To Date", value=date.today(), key="hist_to")
+        with col9:
+            interval = st.selectbox("Interval", ["1day", "30minute", "5minute", "1minute"], key="hist_interval")
+
+        fetch_btn = st.button("📥 Fetch Data", type="primary", key="hist_fetch")
+
+    if "hist_df" not in st.session_state:
+        st.session_state["hist_df"] = None
+
+    if fetch_btn:
+        with st.spinner("Fetching historical data..."):
+            try:
+                df = fetcher.fetch(
+                    stock_code=cfg.api_code,
+                    exchange_code=exchange,
+                    product_type=product_type,
+                    from_date=str(from_date),
+                    to_date=str(to_date),
+                    interval=interval,
+                    expiry_date=expiry_date,
+                    right=right_param,
+                    strike_price=strike_param,
+                )
+                st.session_state["hist_df"] = df
+                if df.empty:
+                    st.warning("No data returned for the selected parameters.")
+                else:
+                    st.success(f"✅ Fetched {len(df):,} candles ({from_date} → {to_date})")
+                    st.caption(f"API calls used: {fetcher.last_api_calls}")
+            except Exception as e:
+                st.error(f"Fetch failed: {e}")
+                log.error(f"Historical fetch error: {e}", exc_info=True)
+
+    df = st.session_state.get("hist_df")
+
+    with tab1:
+        if df is None:
+            st.info("Configure instrument settings above and click **Fetch Data**.")
+        elif df.empty:
+            st.warning("No data available for the selected parameters.")
+        else:
+            col_a, col_b, col_c = st.columns(3)
+            with col_a:
+                st.radio("Chart Type", ["Candlestick", "Line", "OHLC"], horizontal=True, key="chart_type")
+            with col_b:
+                emas = st.multiselect("EMA Overlays", [9, 20, 50, 100, 200], default=[20, 50], key="chart_emas")
+            with col_c:
+                show_bb = st.checkbox("Bollinger Bands", key="chart_bb")
+                show_vwap = st.checkbox("VWAP", key="chart_vwap")
+                show_sr = st.checkbox("Support/Resistance", key="chart_sr")
+
+            title = (
+                f"{instrument} {'CALL' if right_param == 'call' else 'PUT' if right_param == 'put' else ''}"
+                f"{' ' + strike_param if strike_param else ''} | {interval} | {str(from_date)} → {str(to_date)}"
+            ).strip()
+
+            fig = render_candlestick(
+                df,
+                title=title,
+                show_volume=True,
+                show_ema=emas if emas else None,
+                show_bb=show_bb,
+                show_vwap=show_vwap,
+                support_resistance=show_sr,
+                height=550,
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+            col1, col2, col3, col4, col5 = st.columns(5)
+            col1.metric("Period High", f"₹{df['high'].max():,.2f}")
+            col2.metric("Period Low", f"₹{df['low'].min():,.2f}")
+            col3.metric("Period Change", f"{(df['close'].iloc[-1] / df['close'].iloc[0] - 1) * 100:.2f}%")
+            col4.metric("Avg Volume", f"{df['volume'].mean():,.0f}")
+            col5.metric("Candles", f"{len(df):,}")
+
+    with tab2:
+        st.markdown("**Compare historical option price vs underlying index spot.**")
+        if df is None or df.empty:
+            st.info("Fetch data in the Price Chart tab first.")
+        elif product_type == "options":
+            try:
+                with st.spinner("Fetching spot data for comparison..."):
+                    spot_df = fetcher.fetch(
+                        stock_code=cfg.spot_code or cfg.api_code,
+                        exchange_code=cfg.spot_exchange or "NSE",
+                        product_type="cash",
+                        from_date=str(from_date),
+                        to_date=str(to_date),
+                        interval=interval,
+                    )
+                if not spot_df.empty:
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter(x=df["datetime"], y=df["close"], name=f"{instrument} {strike_param} {'CE' if right_param == 'call' else 'PE'}", line=dict(color="#388bfd", width=2), yaxis="y"))
+                    fig.add_trace(go.Scatter(x=spot_df["datetime"], y=spot_df["close"], name=f"{instrument} Spot", line=dict(color="#f78166", width=1.5, dash="dot"), yaxis="y2"))
+                    fig.update_layout(
+                        title="Option Price vs Underlying Spot",
+                        yaxis=dict(title="Option Price ₹", side="left"),
+                        yaxis2=dict(title="Spot Price ₹", side="right", overlaying="y"),
+                        height=450,
+                        plot_bgcolor="#0d1117",
+                        paper_bgcolor="#161b22",
+                        font=dict(color="#e6edf3"),
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+            except Exception as e:
+                st.warning(f"Could not fetch spot data: {e}")
+        else:
+            st.info("Switch to 'options' product type for options history comparison.")
+
+    with tab3:
+        if df is None or df.empty:
+            st.info("Fetch data in the Price Chart tab first.")
+        else:
+            indicators = st.multiselect("Indicators to Display", ["RSI", "MACD", "Stochastic", "ATR"], default=["RSI", "MACD"], key="ta_indicators")
+            fig_main = render_candlestick(df, show_volume=False, height=350)
+            st.plotly_chart(fig_main, use_container_width=True)
+
+            for ind in indicators:
+                if ind == "RSI":
+                    rsi_period = st.slider("RSI Period", 5, 30, 14, key="rsi_period")
+                    fig_ind = render_technical_subplot(df, "rsi", {"period": rsi_period}, height=180)
+                elif ind == "MACD":
+                    fig_ind = render_technical_subplot(df, "macd", height=200)
+                elif ind == "Stochastic":
+                    fig_ind = render_technical_subplot(df, "stochastic", height=180)
+                elif ind == "ATR":
+                    atr_vals = ta.atr(df["high"], df["low"], df["close"])
+                    fig_ind = go.Figure()
+                    fig_ind.add_trace(go.Scatter(x=df["datetime"], y=atr_vals, name="ATR(14)", line=dict(color="#FF6F00", width=1.5)))
+                    fig_ind.update_layout(height=180, plot_bgcolor="#0d1117", paper_bgcolor="#161b22", font=dict(color="#e6edf3"), margin=dict(l=10, r=10, t=25, b=10), title=dict(text="ATR(14)", font=dict(size=12)))
+                else:
+                    continue
+                st.plotly_chart(fig_ind, use_container_width=True)
+
+            with st.expander("📍 Pivot Points (based on last bar)"):
+                last = df.iloc[-1]
+                pivots = ta.pivot_points(last["high"], last["low"], last["close"])
+                pcols = st.columns(7)
+                labels = ["S3", "S2", "S1", "P", "R1", "R2", "R3"]
+                colors = ["#dc3545", "#e06c75", "#e5ac00", "#28a745", "#61afef", "#56b6c2", "#98c379"]
+                for col, label, color in zip(pcols, labels, colors):
+                    col.markdown(
+                        f'<div style="text-align:center;color:{color};font-weight:700">{label}<br>₹{pivots[label]:,.2f}</div>',
+                        unsafe_allow_html=True,
+                    )
+
+    with tab4:
+        if df is None or df.empty:
+            st.info("Fetch data in the Price Chart tab first.")
+        else:
+            st.markdown(f"**{len(df):,} rows** available for export.")
+            csv_buf = io.StringIO()
+            df.to_csv(csv_buf, index=False)
+            st.download_button("📥 Download CSV", data=csv_buf.getvalue(), file_name=f"{instrument}_{interval}_{from_date}_{to_date}.csv", mime="text/csv")
+
+            excel_buf = io.BytesIO()
+            with pd.ExcelWriter(excel_buf, engine="openpyxl") as writer:
+                df.to_excel(writer, sheet_name="OHLCV", index=False)
+                ta_df = df.copy()
+                ta_df["ema_20"] = ta.ema(df["close"], 20)
+                ta_df["ema_50"] = ta.ema(df["close"], 50)
+                ta_df["rsi_14"] = ta.rsi(df["close"])
+                macd_l, sig_l, _ = ta.macd(df["close"])
+                ta_df["macd"] = macd_l
+                ta_df["macd_signal"] = sig_l
+                ta_df["atr_14"] = ta.atr(df["high"], df["low"], df["close"])
+                ta_df.to_excel(writer, sheet_name="Technical Indicators", index=False)
+
+            st.download_button(
+                "📥 Download Excel (with indicators)",
+                data=excel_buf.getvalue(),
+                file_name=f"{instrument}_{interval}_{from_date}_{to_date}_with_ta.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+
+            with st.expander("🗄️ Cache Statistics"):
+                cache_stats = get_historical_cache().stats()
+                st.json(cache_stats)
+                if st.button("🗑️ Purge Expired Cache"):
+                    n = get_historical_cache().purge_expired()
+                    st.success(f"Purged {n} expired entries.")
+
+
+def render_gtt_order_cost_preview(
+    entry_price: float,
+    target_price: float,
+    stoploss_price: float,
+    quantity: int,
+    lot_size: int,
+) -> None:
+    """Render P&L preview for a GTT trade before placement."""
+    lots = quantity // lot_size if lot_size > 0 else 0
+    entry_value = entry_price * quantity
+    target_pnl = (entry_price - target_price) * quantity
+    stop_pnl = (entry_price - stoploss_price) * quantity
+    rr_ratio = abs(target_pnl / stop_pnl) if stop_pnl != 0 else 0
+
+    st.markdown(
+        """
+        <style>
+        .gtt-preview { background:#1a1f2e; border:1px solid #30363d;
+                       border-radius:8px; padding:1rem; margin:.5rem 0; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    with st.container():
+        st.markdown('<div class="gtt-preview">', unsafe_allow_html=True)
+        st.markdown("**📊 Trade P&L Preview**")
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric(
+            "Premium Collected",
+            f"₹{entry_value:,.0f}",
+            help=f"{lots} lot × ₹{entry_price:.2f} × {lot_size}",
+        )
+        color_target = "#28a745" if target_pnl > 0 else "#dc3545"
+        pct_target = (abs(target_pnl) / entry_value * 100) if entry_value else 0
+        pct_stop = (abs(stop_pnl) / entry_value * 100) if entry_value else 0
+        col2.markdown(
+            f'<div style="text-align:center"><small>Target Profit</small><br>'
+            f'<span style="color:{color_target};font-size:1.3rem;font-weight:700">'
+            f'₹{abs(target_pnl):,.0f}</span><br>'
+            f'<small>{pct_target:.1f}% of premium</small></div>',
+            unsafe_allow_html=True,
+        )
+        col3.markdown(
+            f'<div style="text-align:center"><small>Max Loss (if stop hit)</small><br>'
+            f'<span style="color:#dc3545;font-size:1.3rem;font-weight:700">'
+            f'₹{abs(stop_pnl):,.0f}</span><br>'
+            f'<small>{pct_stop:.1f}% of premium</small></div>',
+            unsafe_allow_html=True,
+        )
+        col4.metric(
+            "Risk:Reward",
+            f"1:{rr_ratio:.2f}",
+            delta="Good" if rr_ratio >= 0.4 else "Low",
+            delta_color="normal" if rr_ratio >= 0.4 else "inverse",
+        )
+        st.markdown('</div>', unsafe_allow_html=True)
+
+
+@error_handler
+@require_auth
+def page_gtt_orders():
+    """GTT Orders management page."""
+    st.markdown('<div class="page-header">⏰ GTT Orders (Good Till Triggered)</div>', unsafe_allow_html=True)
+
+    from gtt_manager import GTTManager, GTTOrderRequest, GTTType, GTTLeg, GTTLegType, GTTStatus, validate_gtt_request
+
+    client: BreezeAPIClient = st.session_state.get("client")
+    if not client or not client.is_connected():
+        st.warning("Connect to Breeze API first.")
+        return
+
+    db = TradeDB()
+    gtt_mgr = GTTManager(client, db)
+
+    tab1, tab2, tab3 = st.tabs(["➕ Place GTT", "📋 Active GTTs", "📜 GTT History"])
+
+    with tab1:
+        st.markdown("**Create a new GTT order for automatic profit booking and stop-loss.**")
+        gtt_type = st.radio("GTT Type", ["🎯 OCO (Entry + Target + Stop-Loss)", "📌 Single Leg (Standalone Trigger)"], horizontal=True, key="gtt_type_select")
+        is_three_leg = "OCO" in gtt_type
+
+        col1, col2, col3 = st.columns([2, 1, 1])
+        with col1:
+            instrument = st.selectbox("Instrument", list(C.INSTRUMENTS.keys()), key="gtt_instrument")
+            cfg = C.INSTRUMENTS[instrument]
+        with col2:
+            exchange = cfg.exchange
+            expiry = st.selectbox("Expiry", C.get_next_expiries(instrument, count=6), key="gtt_expiry")
+        with col3:
+            right = st.selectbox("Right", ["call", "put"], key="gtt_right")
+
+        col4, col5, col6 = st.columns(3)
+        with col4:
+            last_spot = st.session_state.get("last_spot", 22000)
+            atm_guess = int(last_spot // cfg.strike_gap * cfg.strike_gap)
+            strike = st.number_input("Strike Price", value=atm_guess, step=cfg.strike_gap, key="gtt_strike")
+        with col5:
+            lots = st.number_input("Lots", min_value=1, value=1, step=1, key="gtt_lots")
+            quantity = lots * cfg.lot_size
+            st.caption(f"Qty: {quantity} contracts")
+        with col6:
+            trade_date = st.date_input("Valid Till (trade_date)", value=date.today() + timedelta(days=7), key="gtt_trade_date")
+
+        st.divider()
+
+        if is_three_leg:
+            st.markdown("**Entry Order:**")
+            col7, col8, col9 = st.columns(3)
+            with col7:
+                entry_action = st.selectbox("Entry Action", ["sell", "buy"], key="gtt_entry_action")
+            with col8:
+                entry_price = st.number_input("Entry Price ₹", min_value=0.01, value=185.0, step=0.5, key="gtt_entry_price")
+            with col9:
+                entry_order_type = st.selectbox("Entry Order Type", ["limit", "market"], key="gtt_entry_type")
+
+            st.markdown("**Target Leg (Profit Booking):**")
+            col10, col11, col12 = st.columns(3)
+            with col10:
+                target_trigger = st.number_input("Target Trigger ₹", value=round(entry_price * 0.5, 1) if entry_action == "sell" else round(entry_price * 1.5, 1), step=0.5, key="gtt_target_trigger")
+            with col11:
+                target_limit = st.number_input("Target Limit ₹", value=target_trigger - 2.0, step=0.5, key="gtt_target_limit")
+            with col12:
+                target_action = "buy" if entry_action == "sell" else "sell"
+                st.text_input("Target Action", value=target_action.upper(), disabled=True, key="gtt_target_action_disp")
+
+            st.markdown("**Stop-Loss Leg:**")
+            col13, col14, col15 = st.columns(3)
+            with col13:
+                sl_trigger = st.number_input("Stop-Loss Trigger ₹", value=round(entry_price * 2.0, 1) if entry_action == "sell" else round(entry_price * 0.5, 1), step=0.5, key="gtt_sl_trigger")
+            with col14:
+                sl_limit = st.number_input("Stop-Loss Limit ₹", value=sl_trigger + 5.0 if entry_action == "sell" else sl_trigger - 5.0, step=0.5, key="gtt_sl_limit")
+            with col15:
+                sl_action = "buy" if entry_action == "sell" else "sell"
+                st.text_input("Stop-Loss Action", value=sl_action.upper(), disabled=True, key="gtt_sl_action_disp")
+
+            with st.expander("🧮 Auto-Calculate Stops"):
+                calc_method = st.radio("Calculation Method", ["% of Entry", "Fixed ₹", "Multiple of Premium"], horizontal=True, key="gtt_calc_method")
+                if calc_method == "% of Entry":
+                    target_pct = st.slider("Target %", 10, 80, 50, key="gtt_target_pct")
+                    sl_pct = st.slider("Stop-Loss %", 50, 300, 100, key="gtt_sl_pct")
+                    if st.button("Apply", key="gtt_apply_calc") and entry_action == "sell":
+                        st.session_state["gtt_target_trigger"] = round(entry_price * (1 - target_pct / 100), 1)
+                        st.session_state["gtt_sl_trigger"] = round(entry_price * (1 + sl_pct / 100), 1)
+                        st.rerun()
+
+            render_gtt_order_cost_preview(entry_price, target_trigger, sl_trigger, quantity, cfg.lot_size)
+
+            order_details_legs = [
+                GTTLeg(GTTLegType.TARGET, target_action, str(target_trigger), str(target_limit), "limit"),
+                GTTLeg(GTTLegType.STOPLOSS, sl_action, str(sl_trigger), str(sl_limit), "limit"),
+            ]
+
+            req = GTTOrderRequest(
+                exchange_code=exchange,
+                stock_code=cfg.api_code,
+                product="options",
+                quantity=str(quantity),
+                expiry_date=expiry,
+                right=right,
+                strike_price=str(int(strike)),
+                gtt_type=GTTType.THREE_LEG,
+                index_or_stock="index",
+                trade_date=str(trade_date),
+                fresh_order_action=entry_action,
+                fresh_order_price=str(entry_price),
+                fresh_order_type=entry_order_type,
+                order_details=order_details_legs,
+            )
+        else:
+            col16, col17, col18 = st.columns(3)
+            with col16:
+                sl_action_single = st.selectbox("Action", ["buy", "sell"], key="gtt_sl_action_single")
+            with col17:
+                sl_trigger_single = st.number_input("Trigger Price ₹", value=185.0, step=0.5, key="gtt_sl_trigger_single")
+            with col18:
+                sl_limit_single = st.number_input("Limit Price ₹", value=183.0, step=0.5, key="gtt_sl_limit_single")
+
+            leg_type_str = st.selectbox("Leg Type", ["STOPLOSS", "PROFIT"], key="gtt_leg_type")
+            leg_type = GTTLegType.STOPLOSS if leg_type_str == "STOPLOSS" else GTTLegType.TARGET
+
+            req = GTTOrderRequest(
+                exchange_code=exchange,
+                stock_code=cfg.api_code,
+                product="options",
+                quantity=str(quantity),
+                expiry_date=expiry,
+                right=right,
+                strike_price=str(int(strike)),
+                gtt_type=GTTType.SINGLE,
+                index_or_stock="index",
+                trade_date=str(trade_date),
+                order_details=[GTTLeg(leg_type, sl_action_single, str(sl_trigger_single), str(sl_limit_single))],
+            )
+
+        is_valid, err_msg = validate_gtt_request(req)
+        if not is_valid:
+            st.error(f"❌ Validation: {err_msg}")
+
+        place_btn = st.button("✅ Place GTT Order", type="primary", disabled=not is_valid, key="gtt_place_btn")
+        if place_btn and is_valid:
+            with st.spinner("Placing GTT order..."):
+                result = gtt_mgr.place_three_leg(req) if is_three_leg else gtt_mgr.place_single_leg(req)
+            if result.get("success"):
+                st.success("✅ GTT order placed successfully!")
+                st.json(result.get("data", {}))
+            else:
+                st.error(f"❌ Failed: {result.get('message', 'Unknown error')}")
+
+    with tab2:
+        if st.button("🔄 Sync with Breeze", key="gtt_sync_btn"):
+            with st.spinner("Syncing..."):
+                n = gtt_mgr.sync_with_api("NFO")
+            st.info(f"Sync complete: {n} status change(s)")
+
+        active_gtts = gtt_mgr.get_active_gtts()
+        if not active_gtts:
+            st.info("No active GTT orders. Create one in the **Place GTT** tab.")
+        else:
+            for gtt in active_gtts:
+                with st.expander(
+                    f"{'OCO' if gtt.gtt_type == GTTType.THREE_LEG else 'Single'} | "
+                    f"{gtt.stock_code} {gtt.strike} {gtt.right.upper()} | "
+                    f"Entry: ₹{gtt.entry_price:.1f} | Target: ₹{gtt.target_trigger_price:.1f} | "
+                    f"Stop: ₹{gtt.stoploss_trigger_price:.1f} | ID: {gtt.gtt_order_id[:8]}...",
+                    expanded=False,
+                ):
+                    col_a, col_b, col_c, col_d = st.columns(4)
+                    col_a.metric("Entry Price", f"₹{gtt.entry_price:.2f}")
+                    col_b.metric("Target Trigger", f"₹{gtt.target_trigger_price:.2f}")
+                    col_c.metric("Stop Trigger", f"₹{gtt.stoploss_trigger_price:.2f}")
+                    col_d.metric("Qty", f"{gtt.quantity} ({gtt.quantity // max(cfg.lot_size,1)} lots)")
+                    st.caption(f"Created: {gtt.created_at[:19]} | Valid till: {gtt.trade_date}")
+
+                    if st.button("🗑️ Cancel", key=f"gtt_cancel_{gtt.gtt_order_id}"):
+                        if st.session_state.get(f"confirm_cancel_{gtt.gtt_order_id}"):
+                            result = gtt_mgr.cancel(gtt.gtt_order_id)
+                            if result.get("success"):
+                                st.success("GTT cancelled")
+                                st.rerun()
+                            else:
+                                st.error(f"Cancel failed: {result.get('message')}")
+                        else:
+                            st.session_state[f"confirm_cancel_{gtt.gtt_order_id}"] = True
+                            st.warning("Click Cancel again to confirm.")
+
+    with tab3:
+        all_gtts = gtt_mgr.get_all_gtts(limit=200)
+        history_gtts = [g for g in all_gtts if g.status != GTTStatus.ACTIVE]
+        if not history_gtts:
+            st.info("No GTT history yet.")
+        else:
+            history_data = []
+            for g in history_gtts:
+                trigger_leg = g.trigger_leg or "—"
+                if g.status == GTTStatus.TRIGGERED:
+                    triggered_price = g.target_trigger_price if trigger_leg == "target" else g.stoploss_trigger_price
+                    pnl_sign = 1 if trigger_leg == "target" else -1
+                    pnl = pnl_sign * abs(g.entry_price - triggered_price) * g.quantity
+                else:
+                    pnl = None
+
+                history_data.append({
+                    "Status": g.status.value.upper(),
+                    "Type": g.gtt_type.value,
+                    "Instrument": f"{g.stock_code} {g.strike} {g.right.upper()}",
+                    "Entry": f"₹{g.entry_price:.1f}",
+                    "Target": f"₹{g.target_trigger_price:.1f}",
+                    "Stop": f"₹{g.stoploss_trigger_price:.1f}",
+                    "Triggered": trigger_leg.upper() if trigger_leg != "—" else "—",
+                    "P&L": f"₹{pnl:,.0f}" if pnl is not None else "—",
+                    "Created": g.created_at[:10],
+                    "GTT ID": g.gtt_order_id[:12] + "...",
+                })
+            st.dataframe(pd.DataFrame(history_data), use_container_width=True, hide_index=True)
+
 # ═══════════════════════════════════════════════════════════════
 # PAGE: RISK MONITOR
 # ═══════════════════════════════════════════════════════════════
@@ -2309,6 +2827,8 @@ PAGE_FN = {
     "Positions": page_positions,
     "Strategy Builder": page_strategy_builder,
     "Analytics": page_analytics,
+    "📊 Historical Data": page_historical_data,
+    "⏰ GTT Orders": page_gtt_orders,
     "Risk Monitor": page_risk_monitor,
     "Watchlist": page_watchlist,
     "Settings": page_settings,
