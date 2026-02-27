@@ -361,6 +361,11 @@ def format_number(value: float, decimals: int = 0) -> str:
 
 
 def format_expiry(date_str: str) -> str:
+    if not date_str:
+        return "—"
+    date_str = str(date_str).strip()
+    if not date_str or date_str in ("None", "*", "—"):
+        return "—"
     for fmt in ["%Y-%m-%d", "%d-%b-%Y", "%d-%B-%Y"]:
         try:
             return datetime.strptime(date_str, fmt).strftime("%d %b %Y (%A)")
@@ -370,6 +375,11 @@ def format_expiry(date_str: str) -> str:
 
 
 def format_expiry_short(date_str: str) -> str:
+    if not date_str:
+        return "—"
+    date_str = str(date_str).strip()
+    if not date_str or date_str in ("None", "*", "—"):
+        return "—"
     for fmt in ["%Y-%m-%d", "%d-%b-%Y", "%d-%B-%Y"]:
         try:
             return datetime.strptime(date_str, fmt).strftime("%d %b")

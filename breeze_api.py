@@ -492,24 +492,47 @@ class BreezeAPIClient:
 
     @retry_api_call(max_attempts=2, initial_delay=0.5)
     def get_order_list(self, exchange="", from_date="", to_date=""):
+        """Fetch order list.
+
+        Breeze requires a non-empty exchange_code.  Default to ``NSE`` when
+        called without an explicit exchange (e.g. from the warmup manager).
+        If no date range is given, default to today.
+        """
         self._require_connection()
+        # Breeze rejects empty exchange_code — default to NSE
+        exchange_code = exchange.strip() if exchange and exchange.strip() else "NSE"
+        # Default date range: today
+        from datetime import date as _date
+        today = _date.today().isoformat()
+        fd = from_date if from_date else today
+        td = to_date if to_date else today
         with self._api_lock:
             self.rate_limiter.wait()
             return self._ok(self.breeze.get_order_list(
-                exchange_code=exchange,
-                from_date=convert_to_breeze_iso_datetime(from_date),
-                to_date=convert_to_breeze_iso_datetime(to_date, end_of_day=True)
+                exchange_code=exchange_code,
+                from_date=convert_to_breeze_iso_datetime(fd),
+                to_date=convert_to_breeze_iso_datetime(td, end_of_day=True)
             ))
 
     @retry_api_call(max_attempts=2, initial_delay=0.5)
     def get_trade_list(self, exchange="", from_date="", to_date=""):
+        """Fetch trade list.
+
+        Breeze requires a non-empty exchange_code.  Default to ``NSE`` and
+        today's date when called without explicit args.
+        """
         self._require_connection()
+        exchange_code = exchange.strip() if exchange and exchange.strip() else "NSE"
+        from datetime import date as _date
+        today = _date.today().isoformat()
+        fd = from_date if from_date else today
+        td = to_date if to_date else today
         with self._api_lock:
             self.rate_limiter.wait()
             return self._ok(self.breeze.get_trade_list(
-                exchange_code=exchange,
-                from_date=convert_to_breeze_iso_datetime(from_date),
-                to_date=convert_to_breeze_iso_datetime(to_date, end_of_day=True)
+                exchange_code=exchange_code,
+                from_date=convert_to_breeze_iso_datetime(fd),
+                to_date=convert_to_breeze_iso_datetime(td, end_of_day=True)
             ))
 
     @retry_api_call(max_attempts=2, initial_delay=0.5)

@@ -576,6 +576,7 @@ class LiveFeedManager:
             and (now - self._last_tick_time) > HEALTH_STALE_SECONDS
             and C.is_market_open()
         )
+        last_secs_ago = (now - self._last_tick_time) if self._last_tick_time else None
         with self._lock:
             sub_count = len(self._subscriptions)
         return {
@@ -583,6 +584,7 @@ class LiveFeedManager:
             "total_subscriptions": sub_count,
             "total_ticks": self._total_ticks,
             "last_tick_time": self._last_tick_time,
+            "last_tick_secs_ago": last_secs_ago,   # seconds since last tick, None if no ticks yet
             "connect_count": self._connect_count,
             "reconnect_count": self._reconnect_count,
             "is_stale": stale,

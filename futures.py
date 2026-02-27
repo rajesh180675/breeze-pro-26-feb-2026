@@ -12,40 +12,44 @@ from breeze_api import BreezeAPIClient, convert_to_breeze_datetime
 
 log = logging.getLogger(__name__)
 
-NSE_HOLIDAYS_2025_2026 = {
-    "2025-01-14", "2025-01-26", "2025-02-26", "2025-03-14", "2025-03-31",
-    "2025-04-10", "2025-04-14", "2025-04-18", "2025-05-01", "2025-08-15",
-    "2025-08-27", "2025-10-02", "2025-10-20", "2025-10-21", "2025-10-24",
-    "2025-11-05", "2025-12-25", "2026-01-14", "2026-01-26", "2026-03-13",
-    "2026-03-20", "2026-03-30", "2026-04-02", "2026-04-14", "2026-04-17",
-    "2026-05-01", "2026-06-08", "2026-08-15", "2026-10-02", "2026-11-12",
-    "2026-12-25",
-}
+# NSE_HOLIDAYS_2025_2026 is the single source of truth in app_config.
+# We import the set and the helper functions rather than duplicating them here.
+NSE_HOLIDAYS_2025_2026 = C.NSE_HOLIDAYS_2025_2026   # re-export for backward compat
 
 
 def get_futures_expiries(instrument_name: str, count: int = 3, exchange: str = "NFO") -> List[str]:
-    """Return next `count` monthly futures expiries (last Thursday adjusted for holidays)."""
-    _ = exchange  # for future exchange-specific calendars
+    """Return next *count* monthly futures expiries (last Thursday of each month),
+    adjusted for NSE holidays using the shared app_config calendar.
+
+    Uses C.adjust_expiry_for_holiday() which rolls back to the previous
+    trading day if the natural expiry falls on a holiday or weekend.
+    """
+    _ = exchange  # reserved for future exchange-specific calendars
     THURSDAY = 3
     now = datetime.now(C.IST)
+    today = now.date()
 
     result: List[str] = []
+    seen: set = set()
     for month_offset in range(count + 6):
         month = (now.month + month_offset - 1) % 12 + 1
         year = now.year + (now.month + month_offset - 1) // 12
 
-        last_day = date(year + 1, 1, 1) - timedelta(days=1) if month == 12 else date(year, month + 1, 1) - timedelta(days=1)
-        expiry = last_day - timedelta(days=(last_day.weekday() - THURSDAY) % 7)
+        last_day = (date(year + 1, 1, 1) - timedelta(days=1)
+                    if month == 12 else date(year, month + 1, 1) - timedelta(days=1))
+        # Last Thursday of the month (natural expiry)
+        natural_expiry = last_day - timedelta(days=(last_day.weekday() - THURSDAY) % 7)
+        # Apply holiday adjustment (rolls back to prev trading day if needed)
+        adjusted = C.adjust_expiry_for_holiday(natural_expiry)
 
-        attempts = 0
-        while (expiry.isoformat() in NSE_HOLIDAYS_2025_2026 or expiry.weekday() >= 5) and attempts < 7:
-            expiry -= timedelta(days=1)
-            attempts += 1
-
-        if expiry >= now.date():
-            result.append(expiry.isoformat())
-            if len(result) >= count:
-                break
+        if adjusted < today:
+            continue
+        key = adjusted.isoformat()
+        if key not in seen:
+            seen.add(key)
+            result.append(key)
+        if len(result) >= count:
+            break
 
     return result[:count]
 

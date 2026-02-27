@@ -666,6 +666,13 @@ def render_sidebar():
                 f'<span class="{mkt_class}">{ms["label"]}</span>',
                 unsafe_allow_html=True
             )
+            # Public holiday banner
+            if ms.get("is_holiday"):
+                st.warning(
+                    "🏖️ **NSE Holiday** — Market closed today.  \n"
+                    "Option expiries for this week have been moved to the "
+                    "previous trading day automatically."
+                )
             # Countdown
             if "countdown" in ms:
                 mins = ms["countdown"] // 60
@@ -674,7 +681,11 @@ def render_sidebar():
 
             client = get_client()
             if client:
-                render_live_feed_status(client)
+                try:
+                    render_live_feed_status(client)
+                except Exception as _lf_err:
+                    log.warning("render_live_feed_status failed: %s", _lf_err)
+                    st.sidebar.caption("📡 WS: status unavailable")
 
             name = st.session_state.get("user_name", "Trader")
             dur = SessionState.get_login_duration()
@@ -722,10 +733,6 @@ def render_sidebar():
                 if k:
                     st.caption(f"API: {k[:4]}...{k[-4:]}")
 
-    if has_secrets:
-                k, _, _ = Credentials.get_all_credentials()
-                if k:
-                    st.caption(f"API: {k[:4]}...{k[-4:]}")
 
 
 def _render_login_form(has_secrets: bool):
@@ -1013,6 +1020,14 @@ def page_option_chain():
             st.error("No expiries available")
             return
         expiry = st.selectbox("Expiry", expiries, format_func=format_expiry, key="oc_exp")
+    # Holiday advisory: show if this expiry was moved from its natural date
+    _natural_expiry = C.get_natural_expiry_for(inst, expiry)
+    if _natural_expiry and _natural_expiry != expiry:
+        st.info(
+            f"📅 **Holiday-adjusted expiry** — {inst} natural expiry "
+            f"({format_expiry_short(_natural_expiry)}) falls on a market holiday. "
+            f"NSE moved it to **{format_expiry_short(expiry)}**."
+        )
     with c3:
         n_strikes = st.slider("Strikes ±", 5, 40, 15, key="oc_n")
     with c4:
@@ -1199,6 +1214,14 @@ def page_sell_options():
         dte = calculate_days_to_expiry(expiry)
         if dte <= 0:
             warn_box("⚠️ Expiry day! Consider next week's expiry.")
+        # Holiday advisory
+        _s_natural = C.get_natural_expiry_for(inst, expiry)
+        if _s_natural and _s_natural != expiry:
+            st.info(
+                f"📅 **Holiday-adjusted expiry** — natural {inst} expiry "
+                f"({format_expiry_short(_s_natural)}) is a market holiday. "
+                f"NSE moved it to **{format_expiry_short(expiry)}**."
+            )
 
         ot = st.radio("Option Type", ["CE (Call)", "PE (Put)"], horizontal=True, key="s_t")
         oc = "CE" if "CE" in ot else "PE"

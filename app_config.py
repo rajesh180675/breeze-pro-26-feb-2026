@@ -3,8 +3,8 @@ Breeze Options Trader PRO v10.0 — Configuration
 All pure logic. No external dependencies.
 """
 
-from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Literal, Optional
+from datetime import datetime, date as _date, timedelta, timezone
+from typing import Dict, List, Literal, Optional, Set
 from dataclasses import dataclass
 
 # Timezone setup: prefer pytz when available; fall back to stdlib zoneinfo (Python 3.9+)
@@ -73,6 +73,95 @@ DEFAULT_MARGIN_WARNING_PCT = 75
 DEFAULT_MARGIN_CRITICAL_PCT = 90
 
 
+# ═══════════════════════════════════════════════════════════════
+# NSE / BSE HOLIDAY CALENDAR
+# ═══════════════════════════════════════════════════════════════
+# Source: NSE circular + BSE circular (update annually)
+# Rule: when an index options/futures expiry day falls on a holiday,
+#       NSE moves the expiry to the PREVIOUS trading day.
+# This calendar is the single source of truth for the entire app.
+# futures.py imports this set rather than duplicating it.
+#
+# NOTE: 2025-10-02 appears once (duplicate removed from original spec).
+#
+NSE_HOLIDAYS_2025_2026: Set[str] = {
+    # ── 2025 ──────────────────────────────────────────────────
+    "2025-01-14",   # Makar Sankranti
+    "2025-01-26",   # Republic Day
+    "2025-02-26",   # Mahashivratri
+    "2025-03-14",   # Holi
+    "2025-03-31",   # Id-ul-Fitr (Ramadan Eid)
+    "2025-04-10",   # Shri Mahavir Jayanti
+    "2025-04-14",   # Dr. B.R. Ambedkar Jayanti
+    "2025-04-18",   # Good Friday
+    "2025-05-01",   # Maharashtra Day
+    "2025-08-15",   # Independence Day
+    "2025-08-27",   # Ganesh Chaturthi
+    "2025-10-02",   # Mahatma Gandhi Jayanti / Dussehra
+    "2025-10-20",   # Diwali Laxmi Puja
+    "2025-10-21",   # Diwali Balipratipada
+    "2025-10-24",   # Diwali (extra)
+    "2025-11-05",   # Gurunanak Jayanti
+    "2025-12-25",   # Christmas
+    # ── 2026 (verify against NSE/BSE circulars) ───────────────
+    "2026-01-14",   # Makar Sankranti
+    "2026-01-26",   # Republic Day
+    "2026-03-03",   # Maha Shivratri  ← NIFTY/FINNIFTY expiry week!
+    "2026-03-13",   # Holi
+    "2026-03-20",   # Gudi Padwa / Ugadi
+    "2026-03-30",   # Id-ul-Fitr
+    "2026-04-02",   # Ram Navami / Good Friday
+    "2026-04-14",   # Dr. B.R. Ambedkar Jayanti  ← NIFTY/FINNIFTY expiry!
+    "2026-04-17",   # Good Friday
+    "2026-05-01",   # Maharashtra Day
+    "2026-06-08",   # Id-ul-Adha (Bakrid)
+    "2026-08-15",   # Independence Day
+    "2026-10-02",   # Mahatma Gandhi Jayanti
+    "2026-11-12",   # Diwali / Gurunanak Jayanti
+    "2026-12-25",   # Christmas
+}
+
+
+def is_nse_holiday(d: "_date") -> bool:  # type: ignore[name-defined]
+    """Return True if *d* is a known NSE market holiday."""
+    return d.isoformat() in NSE_HOLIDAYS_2025_2026
+
+
+def is_trading_day(d: "_date") -> bool:  # type: ignore[name-defined]
+    """Return True if *d* is a weekday that is NOT a known NSE holiday."""
+    return d.weekday() < 5 and not is_nse_holiday(d)
+
+
+def prev_trading_day(d: "_date", max_lookback: int = 7) -> "_date":  # type: ignore[name-defined]
+    """Return the nearest previous trading day before (and not including) *d*."""
+    candidate = d - timedelta(days=1)
+    for _ in range(max_lookback):
+        if is_trading_day(candidate):
+            return candidate
+        candidate -= timedelta(days=1)
+    return candidate   # fallback — should never reach here
+
+
+def adjust_expiry_for_holiday(expiry: "_date") -> "_date":  # type: ignore[name-defined]
+    """
+    Apply NSE expiry-advance rule:
+
+    If the natural expiry date falls on a market holiday (or weekend —
+    though the raw scheduler already avoids weekends), roll back to the
+    nearest previous trading day.
+
+    Example: 2026-03-03 (Tuesday, Maha Shivratri holiday)
+             → 2026-03-02 (Monday, normal trading day)
+    """
+    adjusted = expiry
+    for _ in range(7):          # safety: never loop more than a week back
+        if is_trading_day(adjusted):
+            return adjusted
+        adjusted -= timedelta(days=1)
+    return adjusted             # fallback
+
+
+
 @dataclass(frozen=True)
 class InstrumentConfig:
     display_name: str
@@ -131,14 +220,68 @@ def get_instrument(name: str) -> InstrumentConfig:
 
 def get_next_expiries(instrument_name: str, count: int = 6) -> List[str]:
     """
-    Return the next  weekly expiry dates for the given instrument.
+    Return the next *count* weekly expiry dates for the instrument,
+    with NSE holiday adjustment applied to every date.
 
-    Rules:
-    - If today IS the expiry day AND market is still open (before 15:30 IST),
+    Holiday rule (NSE circular):
+      If the natural expiry day (e.g. Tuesday for NIFTY) is a market
+      holiday, the exchange moves the expiry to the PREVIOUS trading day.
+      Example: 2026-03-03 (Tuesday, Maha Shivratri) -> 2026-03-02 (Monday).
+
+    Additional rules:
+    - If today IS the (adjusted) expiry day AND market still open (<15:30),
       today is included as expiries[0].
-    - If today IS the expiry day AND market is closed (>= 15:30 IST),
-      skip to next week.
-    - Always returns clean calendar dates (no time component) in YYYY-MM-DD format.
+    - If today IS the (adjusted) expiry day AND market closed (>=15:30),
+      skip to next natural expiry week.
+    - Duplicate dates are deduplicated; extra weeks are appended.
+    - Returns YYYY-MM-DD strings.
+    """
+    try:
+        inst = get_instrument(instrument_name)
+    except KeyError:
+        return []
+
+    target_day = DAY_NUM[inst.expiry_day]
+    now = _now_ist()
+    today = now.date()
+    market_closed_today = now.hour > 15 or (now.hour == 15 and now.minute >= 30)
+
+    days_ahead = (target_day - now.weekday()) % 7
+    if days_ahead == 0 and market_closed_today:
+        days_ahead = 7   # natural expiry today but market closed, roll to next week
+
+    base_natural = (now + timedelta(days=days_ahead)).date()
+    results: List[str] = []
+    seen: set = set()
+
+    # Scan enough weeks to collect *count* distinct adjusted dates
+    for i in range(count + 14):
+        natural = base_natural + timedelta(weeks=i)
+        adjusted = adjust_expiry_for_holiday(natural)
+
+        # Skip past dates (adjustment may pull date before today)
+        if adjusted < today:
+            continue
+        # Skip if adjusted == today but market already closed
+        if adjusted == today and market_closed_today:
+            continue
+
+        key = adjusted.isoformat()
+        if key not in seen:
+            seen.add(key)
+            results.append(key)
+        if len(results) >= count:
+            break
+
+    return results
+
+def get_monthly_expiries(instrument_name: str, count: int = 3) -> List[str]:
+    """
+    Get the next *count* monthly expiry dates (last expiry-day of each month),
+    with NSE holiday adjustment applied.
+
+    Holiday rule: if the last expiry-day of the month is a holiday, the
+    expiry is moved to the PREVIOUS trading day.
     """
     try:
         inst = get_instrument(instrument_name)
@@ -146,44 +289,66 @@ def get_next_expiries(instrument_name: str, count: int = 6) -> List[str]:
         return []
     target_day = DAY_NUM[inst.expiry_day]
     now = _now_ist()
-    days_ahead = (target_day - now.weekday()) % 7
+    today = now.date()
+    result = []
+    seen: set = set()
+    for m in range(count + 6):   # scan extra months to handle edge cases
+        month = (now.month + m - 1) % 12 + 1
+        year = now.year + (now.month + m - 1) // 12
+        if month == 12:
+            last_day = _date(year + 1, 1, 1) - timedelta(days=1)
+        else:
+            last_day = _date(year, month + 1, 1) - timedelta(days=1)
+        # Last occurrence of target_day in this month
+        diff = (last_day.weekday() - target_day) % 7
+        natural_expiry = last_day - timedelta(days=diff)
+        # Apply holiday adjustment
+        adjusted = adjust_expiry_for_holiday(natural_expiry)
+        if adjusted < today:
+            continue
+        key = adjusted.isoformat()
+        if key not in seen:
+            seen.add(key)
+            result.append(key)
+        if len(result) >= count:
+            break
+    return result
 
-    # If today is expiry day: include today if market open, else jump to next week
-    if days_ahead == 0:
-        if now.hour > 15 or (now.hour == 15 and now.minute >= 30):
-            days_ahead = 7  # market closed — skip to next week
+def get_natural_expiry_for(instrument_name: str, adjusted_expiry: str) -> Optional[str]:
+    """
+    Given an adjusted expiry date (YYYY-MM-DD) that was returned by
+    get_next_expiries(), return the *natural* (pre-holiday) expiry date
+    if the two differ — or None if they are the same.
 
-    # Compute a clean date (no time) for the base expiry
-    base_date = (now + timedelta(days=days_ahead)).date()
-    expiries = [
-        (base_date + timedelta(weeks=i)).strftime("%Y-%m-%d")
-        for i in range(count)
-    ]
-    return expiries
+    This is used by the UI to display an advisory banner when the expiry
+    shown to the user is different from the underlying calendar date.
 
-
-def get_monthly_expiries(instrument_name: str, count: int = 3) -> List[str]:
-    """Get last thursday (or expiry day) of each month."""
+    Example:
+      natural  = 2026-03-03 (Tuesday, Maha Shivratri holiday)
+      adjusted = 2026-03-02 (Monday)
+      → returns "2026-03-03"
+    """
     try:
         inst = get_instrument(instrument_name)
     except KeyError:
-        return []
+        return None
+
     target_day = DAY_NUM[inst.expiry_day]
-    now = _now_ist()
-    result = []
-    for m in range(count):
-        month = (now.month + m - 1) % 12 + 1
-        year = now.year + (now.month + m - 1) // 12
-        # Last day of month — use first day of NEXT month minus 1 day, works for all months
-        if month == 12:
-            last_day = datetime(year + 1, 1, 1) - timedelta(days=1)
-        else:
-            last_day = datetime(year, month + 1, 1) - timedelta(days=1)
-        # Go back to last expiry day
-        diff = (last_day.weekday() - target_day) % 7
-        expiry = last_day - timedelta(days=diff)
-        result.append(expiry.strftime("%Y-%m-%d"))
-    return result
+    try:
+        adj = _date.fromisoformat(adjusted_expiry)
+    except ValueError:
+        return None
+
+    # The natural expiry is the next occurrence of target_day on or after adj
+    # (it could be adj itself if not adjusted, or adj + 1..6 days forward)
+    for delta in range(7):
+        candidate = adj + timedelta(days=delta)
+        if candidate.weekday() == target_day:
+            natural_iso = candidate.isoformat()
+            if natural_iso != adjusted_expiry:
+                return natural_iso
+            return None   # same date — no adjustment was made
+    return None
 
 
 def api_code_to_display(api_code: str) -> str:
@@ -241,13 +406,19 @@ def validate_strike(instrument_name: str, strike: int) -> bool:
 
 
 def is_market_open() -> bool:
+    """Return True if NSE market is currently open.
+
+    Checks: weekday, not a public holiday, and within trading hours.
+    """
     now = _now_ist()
-    if now.weekday() >= 5:
+    today = now.date()
+    if now.weekday() >= 5:           # weekend
+        return False
+    if is_nse_holiday(today):        # public holiday
         return False
     o = now.replace(hour=MARKET_OPEN[0], minute=MARKET_OPEN[1], second=0, microsecond=0)
     c = now.replace(hour=MARKET_CLOSE[0], minute=MARKET_CLOSE[1], second=0, microsecond=0)
     return o <= now <= c
-
 
 def is_pre_market() -> bool:
     """Return True during NSE pre-open session: 9:00 AM – 9:15 AM IST, Mon–Fri."""
@@ -260,14 +431,28 @@ def is_pre_market() -> bool:
 
 
 def get_market_status() -> dict:
-    """Return rich market status dict."""
+    """Return rich market status dict, including public-holiday awareness."""
     now = _now_ist()
+    today = now.date()
+
     if now.weekday() >= 5:
         return {"status": "closed", "label": "🔴 Closed (Weekend)", "color": "red"}
-    o = now.replace(hour=MARKET_OPEN[0], minute=MARKET_OPEN[1], second=0, microsecond=0)
-    c = now.replace(hour=MARKET_CLOSE[0], minute=MARKET_CLOSE[1], second=0, microsecond=0)
-    pc = now.replace(hour=MARKET_PRE_CLOSE[0], minute=MARKET_PRE_CLOSE[1], second=0, microsecond=0)
-    p = now.replace(hour=MARKET_PRE_OPEN_START[0], minute=MARKET_PRE_OPEN_START[1], second=0, microsecond=0)
+
+    if is_nse_holiday(today):
+        # Show which expiry-adjusted dates are affected if today is one
+        return {
+            "status": "closed",
+            "label": "🔴 Market Holiday",
+            "color": "red",
+            "is_holiday": True,
+            "holiday_date": today.isoformat(),
+        }
+
+    o  = now.replace(hour=MARKET_OPEN[0],          minute=MARKET_OPEN[1],          second=0, microsecond=0)
+    c  = now.replace(hour=MARKET_CLOSE[0],         minute=MARKET_CLOSE[1],         second=0, microsecond=0)
+    pc = now.replace(hour=MARKET_PRE_CLOSE[0],     minute=MARKET_PRE_CLOSE[1],     second=0, microsecond=0)
+    p  = now.replace(hour=MARKET_PRE_OPEN_START[0],minute=MARKET_PRE_OPEN_START[1],second=0, microsecond=0)
+
     if now < p:
         secs = int((p - now).total_seconds())
         return {"status": "pre_market", "label": "🟡 Pre-Market", "color": "yellow",
@@ -285,7 +470,6 @@ def get_market_status() -> dict:
         return {"status": "pre_close", "label": "🟠 Pre-Close", "color": "orange",
                 "countdown": secs, "next": "Market Close"}
     return {"status": "closed", "label": "🔴 Closed", "color": "red"}
-
 
 class ErrorMessages:
     NOT_CONNECTED = "Not connected to Breeze API"
