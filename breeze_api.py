@@ -322,10 +322,42 @@ class BreezeAPIClient:
 
     # ─── Connection ───────────────────────────────────────────
 
+    # ── Connection timeout constant ──────────────────────────────
+    _CONNECT_TIMEOUT: float = 20.0  # seconds before generate_session is declared hung
+
     @retry_api_call(max_attempts=2, initial_delay=1.0)
     def connect(self, session_token: str):
-        self.breeze = BreezeConnect(api_key=self.api_key)
-        self.breeze.generate_session(api_secret=self.api_secret, session_token=session_token)
+        breeze = BreezeConnect(api_key=self.api_key)
+
+        # BreezeConnect.generate_session() makes a blocking HTTP call with no
+        # built-in timeout.  Run it on a daemon thread so we can abort if it
+        # hangs (bad token, unreachable server, etc.) rather than blocking the
+        # Streamlit main thread forever and showing an infinite spinner.
+        _exc: list = [None]
+
+        def _generate():
+            try:
+                breeze.generate_session(
+                    api_secret=self.api_secret,
+                    session_token=session_token,
+                )
+            except Exception as e:          # noqa: BLE001
+                _exc[0] = e
+
+        t = threading.Thread(target=_generate, name="BreezeGenSession", daemon=True)
+        t.start()
+        t.join(timeout=self._CONNECT_TIMEOUT)
+
+        if t.is_alive():
+            # Thread is still blocked → generate_session never returned.
+            raise TimeoutError(
+                f"generate_session timed out after {self._CONNECT_TIMEOUT}s — "
+                "verify your session token is fresh and ICICI servers are reachable."
+            )
+        if _exc[0] is not None:
+            raise _exc[0]
+
+        self.breeze = breeze          # assign only after success
         self.connected = True
         self._connection_time = time.time()
 

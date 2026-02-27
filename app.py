@@ -62,6 +62,7 @@ from alerting import (
 )
 from paper_trading import PaperTradingEngine
 import live_feed as lf
+import holiday_calendar as _hc   # dynamic NSE holiday calendar
 
 # ─── Logging ──────────────────────────────────────────────────
 # Ensure logs directory exists before FileHandler is created.
@@ -789,7 +790,7 @@ def do_login(api_key, api_secret, token, totp_secret=""):
     if not api_key or not api_secret:
         st.error("❌ Missing API credentials")
         return
-    with st.spinner("Connecting to Breeze API..."):
+    with st.spinner("Connecting to Breeze API… (up to 20 s)"):
         try:
             client = BreezeAPIClient(api_key, api_secret)
             resp = auto_connect_with_totp(client, api_key, token, totp_secret=totp_secret)
@@ -813,9 +814,16 @@ def do_login(api_key, api_secret, token, totp_secret=""):
                 time.sleep(0.4)
                 st.rerun()
             else:
-                st.error(f"❌ Connection failed: {resp.get('message', 'Unknown error')}")
-                if 'session' in resp.get('message', '').lower():
-                    st.info("💡 Session tokens expire daily. Get a fresh token from ICICI Breeze.")
+                msg = resp.get("message", "Unknown error")
+                st.error(f"❌ Connection failed: {msg}")
+                if any(k in msg.lower() for k in ("session", "token", "unauthorized", "invalid")):
+                    st.info("💡 Session tokens expire daily. Generate a fresh token from ICICI Breeze → API Login.")
+                elif any(k in msg.lower() for k in ("timeout", "timed out")):
+                    st.warning("⏱️ Connection timed out — ICICI servers may be slow or unreachable. Try again in a moment.")
+        except TimeoutError as e:
+            st.error(f"⏱️ {e}")
+            st.info("💡 This usually means your session token is invalid/expired or ICICI servers are unreachable. "
+                    "Get a fresh token from the ICICI Breeze app and try again.")
         except Exception as e:
             st.error(f"❌ Error: {e}")
             if st.session_state.get("debug_mode"):
@@ -1029,7 +1037,10 @@ def page_option_chain():
             f"NSE moved it to **{format_expiry_short(expiry)}**."
         )
     with c3:
-        n_strikes = st.slider("Strikes ±", 5, 40, 15, key="oc_n")
+        show_all = st.checkbox("Show All Strikes", value=False, key="oc_all")
+        n_strikes = st.slider("Strikes ±", 5, 100, 40, key="oc_n",
+                              disabled=show_all,
+                              help="Number of strikes to show above and below ATM. Ignored when 'Show All Strikes' is checked.")
     with c4:
         st.markdown("<br>", unsafe_allow_html=True)
         col1, col2 = st.columns(2)
@@ -1078,39 +1089,69 @@ def page_option_chain():
         CacheManager.set(ck, df, "option_chain", C.OC_CACHE_TTL_SECONDS)
         SessionState.log_activity("Chain", f"{inst} {format_expiry_short(expiry)}")
 
+    # ── Live spot price → accurate ATM ──────────────────────
+    # Fetch once per chain load; cached for SPOT_CACHE_TTL_SECONDS.
+    _spot_ck = f"spot_{cfg.api_code}"
+    _spot = CacheManager.get(_spot_ck, "spot") or 0.0
+    if _spot <= 0:
+        try:
+            _spot_resp = client.get_spot_price(cfg.api_code, cfg.exchange)
+            if _spot_resp.get("success"):
+                _spot_items = APIResponse(_spot_resp).items
+                if _spot_items:
+                    _spot = safe_float(_spot_items[0].get("ltp", 0))
+                    if _spot > 0:
+                        CacheManager.set(_spot_ck, _spot, "spot", C.SPOT_CACHE_TTL_SECONDS)
+                        st.session_state["last_spot"] = _spot
+        except Exception as _e:
+            log.debug(f"Spot fetch failed for {cfg.api_code}: {_e}")
+
+    if _spot > 0:
+        st.session_state["last_spot"] = _spot
+
     # ── Metrics bar ───────────────────────────────────────────
-    atm = estimate_atm_strike(df)
+    atm = estimate_atm_strike(df, spot=_spot)
     pcr = calculate_pcr(df)
     mp = calculate_max_pain(df)
     dte = calculate_days_to_expiry(expiry)
     total_call_oi = df[df["right"] == "Call"]["open_interest"].sum() if "right" in df.columns else 0
     total_put_oi = df[df["right"] == "Put"]["open_interest"].sum() if "right" in df.columns else 0
 
-    mc = st.columns(6)
-    mc[0].metric("ATM ≈", f"{atm:,.0f}")
-    mc[1].metric("PCR", f"{pcr:.2f}", "Bullish" if pcr > 1 else "Bearish")
-    mc[2].metric("Max Pain", f"{mp:,.0f}")
-    mc[3].metric("DTE", str(dte), "⚠️ Expiry Soon!" if dte <= 2 else None,
+    mc = st.columns(7)
+    mc[0].metric("Spot", f"{_spot:,.0f}" if _spot > 0 else "—")
+    mc[1].metric("ATM", f"{atm:,.0f}")
+    mc[2].metric("PCR", f"{pcr:.2f}", "Bullish" if pcr > 1 else "Bearish")
+    mc[3].metric("Max Pain", f"{mp:,.0f}")
+    mc[4].metric("DTE", str(dte), "⚠️ Expiry Soon!" if dte <= 2 else None,
                  delta_color="inverse" if dte <= 2 else "normal")
-    mc[4].metric("Call OI", format_number(total_call_oi))
-    mc[5].metric("Put OI", format_number(total_put_oi))
+    mc[5].metric("Call OI", format_number(total_call_oi))
+    mc[6].metric("Put OI", format_number(total_put_oi))
 
     if dte <= 0:
         warn_box("⚠️ <b>Expiry Day!</b> Options expire today. Consider squaring off short positions.")
 
     st.markdown("---")
 
-    # Filter around ATM
-    if "strike_price" in df.columns and atm > 0:
+    # Filter around ATM (or show entire chain when "Show All" is checked)
+    if show_all or "strike_price" not in df.columns or atm <= 0:
+        ddf = df.copy()
+    else:
         strikes = sorted(df["strike_price"].unique())
         if strikes:
-            ai = min(range(len(strikes)), key=lambda i: abs(strikes[i] - atm))
+            ai   = min(range(len(strikes)), key=lambda i: abs(strikes[i] - atm))
             filt = strikes[max(0, ai - n_strikes): min(len(strikes), ai + n_strikes + 1)]
-            ddf = df[df["strike_price"].isin(filt)].copy()
+            ddf  = df[df["strike_price"].isin(filt)].copy()
+            # Caption so users know the chain is filtered
+            _total = len(strikes)
+            _shown = len(filt)
+            if _shown < _total:
+                st.caption(
+                    f"Showing **{_shown}** of **{_total}** strikes "
+                    f"({n_strikes} above & below ATM {atm:,.0f}). "
+                    "Tick **Show All Strikes** to see the full chain."
+                )
         else:
             ddf = df.copy()
-    else:
-        ddf = df.copy()
 
     visible_strikes = []
     if "strike_price" in ddf.columns:
@@ -2301,9 +2342,8 @@ def page_futures_trading():
         render_basis_chart,
     )
 
-    client: BreezeAPIClient = st.session_state.get("client")
-    if not client or not client.is_connected():
-        st.warning("Connect to Breeze API first.")
+    client = get_client()
+    if not client:
         return
 
     tab1, tab2, tab3, tab4 = st.tabs(["📊 Quotes", "🛒 Buy / Sell", "🔄 Roll Position", "📉 Basis Chart"])
@@ -2488,9 +2528,8 @@ def page_historical_data():
     import ta_indicators as ta
     import plotly.graph_objects as go
 
-    client: BreezeAPIClient = st.session_state.get("client")
-    if not client or not client.is_connected():
-        st.warning("Connect to Breeze API first.")
+    client = get_client()
+    if not client:
         return
 
     fetcher = HistoricalDataFetcher(client)
@@ -2879,9 +2918,8 @@ def page_gtt_orders():
 
     from gtt_manager import GTTManager, GTTOrderRequest, GTTType, GTTLeg, GTTLegType, GTTStatus, validate_gtt_request
 
-    client: BreezeAPIClient = st.session_state.get("client")
-    if not client or not client.is_connected():
-        st.warning("Connect to Breeze API first.")
+    client = get_client()
+    if not client:
         return
 
     db = TradeDB()
@@ -3607,7 +3645,7 @@ def page_paper_trading():
 def page_settings():
     page_header("⚙️ Settings")
 
-    t1, t2, t3, t4, t5 = st.tabs(["🎛️ Trading", "🛡️ Risk Limits", "🔔 Alerts", "🗄️ Database", "ℹ️ System Info"])
+    t1, t2, t3, t4, t5, t6 = st.tabs(["🎛️ Trading", "🛡️ Risk Limits", "🔔 Alerts", "🗄️ Database", "📅 Holiday Calendar", "ℹ️ System Info"])
 
     with t1:
         section("Trading Preferences")
@@ -3734,6 +3772,141 @@ def page_settings():
             }, "breeze_trader_export.xlsx")
 
     with t5:
+        section("📅 NSE Holiday Calendar")
+
+        status = _hc.get_status()
+
+        # ── Status row ─────────────────────────────────────────────────────
+        st.markdown("##### ⚡ Live Calendar Status")
+        col_a, col_b, col_c, col_d = st.columns(4)
+        col_a.metric("Holidays in Cache", status["total_holidays_in_memory"])
+        col_b.metric(
+            "Last NSE Fetch",
+            f"{status['last_fetch_age_hours']}h ago"
+            if status["last_fetch_age_hours"] is not None else "Never",
+            delta="✅ OK" if status["last_fetch_ok"] else "⚠️ Fallback",
+            delta_color="normal" if status["last_fetch_ok"] else "inverse",
+        )
+        col_c.metric("Cached Years", str(status["loaded_years"] or "None"))
+        col_d.metric("API Refreshes", status["fetch_count"])
+
+        if not status["last_fetch_ok"]:
+            st.warning(
+                "⚠️ Last NSE API fetch **failed** — the app is using the hardcoded fallback "
+                "holiday set.  Click **Refresh Now** to retry, or check network connectivity."
+            )
+        else:
+            st.success(
+                f"✅ Holiday calendar is live (fetched from NSE API, "
+                f"refreshes every {status['cache_max_age_hours']}h automatically)."
+            )
+
+        st.caption(f"Source: `{status['nse_api_url']}`   •   Cache DB: `{status['db_path']}`")
+
+        # ── Manual refresh button ──────────────────────────────────────────
+        st.markdown("---")
+        c_btn, c_msg = st.columns([1, 3])
+        with c_btn:
+            if st.button("🔄 Refresh Now (from NSE)", type="primary", use_container_width=True):
+                with st.spinner("Fetching holidays from NSE API…"):
+                    count, ok = _hc.force_refresh()
+                if ok:
+                    st.success(f"✅ Fetched & cached {count} holidays from NSE API.")
+                else:
+                    st.error(
+                        "❌ NSE API fetch failed.  Hardcoded fallback is active.  "
+                        "Check internet connectivity or try again later."
+                    )
+                st.rerun()
+        with c_msg:
+            st.info(
+                "The calendar refreshes **automatically** every 24 hours.  "
+                "Use this button only if you want to pull today's NSE bulletin immediately "
+                "(e.g. after NSE announces a new ad-hoc holiday)."
+            )
+
+        # ── Year browser ──────────────────────────────────────────────────
+        st.markdown("---")
+        st.markdown("##### 📆 Browse Holiday Calendar")
+
+        from datetime import date as _dt_date
+        current_year = _dt_date.today().year
+        year_options = list(range(current_year - 1, current_year + 4))
+        selected_year = st.selectbox(
+            "Select Year", year_options,
+            index=year_options.index(current_year),
+            key="hc_year_select"
+        )
+
+        holidays_dict = _hc.get_holidays_for_year(selected_year)
+
+        if holidays_dict:
+            rows = []
+            for iso_date in sorted(holidays_dict.keys()):
+                try:
+                    d_obj = _dt_date.fromisoformat(iso_date)
+                    weekday = d_obj.strftime("%A")
+                except Exception:
+                    weekday = ""
+                desc = holidays_dict[iso_date] or "—"
+                source_tag = "📡 NSE API" if "(fallback)" not in desc else "📋 Fallback"
+                rows.append({
+                    "Date": iso_date,
+                    "Day": weekday,
+                    "Holiday": desc.replace("(fallback) ", "").strip(),
+                    "Source": source_tag,
+                })
+            st.dataframe(
+                pd.DataFrame(rows),
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "Date":    st.column_config.DateColumn("Date", format="DD MMM YYYY"),
+                    "Day":     st.column_config.TextColumn("Day of Week"),
+                    "Holiday": st.column_config.TextColumn("Holiday Name"),
+                    "Source":  st.column_config.TextColumn("Source"),
+                }
+            )
+            st.caption(f"Total: **{len(rows)} trading holidays** for {selected_year}")
+        else:
+            st.info(
+                f"No holidays loaded for {selected_year} yet.  "
+                "Click **Refresh Now** above to fetch from NSE, or wait for the next "
+                "automatic refresh."
+            )
+
+        # ── How it works ──────────────────────────────────────────────────
+        with st.expander("ℹ️ How the Holiday Calendar Works"):
+            st.markdown("""
+**Dynamic fetching (no manual updates needed)**
+
+The holiday calendar is fetched automatically from the NSE official API:
+```
+https://www.nseindia.com/api/holiday-master?type=trading
+```
+
+**Refresh policy:**
+- On app startup: calendar is loaded from SQLite cache (fast, no network call)
+- When a year is missing from cache: NSE API is called immediately
+- Every 24 hours: cache is considered stale and refreshed in the background
+- Manual refresh: click the **Refresh Now** button above
+
+**Fallback behaviour:**
+If the NSE API is unreachable (network error, Streamlit Cloud egress block, NSE maintenance):
+- The app silently falls back to the **hardcoded** `NSE_HOLIDAYS_2025_2026` set in `app_config.py`
+- All expiry calculations, market status, and holiday advisories continue working
+- The fallback is updated whenever a new version of the code is deployed
+
+**Coverage:**
+- FO (Futures & Options) holidays are used for expiry adjustments
+- CM (Cash Market) holidays are also merged in, so no holiday is ever missed
+- Both NSE and BSE instruments use this calendar
+
+**Expiry adjustment rule (NSE circular):**
+If a natural expiry date falls on a holiday → expiry is moved to the **previous trading day**.
+""")
+
+    with t6:
         section("System Information")
         info_items = {
             "App Version": "v10.0 PRO",

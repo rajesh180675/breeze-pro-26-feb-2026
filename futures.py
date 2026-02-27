@@ -12,9 +12,11 @@ from breeze_api import BreezeAPIClient, convert_to_breeze_datetime
 
 log = logging.getLogger(__name__)
 
-# NSE_HOLIDAYS_2025_2026 is the single source of truth in app_config.
-# We import the set and the helper functions rather than duplicating them here.
-NSE_HOLIDAYS_2025_2026 = C.NSE_HOLIDAYS_2025_2026   # re-export for backward compat
+# Holiday calendar is now dynamic — fetched from NSE API via holiday_calendar.py
+# and cached in SQLite.  app_config.adjust_expiry_for_holiday() calls
+# app_config.is_nse_holiday(), which in turn delegates to holiday_calendar.
+# We keep the re-export for backward compatibility with any external scripts.
+NSE_HOLIDAYS_2025_2026 = C.NSE_HOLIDAYS_2025_2026   # fallback set; not the primary source
 
 
 def get_futures_expiries(instrument_name: str, count: int = 3, exchange: str = "NFO") -> List[str]:

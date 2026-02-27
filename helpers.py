@@ -286,20 +286,58 @@ def calculate_max_pain(df: pd.DataFrame) -> int:
     return int(min(pain, key=pain.get)) if pain else 0
 
 
-def estimate_atm_strike(df: pd.DataFrame) -> float:
+def estimate_atm_strike(df: pd.DataFrame, spot: float = 0.0) -> float:
+    """
+    Estimate the At-The-Money strike using a multi-priority approach.
+
+    Priority 1 — Live spot price (most accurate, use when available).
+                  Snaps to the nearest valid strike in the chain.
+    Priority 2 — Call-put parity: strike where |call_ltp - put_ltp| is minimum.
+                  Only considers strikes where BOTH call AND put have LTP > 0.
+                  (Filtering zeros is critical — two zero-LTP strikes give diff=0,
+                  which would otherwise win and snap ATM to a random OTM strike.)
+    Priority 3 — OI-weighted centre: among the top-20% highest combined OI strikes,
+                  take the median.  Works well for fresh chains before trading starts.
+    Priority 4 — Median strike by index (last resort).
+    """
     if df.empty or "strike_price" not in df.columns:
         return 0.0
-    if "right" not in df.columns or "ltp" not in df.columns:
-        strikes = sorted(df["strike_price"].unique())
-        return strikes[len(strikes) // 2] if strikes else 0.0
-    calls = df[df["right"] == "Call"][["strike_price", "ltp"]].set_index("strike_price")
-    puts = df[df["right"] == "Put"][["strike_price", "ltp"]].set_index("strike_price")
-    combined = calls.join(puts, lsuffix="_call", rsuffix="_put").dropna()
-    if combined.empty:
-        strikes = sorted(df["strike_price"].unique())
-        return strikes[len(strikes) // 2] if strikes else 0.0
-    combined["diff"] = abs(combined["ltp_call"] - combined["ltp_put"])
-    return float(combined["diff"].idxmin())
+
+    strikes = sorted(df["strike_price"].dropna().unique())
+    if not strikes:
+        return 0.0
+
+    # Priority 1: snap to nearest chain strike using live spot
+    if spot > 0:
+        return float(min(strikes, key=lambda s: abs(s - spot)))
+
+    # Priority 2: call-put parity — exclude zero-LTP rows to avoid false minimum
+    if "right" in df.columns and "ltp" in df.columns:
+        calls = (df[(df["right"] == "Call") & (df["ltp"] > 0)]
+                 [["strike_price", "ltp"]].set_index("strike_price"))
+        puts  = (df[(df["right"] == "Put")  & (df["ltp"] > 0)]
+                 [["strike_price", "ltp"]].set_index("strike_price"))
+        combined = calls.join(puts, lsuffix="_call", rsuffix="_put").dropna()
+        if not combined.empty:
+            combined["diff"] = abs(combined["ltp_call"] - combined["ltp_put"])
+            return float(combined["diff"].idxmin())
+
+    # Priority 3: OI-weighted centre (handles pre-market / illiquid chains)
+    if "open_interest" in df.columns and "right" in df.columns:
+        try:
+            c_oi = df[df["right"] == "Call"].groupby("strike_price")["open_interest"].sum()
+            p_oi = df[df["right"] == "Put"].groupby("strike_price")["open_interest"].sum()
+            tot  = c_oi.add(p_oi, fill_value=0).dropna()
+            tot  = tot[tot > 0]
+            if not tot.empty:
+                threshold = tot.quantile(0.80)
+                top_strikes = sorted(tot[tot >= threshold].index.tolist())
+                return float(top_strikes[len(top_strikes) // 2])
+        except Exception:
+            pass
+
+    # Priority 4: median strike by index
+    return float(strikes[len(strikes) // 2])
 
 
 def add_greeks_to_chain(df: pd.DataFrame, spot_price: float, expiry_date: str) -> pd.DataFrame:

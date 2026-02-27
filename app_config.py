@@ -74,16 +74,24 @@ DEFAULT_MARGIN_CRITICAL_PCT = 90
 
 
 # ═══════════════════════════════════════════════════════════════
-# NSE / BSE HOLIDAY CALENDAR
+# NSE / BSE HOLIDAY CALENDAR — HARDCODED FALLBACK
 # ═══════════════════════════════════════════════════════════════
-# Source: NSE circular + BSE circular (update annually)
+# ⚠️  THIS SET IS NO LONGER THE PRIMARY SOURCE OF TRUTH.
+#
+# The app now fetches holidays dynamically from the NSE API via
+# holiday_calendar.py, which caches results in SQLite.  The set
+# below is used ONLY as a fallback when the NSE API is unreachable.
+#
+# You do NOT need to update this set every year — holiday_calendar.py
+# will fetch the live NSE calendar automatically and cache it.
+#
+# If you want to force-add a holiday that NSE hasn't published yet,
+# add it here AND it will be picked up by is_nse_holiday() as a fallback.
+#
 # Rule: when an index options/futures expiry day falls on a holiday,
 #       NSE moves the expiry to the PREVIOUS trading day.
-# This calendar is the single source of truth for the entire app.
-# futures.py imports this set rather than duplicating it.
 #
 # NOTE: 2025-10-02 appears once (duplicate removed from original spec).
-#
 NSE_HOLIDAYS_2025_2026: Set[str] = {
     # ── 2025 ──────────────────────────────────────────────────
     "2025-01-14",   # Makar Sankranti
@@ -123,8 +131,20 @@ NSE_HOLIDAYS_2025_2026: Set[str] = {
 
 
 def is_nse_holiday(d: "_date") -> bool:  # type: ignore[name-defined]
-    """Return True if *d* is a known NSE market holiday."""
-    return d.isoformat() in NSE_HOLIDAYS_2025_2026
+    """
+    Return True if *d* is an NSE market holiday.
+
+    Delegates to holiday_calendar (dynamic, NSE-API-backed) with automatic
+    fallback to the hardcoded NSE_HOLIDAYS_2025_2026 set below.
+    The dynamic module is imported lazily so that app_config remains
+    side-effect-free at module level.
+    """
+    try:
+        from holiday_calendar import is_holiday as _dyn_is_holiday
+        return _dyn_is_holiday(d)
+    except Exception:
+        # If holiday_calendar is unavailable for any reason, use hardcoded set
+        return d.isoformat() in NSE_HOLIDAYS_2025_2026
 
 
 def is_trading_day(d: "_date") -> bool:  # type: ignore[name-defined]
