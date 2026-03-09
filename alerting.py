@@ -55,6 +55,16 @@ class AlertConfig:
     webhook_enabled: bool = False
     webhook_url: str = ""
     webhook_secret: str = ""
+    discord_enabled: bool = False
+    discord_webhook_url: str = ""
+
+    whatsapp_enabled: bool = False
+    whatsapp_to: str = ""
+    whatsapp_from: str = ""
+    twilio_account_sid: str = ""
+    twilio_auth_token: str = ""
+
+    alert_template: str = "{level} {title}\n{body}"
 
     alert_on_fill: bool = True
     alert_on_stop_loss: bool = True
@@ -207,6 +217,46 @@ class WebhookDispatcher:
             return False
 
 
+class DiscordDispatcher:
+    def __init__(self, webhook_url: str, timeout: int = 10):
+        self._webhook_url = webhook_url
+        self._timeout = timeout
+
+    def send(self, event: AlertEvent) -> bool:
+        if not self._webhook_url:
+            return False
+        payload = {
+            "content": f"**{event.level.value}** {event.title}\n{event.body}",
+        }
+        try:
+            resp = requests.post(self._webhook_url, json=payload, timeout=self._timeout)
+            return resp.status_code < 300
+        except Exception as exc:
+            log.error("Discord dispatch error: %s", exc)
+            return False
+
+
+class WhatsAppDispatcher:
+    def __init__(self, account_sid: str, auth_token: str, from_number: str, to_number: str, timeout: int = 10):
+        self._sid = account_sid
+        self._token = auth_token
+        self._from = from_number
+        self._to = to_number
+        self._timeout = timeout
+
+    def send(self, text: str) -> bool:
+        if not all([self._sid, self._token, self._from, self._to]):
+            return False
+        url = f"https://api.twilio.com/2010-04-01/Accounts/{self._sid}/Messages.json"
+        data = {"From": self._from, "To": self._to, "Body": text}
+        try:
+            resp = requests.post(url, data=data, auth=(self._sid, self._token), timeout=self._timeout)
+            return resp.status_code < 300
+        except Exception as exc:
+            log.error("WhatsApp dispatch error: %s", exc)
+            return False
+
+
 class AlertDispatcher:
     MAX_HISTORY = 500
 
@@ -214,7 +264,7 @@ class AlertDispatcher:
         self._config = config
         self._history: List[Dict] = []
         self._lock = threading.Lock()
-        self._dedupe_window_seconds = 60
+        self._dedupe_window_seconds = 300
         self._dedupe_cache: Dict[str, float] = {}
         self._queue: "queue.Queue[AlertEvent]" = queue.Queue(maxsize=1000)
         self._stop = threading.Event()
@@ -231,6 +281,27 @@ class AlertDispatcher:
         self._telegram = TelegramDispatcher(cfg.telegram_bot_token, cfg.telegram_chat_id) if cfg.telegram_enabled else None
         self._email = EmailDispatcher(cfg.email_smtp_host, cfg.email_smtp_port, cfg.email_username, cfg.email_password, cfg.email_to) if cfg.email_enabled else None
         self._webhook = WebhookDispatcher(cfg.webhook_url, cfg.webhook_secret) if cfg.webhook_enabled else None
+        self._discord = DiscordDispatcher(cfg.discord_webhook_url) if cfg.discord_enabled else None
+        self._whatsapp = WhatsAppDispatcher(
+            cfg.twilio_account_sid,
+            cfg.twilio_auth_token,
+            cfg.whatsapp_from,
+            cfg.whatsapp_to,
+        ) if cfg.whatsapp_enabled else None
+
+    def _render_template(self, event: AlertEvent) -> str:
+        context = {
+            "alert_type": event.alert_type,
+            "level": event.level.value,
+            "title": event.title,
+            "body": event.body,
+            "timestamp": event.timestamp,
+            **{str(k): str(v) for k, v in event.metadata.items()},
+        }
+        text = self._config.alert_template or "{level} {title}\n{body}"
+        for k, v in context.items():
+            text = text.replace("{" + k + "}", str(v))
+        return text
 
     def _event_key(self, event: AlertEvent) -> str:
         blob = json.dumps(
@@ -276,13 +347,18 @@ class AlertDispatcher:
                 self._queue.task_done()
 
     def _send_all(self, event: AlertEvent) -> None:
+        rendered = self._render_template(event)
         if self._telegram:
-            self._telegram.send(self._telegram.format_alert(event))
+            self._telegram.send(rendered)
         if self._email:
             subject, html = self._email.format_alert(event)
             self._email.send(subject, html)
         if self._webhook:
             self._webhook.send(event)
+        if self._discord:
+            self._discord.send(event)
+        if self._whatsapp:
+            self._whatsapp.send(rendered)
 
     def get_history(self, limit: int = 50) -> List[Dict]:
         with self._lock:

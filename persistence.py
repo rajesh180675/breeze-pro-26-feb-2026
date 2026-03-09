@@ -104,11 +104,22 @@ CREATE TABLE IF NOT EXISTS account_profiles (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     profile_name TEXT UNIQUE NOT NULL,
     api_key TEXT NOT NULL,
+    api_secret TEXT DEFAULT '',
     totp_secret TEXT DEFAULT '',
     broker TEXT DEFAULT 'ICICI',
     is_active INTEGER DEFAULT 0,
     created_at TEXT NOT NULL,
     last_used TEXT
+);
+CREATE TABLE IF NOT EXISTS basket_templates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    instrument TEXT NOT NULL,
+    strategy_type TEXT NOT NULL,
+    legs_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    last_used TEXT,
+    use_count INTEGER DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_trades_ts ON trades(timestamp);
 CREATE INDEX IF NOT EXISTS idx_trades_date ON trades(date);
@@ -217,6 +228,10 @@ class TradeDB:
     def _init_schema(self):
         conn = self._get_conn()
         conn.executescript(SCHEMA)
+        try:
+            conn.execute("ALTER TABLE account_profiles ADD COLUMN api_secret TEXT DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
         DBMigrator().run(conn)
         conn.commit()
 
@@ -531,6 +546,66 @@ class TradeDB:
         except Exception:
             pass
 
+    # ─── Basket templates ────────────────────────────────────
+
+    def save_basket_template(self, name: str, instrument: str, strategy_type: str, legs: List[Dict[str, Any]]) -> bool:
+        try:
+            with self._tx() as conn:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO basket_templates
+                    (name, instrument, strategy_type, legs_json, created_at, last_used, use_count)
+                    VALUES (?, ?, ?, ?, COALESCE((SELECT created_at FROM basket_templates WHERE name=?), ?),
+                            COALESCE((SELECT last_used FROM basket_templates WHERE name=?), NULL),
+                            COALESCE((SELECT use_count FROM basket_templates WHERE name=?), 0))
+                    """,
+                    (
+                        name,
+                        instrument,
+                        strategy_type,
+                        json.dumps(legs),
+                        name,
+                        datetime.now().isoformat(),
+                        name,
+                        name,
+                    ),
+                )
+            return True
+        except Exception as exc:
+            log.error("save_basket_template failed: %s", exc)
+            return False
+
+    def list_basket_templates(self, instrument: str = "") -> List[Dict[str, Any]]:
+        try:
+            conn = self._get_conn()
+            if instrument:
+                rows = conn.execute(
+                    "SELECT * FROM basket_templates WHERE instrument=? ORDER BY name",
+                    (instrument,),
+                ).fetchall()
+            else:
+                rows = conn.execute("SELECT * FROM basket_templates ORDER BY name").fetchall()
+            out = []
+            for row in rows:
+                rec = dict(row)
+                rec["legs"] = json.loads(rec.get("legs_json") or "[]")
+                out.append(rec)
+            return out
+        except Exception as exc:
+            log.error("list_basket_templates failed: %s", exc)
+            return []
+
+    def mark_basket_template_used(self, name: str) -> None:
+        with self._tx() as conn:
+            conn.execute(
+                """
+                UPDATE basket_templates
+                SET use_count=COALESCE(use_count, 0) + 1, last_used=?
+                WHERE name=?
+                """,
+                (datetime.now().isoformat(), name),
+            )
+
 
 class AccountProfileDB:
     """Manage multiple account credential profiles."""
@@ -538,7 +613,14 @@ class AccountProfileDB:
     def __init__(self, db: TradeDB):
         self._db = db
 
-    def save_profile(self, profile_name: str, api_key: str, totp_secret: str = "", broker: str = "ICICI") -> None:
+    def save_profile(
+        self,
+        profile_name: str,
+        api_key: str,
+        totp_secret: str = "",
+        broker: str = "ICICI",
+        api_secret: str = "",
+    ) -> None:
         now = datetime.now().isoformat()
         with self._db._tx() as conn:
             existing = conn.execute(
@@ -548,14 +630,14 @@ class AccountProfileDB:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO account_profiles
-                (profile_name, api_key, totp_secret, broker, is_active, created_at, last_used)
-                VALUES (?, ?, ?, ?,
+                (profile_name, api_key, api_secret, totp_secret, broker, is_active, created_at, last_used)
+                VALUES (?, ?, ?, ?, ?,
                     COALESCE((SELECT is_active FROM account_profiles WHERE profile_name=?), 0),
                     ?,
                     COALESCE((SELECT last_used FROM account_profiles WHERE profile_name=?), NULL)
                 )
                 """,
-                (profile_name, api_key, totp_secret, broker, profile_name, created_at, profile_name),
+                (profile_name, api_key, api_secret, totp_secret, broker, profile_name, created_at, profile_name),
             )
 
     def get_profiles(self) -> List[Dict]:

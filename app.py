@@ -26,7 +26,7 @@ from functools import wraps
 import time
 import logging
 import io
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import app_config as C
 from helpers import (
@@ -54,7 +54,7 @@ from validators import validate_date_range
 from strategies import (
     StrategyLeg, PREDEFINED_STRATEGIES, STRATEGY_CATEGORIES,
     generate_strategy_legs, calculate_strategy_metrics,
-    generate_payoff_data, get_strategies_by_category
+    generate_payoff_data, get_strategies_by_category, AIStrategySuggester
 )
 from persistence import TradeDB, AccountProfileDB, export_trades_for_tax
 from risk_monitor import RiskMonitor, Alert
@@ -437,16 +437,16 @@ def auto_subscribe_option_chain(
     expiry: str,
     strikes: List[int],
     client: BreezeAPIClient,
-) -> None:
+) -> Dict[str, str]:
     """Subscribe WebSocket feeds for all visible strikes in the option chain."""
     mgr = lf.get_live_feed_manager()
     if mgr is None or not mgr.is_connected():
-        return
+        return {}
 
     resolver = lf.get_token_resolver(client.breeze)
     cfg = C.INSTRUMENTS.get(instrument)
     if not cfg:
-        return
+        return {}
 
     instruments_to_resolve = []
     for strike in strikes:
@@ -464,6 +464,8 @@ def auto_subscribe_option_chain(
     for token in token_map.values():
         if token:
             mgr.subscribe_quote(token, get_market_depth=False)
+    st.session_state[f"oc_tokens_{cfg.api_code}_{expiry}"] = token_map
+    return token_map
 
 
 def get_client():
@@ -596,6 +598,171 @@ def get_market_regime_snapshot(vix: float, pcr: float, spot: float) -> Dict[str,
     regime = detect_market_regime(hist_df, vix=vix, pcr=pcr if pcr > 0 else 1.0, spot=spot)
     st.session_state["market_regime_snapshot"] = regime
     return regime
+
+
+def build_iv_surface_data(client, instrument: str, expiries: List[str], spot: float) -> Dict[str, Any]:
+    """Build strike-expiry IV grid with 5-minute cache."""
+    cache_key = f"iv_surface_{instrument}_{int(spot)}_{','.join(expiries[:6])}"
+    cached = CacheManager.get(cache_key, "analytics")
+    if cached:
+        return cached
+
+    cfg = C.get_instrument(instrument)
+    records: List[Dict[str, float]] = []
+    for expiry in expiries[:6]:
+        try:
+            chain_resp = client.get_option_chain(cfg.api_code, cfg.exchange, expiry)
+            if not chain_resp.get("success"):
+                continue
+            chain_df = process_option_chain(chain_resp.get("data", {}))
+            if chain_df.empty:
+                continue
+            dte = max(calculate_days_to_expiry(expiry), 1)
+            tte = max(dte / C.DAYS_PER_YEAR, 0.001)
+            for _, row in chain_df.iterrows():
+                strike = safe_float(row.get("strike_price", 0))
+                ltp = safe_float(row.get("ltp", 0))
+                right = C.normalize_option_type(row.get("right", ""))
+                if strike <= 0 or ltp <= 0 or right not in ("CE", "PE"):
+                    continue
+                iv = estimate_implied_volatility(ltp, spot, strike, tte, right)
+                if pd.isna(iv) or iv <= 0:
+                    continue
+                greeks = calculate_greeks(spot, strike, tte, iv, right)
+                records.append(
+                    {
+                        "strike": strike,
+                        "moneyness": strike / spot if spot > 0 else 0,
+                        "dte": dte,
+                        "iv": iv * 100.0,
+                        "delta": greeks.get("delta", 0.0),
+                    }
+                )
+        except Exception as exc:
+            log.debug(f"IV surface fetch failed for {expiry}: {exc}")
+    out = {"records": records}
+    CacheManager.set(cache_key, out, "analytics", ttl=300)
+    return out
+
+
+def render_iv_surface(df_chain_dict: Dict[str, Any], spot: float) -> None:
+    """Render 3D IV surface and 2D smile slice."""
+    recs = df_chain_dict.get("records", [])
+    if not recs:
+        st.info("Not enough option-chain data to render IV surface")
+        return
+
+    import plotly.graph_objects as go
+    data_df = pd.DataFrame(recs)
+    x_vals = np.array(sorted(data_df["moneyness"].dropna().unique()))
+    y_vals = np.array(sorted(data_df["dte"].dropna().unique()))
+    if len(x_vals) < 2 or len(y_vals) < 2:
+        st.info("Need at least 2 strikes and 2 expiries for IV surface")
+        return
+
+    grid_x, grid_y = np.meshgrid(x_vals, y_vals)
+    try:
+        from scipy.interpolate import griddata
+        grid_z = griddata(
+            points=data_df[["moneyness", "dte"]].to_numpy(),
+            values=data_df["iv"].to_numpy(),
+            xi=(grid_x, grid_y),
+            method="linear",
+        )
+    except Exception:
+        grid_z = np.full_like(grid_x, np.nan, dtype=float)
+
+    if np.isnan(grid_z).all():
+        # fallback nearest fill
+        for i, dte in enumerate(y_vals):
+            row = data_df[data_df["dte"] == dte].sort_values("moneyness")
+            if row.empty:
+                continue
+            iv_interp = np.interp(x_vals, row["moneyness"], row["iv"])
+            grid_z[i, :] = iv_interp
+
+    fig = go.Figure(
+        data=[
+            go.Surface(
+                x=grid_x,
+                y=grid_y,
+                z=grid_z,
+                colorscale="Viridis",
+                contours={"z": {"show": True, "usecolormap": True}},
+                hovertemplate="Moneyness=%{x:.3f}<br>DTE=%{y}<br>IV=%{z:.2f}%<extra></extra>",
+            )
+        ]
+    )
+    fig.update_layout(
+        title="IV Surface",
+        scene=dict(
+            xaxis_title="Strike / Spot",
+            yaxis_title="Days To Expiry",
+            zaxis_title="Implied Vol (%)",
+        ),
+        height=500,
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    selected_dte = st.selectbox("IV Smile Slice DTE", y_vals.tolist(), key="iv_surface_slice_dte")
+    slice_df = data_df[data_df["dte"] == selected_dte].sort_values("strike")
+    if not slice_df.empty:
+        smile_fig = go.Figure()
+        smile_fig.add_trace(
+            go.Scatter(
+                x=slice_df["strike"],
+                y=slice_df["iv"],
+                mode="lines+markers",
+                name=f"DTE {selected_dte}",
+            )
+        )
+        smile_fig.update_layout(
+            title=f"IV Smile (DTE {selected_dte})",
+            xaxis_title="Strike",
+            yaxis_title="IV (%)",
+            height=320,
+        )
+        st.plotly_chart(smile_fig, use_container_width=True)
+
+
+def render_portfolio_greeks_heatmap(rows_df: pd.DataFrame) -> None:
+    """Render position-level Greeks heatmap with portfolio totals row."""
+    if rows_df.empty:
+        return
+    import plotly.graph_objects as go
+
+    numeric_cols = ["Delta", "Gamma", "Theta ₹", "Vega ₹", "P&L ₹"]
+    heat_df = rows_df.copy()
+    for col in numeric_cols:
+        heat_df[col] = pd.to_numeric(heat_df[col].astype(str).str.replace(",", "", regex=False), errors="coerce").fillna(0.0)
+    heat_df["Notional"] = (heat_df["Spot ₹"].astype(str).str.replace(",", "", regex=False).astype(float) * heat_df["Qty"].astype(float))
+
+    z_cols = ["Delta", "Gamma", "Theta ₹", "Vega ₹", "Notional", "P&L ₹"]
+    matrix = heat_df[z_cols].to_numpy()
+    y_labels = (
+        heat_df["Position"].astype(str)
+        + " "
+        + heat_df["Strike"].astype(str)
+        + " "
+        + heat_df["Type"].astype(str)
+    ).tolist()
+
+    totals = heat_df[z_cols].sum(axis=0).to_numpy().reshape(1, -1)
+    matrix_with_total = np.vstack([matrix, totals])
+    y_with_total = y_labels + ["PORTFOLIO TOTAL"]
+
+    fig = go.Figure(
+        data=go.Heatmap(
+            z=matrix_with_total,
+            x=z_cols,
+            y=y_with_total,
+            colorscale="RdYlGn",
+            zmid=0,
+            hovertemplate="Row=%{y}<br>Metric=%{x}<br>Value=%{z:.2f}<extra></extra>",
+        )
+    )
+    fig.update_layout(height=380, title="Portfolio Greeks Heatmap")
+    st.plotly_chart(fig, use_container_width=True)
 
 
 def split_positions(all_pos):
@@ -1035,6 +1202,29 @@ def page_dashboard():
     except Exception as exc:
         log.debug(f"Regime badge render failed: {exc}")
 
+    with st.expander("🏦 Market Circuit Breakers"):
+        def _cb_line(label: str, spot_val: float) -> Dict[str, str]:
+            if spot_val <= 0:
+                return {"name": label, "status": "N/A", "distance": "—", "limit": "±10%"}
+            upper = spot_val * 1.10
+            lower = spot_val * 0.90
+            dist = min(upper - spot_val, spot_val - lower)
+            pct = (dist / spot_val) * 100 if spot_val > 0 else 0
+            status = "⚠️ CAUTION" if pct < 15 else "● NORMAL"
+            return {
+                "name": label,
+                "status": status,
+                "distance": f"{dist:,.0f} ({pct:.1f}%)",
+                "limit": f"±10% ({lower:,.0f} - {upper:,.0f})",
+            }
+
+        cb_rows = [
+            _cb_line("NIFTY", safe_float(dashboard_metrics.get("NIFTY SPOT", {}).get("value", 0), 0.0)),
+            _cb_line("BANKNIFTY", safe_float(dashboard_metrics.get("BANKNIFTY SPOT", {}).get("value", 0), 0.0)),
+        ]
+        st.dataframe(pd.DataFrame(cb_rows), hide_index=True, use_container_width=True)
+        st.caption("Market-wide circuit breakers: 10% / 15% / 20%")
+
     st.markdown("---")
 
     # ── Account Overview ──────────────────────────────────────
@@ -1195,6 +1385,7 @@ def page_option_chain():
 
     view = st.radio("View", ["Traditional", "Flat", "Calls Only", "Puts Only", "IV Smile"],
                     horizontal=True, key="oc_v")
+    quote_mode = st.radio("Quote Mode", ["🔴 Live WS", "📦 Snapshot"], horizontal=True, key="oc_quote_mode")
     with st.sidebar.expander("⛓️ Chain Options"):
         chain_opt_oi_heatmap = st.checkbox("OI Change % Heatmap", value=True, key="oc_opt_oi_heatmap")
         chain_opt_volume_spike = st.checkbox("Volume Spike Alert", value=True, key="oc_opt_vol_spike")
@@ -1311,10 +1502,30 @@ def page_option_chain():
     visible_strikes = []
     if "strike_price" in ddf.columns:
         visible_strikes = sorted({int(x) for x in ddf["strike_price"].dropna().tolist()})
+    token_map = {}
     if visible_strikes:
-        auto_subscribe_option_chain(inst, expiry, visible_strikes, client)
+        token_map = auto_subscribe_option_chain(inst, expiry, visible_strikes, client)
 
     spot_for_greeks = atm if atm > 0 else (ddf["strike_price"].median() if "strike_price" in ddf.columns else 0)
+
+    if quote_mode == "🔴 Live WS" and not ddf.empty and token_map:
+        try:
+            resolver = lf.get_token_resolver(client.breeze)
+            tick_store = lf.get_tick_store()
+            cfg_obj = C.get_instrument(inst)
+            live_prices = []
+            for _, row in ddf.iterrows():
+                strike = safe_float(row.get("strike_price", 0))
+                right = str(row.get("right", "")).lower()
+                right_key = "call" if "call" in right or "ce" in right else "put"
+                key = resolver._make_key(cfg_obj.exchange, cfg_obj.api_code, "options", expiry, strike, right_key)
+                token = token_map.get(key)
+                live_ltp = tick_store.get_latest_ltp(token) if token else None
+                live_prices.append(live_ltp)
+            if live_prices:
+                ddf["ltp"] = [lp if lp is not None and lp > 0 else old for lp, old in zip(live_prices, ddf["ltp"])]
+        except Exception as exc:
+            log.debug(f"Live WS quote overlay failed: {exc}")
 
     if show_greeks and not ddf.empty and spot_for_greeks > 0:
         try:
@@ -1561,6 +1772,23 @@ def page_sell_options():
 
     if order_busy:
         st.warning("⏳ Order in progress...")
+
+    if _db.get_setting("voice_confirmations", False):
+        if st.button("🔊 Read Order Back", key="sell_voice_read"):
+            safe_price = lp if lp > 0 else st.session_state.get("s_quote_ltp", 0)
+            components.html(
+                f"""
+                <script>
+                  const msg = new SpeechSynthesisUtterance(
+                    "Confirm order: Sell {lots} lots of {inst} {int(strike)} {oc} at {safe_price:.2f} rupees per share."
+                  );
+                  msg.rate = 0.9;
+                  msg.lang = "en-IN";
+                  window.speechSynthesis.speak(msg);
+                </script>
+                """,
+                height=0,
+            )
 
     col1, col2 = st.columns([2, 1])
     with col1:
@@ -2120,6 +2348,33 @@ def page_strategy_builder():
                                   max_value=cfg.max_strike, value=int(default_atm),
                                   step=cfg.strike_gap, key="sb_a")
             lots = st.number_input("Lots per Leg", min_value=1, max_value=50, value=1, key="sb_l")
+            templates = _db.list_basket_templates(inst)
+            template_names = [t["name"] for t in templates]
+            selected_template = st.selectbox("📂 Load Template", ["—"] + template_names, key="sb_template_load")
+            if selected_template != "—" and st.button("Load Template", key="sb_load_template_btn"):
+                tpl = next((t for t in templates if t["name"] == selected_template), None)
+                if tpl:
+                    loaded_legs = []
+                    for l in tpl.get("legs", []):
+                        offset = safe_int(l.get("offset", 0))
+                        loaded_legs.append(
+                            StrategyLeg(
+                                strike=int(atm) + (offset * cfg.strike_gap),
+                                option_type=str(l.get("type", "CE")),
+                                action=str(l.get("action", "buy")),
+                                quantity=lots * cfg.lot_size * max(1, safe_int(l.get("qty_multiplier", 1))),
+                                label=str(l.get("label", "")),
+                                expiry=expiry,
+                            )
+                        )
+                    if loaded_legs:
+                        st.session_state.strat_legs = loaded_legs
+                        st.session_state.strat_cfg = cfg
+                        st.session_state.strat_expiry = expiry
+                        st.session_state.strat_name = tpl.get("strategy_type", "Template")
+                        _db.mark_basket_template_used(selected_template)
+                        st.success(f"Loaded template: {selected_template}")
+                        st.rerun()
 
             if st.button("🔧 Build Strategy", type="primary", use_container_width=True):
                 try:
@@ -2141,9 +2396,54 @@ def page_strategy_builder():
                     st.success(f"✅ Built {len(legs)} leg(s)")
                 except Exception as e:
                     st.error(f"❌ {e}")
+            save_tpl_name = st.text_input("💾 Save as Template", key="sb_template_name")
+            if save_tpl_name and st.button("Save Template", key="sb_template_save_btn"):
+                src_legs = st.session_state.get("strat_legs", [])
+                if not src_legs:
+                    st.warning("Build a strategy before saving as template.")
+                else:
+                    legs_payload = []
+                    for l in src_legs:
+                        legs_payload.append(
+                            {
+                                "offset": int(round((l.strike - int(atm)) / cfg.strike_gap)),
+                                "type": l.option_type,
+                                "action": l.action,
+                                "qty_multiplier": max(1, int(l.quantity / max(lots * cfg.lot_size, 1))),
+                                "label": l.label,
+                            }
+                        )
+                    ok = _db.save_basket_template(save_tpl_name, inst, sname, legs_payload)
+                    st.success("Template saved.") if ok else st.error("Could not save template.")
 
         with c2:
             info = PREDEFINED_STRATEGIES.get(sname, {})
+            with st.expander("🤖 AI Suggests for Today"):
+                regime_snapshot = st.session_state.get("market_regime_snapshot", {"regime": "RANGE_BOUND"})
+                trader_win_rates: Dict[str, float] = {}
+                trade_rows = _db.get_trades(limit=2000)
+                if trade_rows:
+                    tdf = pd.DataFrame(trade_rows)
+                    if "notes" in tdf.columns and "pnl" in tdf.columns:
+                        tdf["strategy"] = tdf["notes"].astype(str).str.extract(r"Strategy:\s*(.*)")[0]
+                        for strat_name, g in tdf.dropna(subset=["strategy"]).groupby("strategy"):
+                            wins = (pd.to_numeric(g["pnl"], errors="coerce").fillna(0.0) > 0).mean() * 100.0
+                            trader_win_rates[str(strat_name)] = float(wins)
+                suggester = AIStrategySuggester()
+                dte_for_suggest = calculate_days_to_expiry(expiry)
+                suggestions = suggester.suggest(
+                    regime=regime_snapshot,
+                    vix=safe_float(st.session_state.get("_dashboard_metrics_prev", {}).get("VIX", 15), 15),
+                    pcr=safe_float(st.session_state.get("_dashboard_metrics_prev", {}).get("NIFTY PCR", 1.0), 1.0),
+                    trader_win_rates=trader_win_rates,
+                    available_capital=float(_db.get_setting("capital_base", 100000)),
+                    days_to_expiry=max(dte_for_suggest, 1),
+                )
+                if suggestions:
+                    for sug in suggestions:
+                        st.markdown(f"**{sug.strategy}** — Score {sug.score:.1f}")
+                        st.caption(sug.reason)
+
             st.markdown(f"### {sname}")
             st.markdown(info.get("description", ""))
             mc = st.columns(4)
@@ -2407,7 +2707,14 @@ def page_analytics():
     if not client:
         return
 
-    t1, t2, t3, t4, t5 = st.tabs(["📊 Portfolio Greeks", "💰 Margin", "📈 Performance", "🧪 Stress Test", "🎲 Monte Carlo VaR"])
+    t1, t2, t3, t4, t5, t6 = st.tabs([
+        "📊 Portfolio Greeks",
+        "💰 Margin",
+        "📈 Performance",
+        "🧪 Stress Test",
+        "🎲 Monte Carlo VaR",
+        "🌐 IV Surface",
+    ])
 
     with t1:
         all_pos = get_cached_positions(client)
@@ -2459,7 +2766,8 @@ def page_analytics():
                 })
 
             if rows:
-                st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+                rows_df = pd.DataFrame(rows)
+                st.dataframe(rows_df, hide_index=True, use_container_width=True)
                 # Portfolio aggregate
                 port_g = calculate_portfolio_greeks(opt_pos, spot_prices)
                 st.markdown("---")
@@ -2470,10 +2778,25 @@ def page_analytics():
                 gc[2].metric("Net Theta/day", f"₹{port_g['theta']:+.0f}")
                 gc[3].metric("Net Vega/1%", f"₹{port_g['vega']:+.0f}")
                 gc[4].metric("Net Rho/1%", f"₹{port_g['rho']:+.0f}")
+                render_portfolio_greeks_heatmap(rows_df)
+
+                st.markdown("**Quick Action: Navigate to Square Off**")
+                pos_labels = (
+                    rows_df["Position"].astype(str)
+                    + " "
+                    + rows_df["Strike"].astype(str)
+                    + " "
+                    + rows_df["Type"].astype(str)
+                ).tolist()
+                selected_pos = st.selectbox("Select Position", pos_labels, key="analytics_sqoff_select")
+                if st.button("Go to Square Off", key="analytics_sqoff_btn"):
+                    st.session_state["square_off_prefill"] = selected_pos
+                    SessionState.navigate_to("❌ Square Off")
+                    st.rerun()
 
                 # Delta visualization
                 if any(r["Delta"] != "+0.00" for r in rows):
-                    delta_df = pd.DataFrame(rows)[["Position", "Strike", "Type", "Delta"]]
+                    delta_df = rows_df[["Position", "Strike", "Type", "Delta"]]
                     delta_df["Delta_val"] = delta_df["Delta"].astype(float)
                     st.bar_chart(delta_df.set_index("Position")["Delta_val"])
 
@@ -2552,6 +2875,111 @@ def page_analytics():
         else:
             empty_state("📈", "No P&L history yet", "Trade to build history")
 
+        st.markdown("---")
+        section("📓 Trade Journal")
+        trades = _db.get_trades(limit=5000)
+        pnl_hist_full = _db.get_pnl_history(365)
+        if trades:
+            trades_df = pd.DataFrame(trades)
+            pnl_series = pd.to_numeric(trades_df.get("pnl", pd.Series(dtype=float)), errors="coerce").fillna(0.0)
+            wins = pnl_series[pnl_series > 0]
+            losses = pnl_series[pnl_series < 0]
+            win_rate = (len(wins) / len(pnl_series) * 100.0) if len(pnl_series) else 0.0
+            gross_profit = float(wins.sum()) if not wins.empty else 0.0
+            gross_loss = float(abs(losses.sum())) if not losses.empty else 0.0
+            profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else float("inf")
+            avg_win = float(wins.mean()) if not wins.empty else 0.0
+            avg_loss = float(losses.mean()) if not losses.empty else 0.0
+            avg_win_loss = (abs(avg_win / avg_loss) if avg_loss != 0 else float("inf"))
+
+            streak_win = streak_loss = max_win = max_loss = 0
+            for p in pnl_series.tolist():
+                if p > 0:
+                    streak_win += 1
+                    streak_loss = 0
+                    max_win = max(max_win, streak_win)
+                elif p < 0:
+                    streak_loss += 1
+                    streak_win = 0
+                    max_loss = max(max_loss, streak_loss)
+
+            daily_df = pd.DataFrame(pnl_hist_full) if pnl_hist_full else pd.DataFrame()
+            daily_returns = []
+            if not daily_df.empty and "realized_pnl" in daily_df.columns:
+                daily_vals = pd.to_numeric(daily_df["realized_pnl"], errors="coerce").fillna(0.0)
+                daily_returns = daily_vals.tolist()
+            sharpe = 0.0
+            calmar = 0.0
+            if daily_returns:
+                arr = np.array(daily_returns, dtype=float)
+                if arr.std() > 0:
+                    sharpe = float((arr.mean() * 252 - 0.065) / (arr.std() * np.sqrt(252)))
+                cum = np.cumsum(arr)
+                max_dd = abs(calculate_max_drawdown(cum.tolist()))
+                annual_ret = float(arr.mean() * 252)
+                calmar = (annual_ret / max_dd) if max_dd > 0 else 0.0
+
+            m1, m2, m3, m4, m5, m6 = st.columns(6)
+            m1.metric("Win Rate %", f"{win_rate:.1f}%")
+            m2.metric("Profit Factor", "∞" if np.isinf(profit_factor) else f"{profit_factor:.2f}")
+            m3.metric("Avg Win / Loss", "∞" if np.isinf(avg_win_loss) else f"{avg_win_loss:.2f}")
+            m4.metric("Max Win Streak", str(max_win))
+            m5.metric("Sharpe Ratio", f"{sharpe:.2f}")
+            m6.metric("Calmar Ratio", f"{calmar:.2f}")
+            st.caption(f"Max Loss Streak: {max_loss}")
+
+            if not daily_df.empty and "date" in daily_df.columns and "realized_pnl" in daily_df.columns:
+                daily_df["date"] = pd.to_datetime(daily_df["date"], errors="coerce")
+                daily_plot = daily_df.dropna(subset=["date"]).sort_values("date").tail(30)
+                if not daily_plot.empty:
+                    st.bar_chart(daily_plot.set_index("date")["realized_pnl"], use_container_width=True)
+
+                daily_plot["month"] = daily_plot["date"].dt.to_period("M").astype(str)
+                daily_plot["day"] = daily_plot["date"].dt.day
+                month_heat = daily_plot.pivot_table(index="month", columns="day", values="realized_pnl", aggfunc="sum").fillna(0)
+                if not month_heat.empty:
+                    st.markdown("**Monthly P&L Heatmap**")
+                    st.dataframe(month_heat.style.background_gradient(cmap="RdYlGn", axis=None), use_container_width=True)
+
+            inst_col = "stock_code" if "stock_code" in trades_df.columns else ("symbol" if "symbol" in trades_df.columns else None)
+            if inst_col:
+                inst_breakdown = trades_df.groupby(inst_col).size().reset_index(name="Trades")
+                st.markdown("**Instrument Breakdown**")
+                st.dataframe(inst_breakdown, hide_index=True, use_container_width=True)
+
+            if "notes" in trades_df.columns:
+                strat_series = trades_df["notes"].astype(str).str.extract(r"Strategy:\s*(.*)")[0].fillna("Manual")
+                strat_df = pd.DataFrame({"strategy": strat_series, "pnl": pnl_series})
+                strat_breakdown = strat_df.groupby("strategy")["pnl"].sum().reset_index().sort_values("pnl", ascending=False)
+                st.markdown("**Strategy Breakdown (P&L)**")
+                st.dataframe(strat_breakdown, hide_index=True, use_container_width=True)
+            else:
+                strat_breakdown = pd.DataFrame()
+
+            summary_export = pd.DataFrame(
+                [
+                    {"metric": "win_rate_pct", "value": win_rate},
+                    {"metric": "profit_factor", "value": profit_factor},
+                    {"metric": "avg_win_loss", "value": avg_win_loss},
+                    {"metric": "max_consecutive_wins", "value": max_win},
+                    {"metric": "max_consecutive_losses", "value": max_loss},
+                    {"metric": "sharpe_ratio", "value": sharpe},
+                    {"metric": "calmar_ratio", "value": calmar},
+                ]
+            )
+            if st.button("📥 Download Performance Report (Excel)", key="trade_journal_export"):
+                export_to_excel(
+                    {
+                        "Summary": summary_export,
+                        "DailyPnL": pd.DataFrame(pnl_hist_full),
+                        "Trades": trades_df,
+                        "StrategyBreakdown": strat_breakdown,
+                    },
+                    "performance_report.xlsx",
+                )
+        else:
+            st.info("No trade data available for journal analytics yet.")
+
     with t4:
         section("🧪 Stress Test")
         all_pos = get_cached_positions(client)
@@ -2614,6 +3042,20 @@ def page_analytics():
                 col_e, col_f = st.columns(2)
                 col_e.metric("Worst Case", f"₹{var_result['worst_case']:,.0f}")
                 col_f.metric("Best Case", f"₹{var_result['best_case']:,.0f}")
+
+    with t6:
+        section("🌐 IV Surface Visualization")
+        inst = st.selectbox("Instrument", list(C.INSTRUMENTS.keys()), index=0, key="ivsurf_inst")
+        expiries = C.get_next_expiries(inst, 6)
+        spot = st.session_state.get("last_spot", 0)
+        if not expiries:
+            st.info("No expiries available for IV surface")
+        elif spot <= 0:
+            st.info("Spot unavailable. Open Option Chain/Dashboard first to warm spot cache.")
+        else:
+            with st.spinner("Building IV surface (cached for 5 minutes)..."):
+                surface_data = build_iv_surface_data(client, inst, expiries, float(spot))
+            render_iv_surface(surface_data, float(spot))
 
 
 @error_handler
@@ -3733,6 +4175,39 @@ def render_alerts_settings_tab(
         wh_url = st.text_input("Webhook URL", value=alert_config.webhook_url, key="wh_url")
         wh_secret = st.text_input("Webhook Secret (HMAC)", value=alert_config.webhook_secret, type="password", key="wh_secret")
 
+    with st.expander("💬 Discord Alerts", expanded=alert_config.discord_enabled):
+        dc_enabled = st.toggle("Enable Discord", value=alert_config.discord_enabled, key="dc_enabled")
+        dc_url = st.text_input("Discord Webhook URL", value=alert_config.discord_webhook_url, key="dc_url")
+
+    with st.expander("🟢 WhatsApp Alerts", expanded=alert_config.whatsapp_enabled):
+        wa_enabled = st.toggle("Enable WhatsApp", value=alert_config.whatsapp_enabled, key="wa_enabled")
+        wa_to = st.text_input("WhatsApp To", value=alert_config.whatsapp_to, key="wa_to")
+        wa_from = st.text_input("Twilio WhatsApp From", value=alert_config.whatsapp_from, key="wa_from")
+        tw_sid = st.text_input("Twilio Account SID", value=alert_config.twilio_account_sid, key="wa_sid")
+        tw_token = st.text_input("Twilio Auth Token", value=alert_config.twilio_auth_token, type="password", key="wa_token")
+
+    st.markdown("**Alert Template**")
+    tpl = st.text_area(
+        "Template",
+        value=alert_config.alert_template,
+        help="Use tokens like {level} {title} {body} {symbol} {strike} {pnl}",
+        key="alert_template_text",
+    )
+    alert_sound = st.checkbox("Enable Browser Alert Sound", value=_db.get_setting("alert_sound_enabled", False), key="alert_sound_enabled")
+    if alert_sound:
+        components.html(
+            """
+            <audio id="breeze-alert-tone" preload="auto">
+              <source src="https://actions.google.com/sounds/v1/alarms/beep_short.ogg" type="audio/ogg">
+            </audio>
+            <script>
+              const a = document.getElementById('breeze-alert-tone');
+              if (a) { a.play().catch(()=>{}); }
+            </script>
+            """,
+            height=0,
+        )
+
     st.divider()
     st.markdown("**What to alert on:**")
     al_fill = st.checkbox("Order fills", value=alert_config.alert_on_fill, key="al_fill")
@@ -3754,6 +4229,14 @@ def render_alerts_settings_tab(
         webhook_enabled=wh_enabled,
         webhook_url=wh_url if wh_enabled else alert_config.webhook_url,
         webhook_secret=wh_secret,
+        discord_enabled=dc_enabled,
+        discord_webhook_url=dc_url if dc_enabled else alert_config.discord_webhook_url,
+        whatsapp_enabled=wa_enabled,
+        whatsapp_to=wa_to,
+        whatsapp_from=wa_from,
+        twilio_account_sid=tw_sid,
+        twilio_auth_token=tw_token,
+        alert_template=tpl,
         alert_on_fill=al_fill,
         alert_on_stop_loss=al_sl,
         alert_on_gtt_trigger=al_gtt,
@@ -3763,6 +4246,7 @@ def render_alerts_settings_tab(
 
     if st.button("💾 Save Alert Settings", type="primary", key="save_alert_cfg"):
         _db.set_setting("alert_config", new_cfg.__dict__)
+        _db.set_setting("alert_sound_enabled", bool(alert_sound))
         alert_dispatcher.update_config(new_cfg)
         st.success("✅ Alert settings saved")
 
@@ -3821,10 +4305,11 @@ def render_account_switcher(db: TradeDB) -> None:
     with st.expander("➕ Add New Account Profile"):
         new_name = st.text_input("Profile Name", key="new_profile_name")
         new_key = st.text_input("API Key", type="password", key="new_api_key")
+        new_secret = st.text_input("API Secret", type="password", key="new_api_secret")
         new_totp = st.text_input("TOTP Secret (optional)", type="password", key="new_totp")
         if st.button("Save Profile", key="save_profile_btn"):
             if new_name and new_key:
-                profile_db.save_profile(new_name, new_key, new_totp)
+                profile_db.save_profile(new_name, new_key, new_totp, api_secret=new_secret)
                 if not active:
                     profile_db.set_active(new_name)
                 st.success(f"Profile '{new_name}' saved.")
@@ -3973,6 +4458,7 @@ def page_settings():
                 )
             with c2:
                 auto_sl = st.checkbox("Auto stop-loss after sell", value=_db.get_setting("auto_sl", False))
+                voice_confirm = st.checkbox("🔊 Voice Confirmations", value=_db.get_setting("voice_confirmations", False))
                 sl_mult = st.slider(
                     "Default SL multiplier", 1.5, 5.0, float(_db.get_setting("sl_multiplier", 2.0)), 0.5
                 )
@@ -3985,6 +4471,7 @@ def page_settings():
                 _db.set_setting("default_lots", default_lots)
                 _db.set_setting("require_ack", require_ack)
                 _db.set_setting("auto_sl", auto_sl)
+                _db.set_setting("voice_confirmations", voice_confirm)
                 _db.set_setting("sl_multiplier", sl_mult)
                 _db.set_setting("max_lots", max_lots_per_order)
                 st.success("✅ Settings saved")
@@ -4041,7 +4528,8 @@ def page_settings():
 
         st.markdown("---")
         st.markdown("**Recent alert dispatch history**")
-        hist = dispatcher.get_history(limit=20)
+        hist_page_size = st.selectbox("History Size", [20, 50, 100], index=2, key="alert_hist_size")
+        hist = dispatcher.get_history(limit=int(hist_page_size))
         if hist:
             st.dataframe(pd.DataFrame(hist), hide_index=True, use_container_width=True)
         else:
