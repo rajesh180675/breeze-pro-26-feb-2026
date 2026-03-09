@@ -236,14 +236,27 @@ def calculate_strategy_metrics(legs: List[StrategyLeg]) -> Dict[str, Any]:
             breakevens.append(round(float(be), 0))
 
     theta_differential = 0.0
+    try:
+        from analytics import calculate_greeks, estimate_implied_volatility
+    except Exception:
+        calculate_greeks = None
+        estimate_implied_volatility = None
     for leg in legs:
-        if leg.expiry:
+        if leg.expiry and calculate_greeks and estimate_implied_volatility:
             try:
                 dte = max((datetime.strptime(str(leg.expiry)[:10], "%Y-%m-%d") - datetime.now()).days, 1)
+                tte = max(dte / 365.0, 1 / 365.0)
+                spot = float(np.median([l.strike for l in legs])) if legs else float(leg.strike)
+                iv = estimate_implied_volatility(max(leg.premium, 0.01), spot, leg.strike, tte, leg.option_type)
+                if np.isnan(iv) or iv <= 0:
+                    iv = 0.2
+                g = calculate_greeks(spot, leg.strike, tte, iv, leg.option_type)
+                theta_leg = float(g.get("theta", 0)) * leg.quantity
+                theta_differential += (-theta_leg if leg.action == "buy" else theta_leg)
             except ValueError:
                 dte = 1
-            theta_weight = (leg.quantity / np.sqrt(dte))
-            theta_differential += theta_weight if leg.action == "sell" else -theta_weight
+                theta_weight = (leg.quantity / np.sqrt(dte))
+                theta_differential += theta_weight if leg.action == "sell" else -theta_weight
 
     return {
         "net_premium": round(net_premium, 2),
@@ -263,13 +276,33 @@ def generate_payoff_data(legs: List[StrategyLeg], center: float,
     low = min(all_strikes) - 8 * gap
     high = max(all_strikes) + 8 * gap
     spots = np.linspace(low, high, points)
-    payoffs = _calc_payoffs(legs, spots)
+    payoffs = _calc_payoffs(legs, spots, spot_ref=float(center))
     return pd.DataFrame({"Underlying": spots, "P&L": payoffs})
 
 
-def _calc_payoffs(legs: List[StrategyLeg], spots: np.ndarray) -> np.ndarray:
+def _calc_payoffs(legs: List[StrategyLeg], spots: np.ndarray, spot_ref: Optional[float] = None) -> np.ndarray:
     payoffs = np.zeros(len(spots))
+    try:
+        from analytics import bs_price, estimate_implied_volatility
+    except Exception:
+        bs_price = None
+        estimate_implied_volatility = None
     for leg in legs:
+        use_model = bool(leg.expiry and bs_price and estimate_implied_volatility and spot_ref and leg.premium > 0)
+        if use_model:
+            try:
+                dte = max((datetime.strptime(str(leg.expiry)[:10], "%Y-%m-%d") - datetime.now()).days, 1)
+                tte = max(dte / 365.0, 1 / 365.0)
+                iv = estimate_implied_volatility(leg.premium, float(spot_ref), leg.strike, tte, leg.option_type)
+                if np.isnan(iv) or iv <= 0:
+                    iv = 0.2
+                modeled = np.array([bs_price(float(s), leg.strike, tte, iv, leg.option_type) for s in spots])
+                leg_curve = (modeled - leg.premium) * leg.quantity
+                payoffs += (-leg_curve if leg.action == "sell" else leg_curve)
+                continue
+            except Exception:
+                pass
+
         if leg.option_type == "CE":
             intrinsic = np.maximum(spots - leg.strike, 0)
         else:

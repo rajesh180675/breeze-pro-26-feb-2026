@@ -122,11 +122,23 @@ CREATE TABLE IF NOT EXISTS basket_templates (
     last_used TEXT,
     use_count INTEGER DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS option_chain_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    trade_date TEXT NOT NULL,
+    instrument TEXT NOT NULL,
+    expiry TEXT NOT NULL,
+    strike INTEGER NOT NULL,
+    option_type TEXT NOT NULL,
+    iv REAL DEFAULT 0,
+    volume REAL DEFAULT 0,
+    UNIQUE(trade_date, instrument, expiry, strike, option_type)
+);
 CREATE INDEX IF NOT EXISTS idx_trades_ts ON trades(timestamp);
 CREATE INDEX IF NOT EXISTS idx_trades_date ON trades(date);
 CREATE INDEX IF NOT EXISTS idx_activity_ts ON activity_log(timestamp);
 CREATE INDEX IF NOT EXISTS idx_pnl_date ON pnl_history(date);
 CREATE INDEX IF NOT EXISTS idx_alerts_ts ON alerts_log(timestamp);
+CREATE INDEX IF NOT EXISTS idx_chain_hist_lookup ON option_chain_history(instrument, option_type, strike, trade_date);
 """
 
 
@@ -611,6 +623,61 @@ class TradeDB:
                 """,
                 (datetime.now().isoformat(), name),
             )
+
+    # ─── Option-chain history ────────────────────────────────
+
+    def record_option_chain_snapshot(self, instrument: str, expiry: str, rows: List[Dict[str, Any]]) -> None:
+        if not rows:
+            return
+        today = date.today().isoformat()
+        with self._tx() as conn:
+            for row in rows:
+                try:
+                    strike = int(float(row.get("strike_price", 0) or 0))
+                    if strike <= 0:
+                        continue
+                    right = str(row.get("right", "")).lower()
+                    option_type = "CE" if ("call" in right or "ce" in right) else "PE"
+                    iv = float(row.get("iv", 0) or 0)
+                    if iv > 1:
+                        iv = iv / 100.0
+                    vol = float(row.get("volume", 0) or 0)
+                    conn.execute(
+                        """
+                        INSERT OR REPLACE INTO option_chain_history
+                        (trade_date, instrument, expiry, strike, option_type, iv, volume)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (today, instrument, expiry, strike, option_type, iv, vol),
+                    )
+                except Exception:
+                    continue
+
+    def get_volume_baseline_map(self, instrument: str, lookback_days: int = 5) -> Dict[tuple, float]:
+        conn = self._get_conn()
+        rows = conn.execute(
+            """
+            SELECT strike, option_type, AVG(volume) AS avg_volume
+            FROM option_chain_history
+            WHERE instrument=? AND trade_date >= date('now', ?)
+            GROUP BY strike, option_type
+            """,
+            (instrument, f"-{int(lookback_days)} day"),
+        ).fetchall()
+        return {(int(r["strike"]), str(r["option_type"])): float(r["avg_volume"] or 0) for r in rows}
+
+    def get_iv_history(self, instrument: str, strike: int, option_type: str, lookback_days: int = 30) -> List[float]:
+        conn = self._get_conn()
+        rows = conn.execute(
+            """
+            SELECT iv
+            FROM option_chain_history
+            WHERE instrument=? AND strike=? AND option_type=? AND trade_date >= date('now', ?)
+            ORDER BY trade_date
+            """,
+            (instrument, int(strike), option_type, f"-{int(lookback_days)} day"),
+        ).fetchall()
+        return [float(r["iv"] or 0) for r in rows if float(r["iv"] or 0) > 0]
 
 
 class AccountProfileDB:

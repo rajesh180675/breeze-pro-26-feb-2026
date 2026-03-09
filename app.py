@@ -58,7 +58,7 @@ from strategies import (
     generate_payoff_data, get_strategies_by_category, AIStrategySuggester
 )
 from persistence import TradeDB, AccountProfileDB, export_trades_for_tax
-from risk_monitor import RiskMonitor, Alert
+from risk_monitor import RiskMonitor, Alert, ExpiryDayAutopilot
 from alerting import (
     AlertConfig, AlertDispatcher, TelegramDispatcher, EmailDispatcher
 )
@@ -779,6 +779,93 @@ def render_portfolio_greeks_heatmap(rows_df: pd.DataFrame) -> None:
     st.plotly_chart(fig, use_container_width=True)
 
 
+def build_iv_rv_spread_monitor(client, instruments: List[str]) -> pd.DataFrame:
+    from historical import HistoricalDataFetcher
+    fetcher = HistoricalDataFetcher(client)
+    rows = []
+    today = datetime.now().date()
+    from_date = (today - timedelta(days=45)).isoformat()
+    to_date = today.isoformat()
+
+    for inst in instruments:
+        try:
+            cfg = C.get_instrument(inst)
+            expiries = C.get_next_expiries(inst, 1)
+            if not expiries:
+                continue
+            expiry = expiries[0]
+            chain_resp = client.get_option_chain(cfg.api_code, cfg.exchange, expiry)
+            if not chain_resp.get("success"):
+                continue
+            chain_df = process_option_chain(chain_resp.get("data", {}))
+            if chain_df.empty:
+                continue
+            spot_resp = client.get_spot_price(cfg.api_code, cfg.exchange)
+            spot = 0.0
+            if spot_resp.get("success"):
+                items = APIResponse(spot_resp).items
+                if items:
+                    spot = safe_float(items[0].get("ltp", 0))
+            if spot <= 0:
+                continue
+            atm = estimate_atm_strike(chain_df, spot=spot)
+            dte = max(calculate_days_to_expiry(expiry), 1)
+            tte = max(dte / C.DAYS_PER_YEAR, 1 / C.DAYS_PER_YEAR)
+            ce = chain_df[(chain_df["right"] == "Call") & (chain_df["strike_price"] == atm)]
+            pe = chain_df[(chain_df["right"] == "Put") & (chain_df["strike_price"] == atm)]
+            iv_values = []
+            if not ce.empty:
+                ltp = safe_float(ce.iloc[0].get("ltp", 0))
+                if ltp > 0:
+                    iv = estimate_implied_volatility(ltp, spot, atm, tte, "CE")
+                    if not pd.isna(iv) and iv > 0:
+                        iv_values.append(iv * 100)
+            if not pe.empty:
+                ltp = safe_float(pe.iloc[0].get("ltp", 0))
+                if ltp > 0:
+                    iv = estimate_implied_volatility(ltp, spot, atm, tte, "PE")
+                    if not pd.isna(iv) and iv > 0:
+                        iv_values.append(iv * 100)
+            if not iv_values:
+                continue
+            atm_iv = float(np.mean(iv_values))
+
+            hist_df = fetcher.fetch(
+                stock_code=cfg.spot_code or cfg.api_code,
+                exchange_code=cfg.spot_exchange or "NSE",
+                product_type="cash",
+                from_date=from_date,
+                to_date=to_date,
+                interval="1day",
+            )
+            if hist_df.empty or "close" not in hist_df.columns:
+                continue
+            rv_series = rolling_realized_vol(pd.to_numeric(hist_df["close"], errors="coerce"), window=5).dropna()
+            if rv_series.empty:
+                continue
+            rv5 = float(rv_series.iloc[-1])
+            vrp_pct = ((atm_iv - rv5) / max(rv5, 0.01)) * 100.0
+            if vrp_pct > 30:
+                signal = "🟢 SELL VOLATILITY"
+            elif vrp_pct < -15:
+                signal = "🔴 BUY VOLATILITY"
+            else:
+                signal = "⚪ NEUTRAL"
+            rows.append(
+                {
+                    "Instrument": inst,
+                    "ATM IV%": round(atm_iv, 2),
+                    "RV-5d%": round(rv5, 2),
+                    "VRP%": round(vrp_pct, 2),
+                    "Signal": signal,
+                }
+            )
+        except Exception as exc:
+            log.debug(f"IV/RV monitor failed for {inst}: {exc}")
+            continue
+    return pd.DataFrame(rows)
+
+
 def split_positions(all_pos):
     options, equities = [], []
     for p in (all_pos or []):
@@ -1480,6 +1567,10 @@ def page_option_chain():
                 f"Raw response: {raw_data}"
             )
             return
+        try:
+            _db.record_option_chain_snapshot(inst, expiry, df.to_dict("records"))
+        except Exception as exc:
+            log.debug(f"Could not persist option-chain snapshot: {exc}")
         CacheManager.set(ck, df, "option_chain", C.OC_CACHE_TTL_SECONDS)
         SessionState.log_activity("Chain", f"{inst} {format_expiry_short(expiry)}")
 
@@ -1604,11 +1695,14 @@ def page_option_chain():
             oi_base = ddf["open_interest"].replace(0, np.nan)
             ddf["OI Change %"] = ((ddf["oi_change"] / oi_base) * 100.0).replace([np.inf, -np.inf], np.nan).fillna(0.0)
         if chain_opt_volume_spike and "volume" in ddf.columns:
-            if "avg_5d_volume" in ddf.columns:
-                avg_base = pd.to_numeric(ddf["avg_5d_volume"], errors="coerce").replace(0, np.nan)
-            else:
-                avg_base = ddf.groupby("right")["volume"].transform("median") if "right" in ddf.columns else ddf["volume"].median()
-                avg_base = pd.to_numeric(avg_base, errors="coerce").replace(0, np.nan)
+            baseline_map = _db.get_volume_baseline_map(inst, lookback_days=5)
+            def _avg5(row):
+                strike = int(safe_float(row.get("strike_price", 0), 0))
+                right = str(row.get("right", "")).lower()
+                ot = "CE" if ("call" in right or "ce" in right) else "PE"
+                return baseline_map.get((strike, ot), 0.0)
+            ddf["Avg 5D Vol"] = ddf.apply(_avg5, axis=1)
+            avg_base = pd.to_numeric(ddf["Avg 5D Vol"], errors="coerce").replace(0, np.nan)
             ddf["Volume Spike"] = np.where(ddf["volume"] > (avg_base * 3), "⚡", "")
         if chain_opt_max_pain_marker and "strike_price" in ddf.columns:
             ddf["Strike"] = ddf["strike_price"].apply(
@@ -1616,7 +1710,22 @@ def page_option_chain():
             )
         if chain_opt_iv_percentile and "iv" in ddf.columns:
             iv_num = pd.to_numeric(ddf["iv"], errors="coerce")
-            ddf["IV Percentile"] = iv_num.rank(pct=True).fillna(0.0).mul(100.0).round(1)
+            if iv_num.max(skipna=True) and iv_num.max(skipna=True) > 1:
+                iv_num = iv_num / 100.0
+            iv_pct = []
+            for _, row in ddf.iterrows():
+                strike = int(safe_float(row.get("strike_price", 0), 0))
+                right = str(row.get("right", "")).lower()
+                ot = "CE" if ("call" in right or "ce" in right) else "PE"
+                cur_iv = safe_float(row.get("iv", 0), 0.0)
+                cur_iv = cur_iv / 100.0 if cur_iv > 1 else cur_iv
+                hist = _db.get_iv_history(inst, strike, ot, lookback_days=30)
+                if not hist or cur_iv <= 0:
+                    iv_pct.append(np.nan)
+                    continue
+                less_eq = sum(1 for v in hist if v <= cur_iv)
+                iv_pct.append(round((less_eq / len(hist)) * 100.0, 1))
+            ddf["IV Percentile"] = iv_pct
 
     # ── Display ───────────────────────────────────────────────
     ddf_display = ddf.copy()
@@ -3060,6 +3169,15 @@ def page_analytics():
         else:
             st.info("No trade data available for journal analytics yet.")
 
+        st.markdown("---")
+        section("IV vs RV Spread Monitor")
+        ivrv_df = build_iv_rv_spread_monitor(client, ["NIFTY", "BANKNIFTY", "FINNIFTY"])
+        if ivrv_df.empty:
+            st.info("IV/RV monitor data unavailable right now.")
+        else:
+            st.dataframe(ivrv_df, hide_index=True, use_container_width=True)
+            st.caption("Thresholds: VRP > 30% → strong sell volatility, VRP < -15% → strong buy volatility")
+
     with t4:
         section("🧪 Stress Test")
         all_pos = get_cached_positions(client)
@@ -3989,7 +4107,7 @@ def page_risk_monitor():
             st.success("✅ Limits updated")
 
     st.markdown("---")
-    tab1, tab2, tab3, tab4 = st.tabs(["📍 Positions", "⚙️ Stop-Losses", "🧠 Smart Stops", "🚨 Alerts"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📍 Positions", "⚙️ Stop-Losses", "🧠 Smart Stops", "🚨 Alerts", "⏳ Expiry Autopilot"])
 
     with tab1:
         all_pos = get_cached_positions(client)
@@ -4103,6 +4221,58 @@ def page_risk_monitor():
                 st.dataframe(pd.DataFrame(db_alerts), hide_index=True, use_container_width=True)
         else:
             empty_state("🔔", "No alerts", "Alerts appear when stops are triggered")
+
+    with tab5:
+        section("⏳ Expiry Day Autopilot")
+        summary = monitor.get_monitored_summary()
+        if not summary:
+            st.info("No monitored positions for expiry autopilot.")
+        else:
+            autopilot = ExpiryDayAutopilot()
+            enabled = st.toggle("Enable Expiry Autopilot", value=bool(_db.get_setting("expiry_autopilot_enabled", False)), key="expiry_autopilot_enabled")
+            _db.set_setting("expiry_autopilot_enabled", bool(enabled))
+            # Convert summary rows into lightweight position objects for evaluator.
+            fake_positions = []
+            for row in summary:
+                fake_positions.append(
+                    type("P", (), {"position_id": row["id"], "expiry": row.get("expiry", "")})()
+                )
+            eval_result = autopilot.evaluate(fake_positions, enabled=enabled)
+            st.write(f"**Stage:** {eval_result['stage']}")
+            if eval_result["message"]:
+                st.info(eval_result["message"])
+            exp_ids = eval_result.get("expiring_positions", [])
+            st.write(f"Expiring positions today: **{len(exp_ids)}**")
+            if exp_ids:
+                st.dataframe(pd.DataFrame({"Position ID": exp_ids}), hide_index=True, use_container_width=True)
+
+            if eval_result.get("should_auto_close") and exp_ids:
+                confirm = st.checkbox("Final confirm: execute expiry auto-close now", key="expiry_autopilot_confirm")
+                if confirm and st.button("Execute Expiry Auto-Close", key="expiry_autopilot_execute", type="primary"):
+                    ok_count, fail_count = 0, 0
+                    for row in summary:
+                        if row["id"] not in exp_ids:
+                            continue
+                        close_action = "buy" if row["pos"] == "short" else "sell"
+                        resp = client.place_order(
+                            row["stock"],
+                            row.get("exchange", "NFO"),
+                            row.get("expiry", ""),
+                            int(row["strike"]),
+                            row["type"],
+                            close_action,
+                            int(row["qty"]),
+                            "market",
+                            0.0,
+                        )
+                        if resp.get("success"):
+                            ok_count += 1
+                        else:
+                            fail_count += 1
+                    if ok_count:
+                        st.success(f"Auto-close completed for {ok_count} position(s).")
+                    if fail_count:
+                        st.error(f"Auto-close failed for {fail_count} position(s).")
 
 
 # ═══════════════════════════════════════════════════════════════
