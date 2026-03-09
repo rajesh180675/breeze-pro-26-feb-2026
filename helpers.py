@@ -370,7 +370,10 @@ def add_greeks_to_chain(df: pd.DataFrame, spot_price: float, expiry_date: str) -
                 greeks_list.append({'delta': 0, 'gamma': 0, 'theta': 0, 'vega': 0, 'rho': 0})
         else:
             greeks_list.append({'delta': 0, 'gamma': 0, 'theta': 0, 'vega': 0, 'rho': 0})
-    return pd.concat([df.reset_index(drop=True), pd.DataFrame(greeks_list)], axis=1)
+    out = pd.concat([df.reset_index(drop=True), pd.DataFrame(greeks_list)], axis=1)
+    if "iv" in out.columns:
+        out["iv"] = out["iv"].apply(lambda v: "—" if pd.isna(v) else v)
+    return out
 
 
 # ═══════════════════════════════════════════════════════════════

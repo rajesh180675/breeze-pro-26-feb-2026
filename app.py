@@ -272,7 +272,7 @@ PAGES = {
     "🔬 Analytics": page_analytics if "page_analytics" in globals() else None,
     "🚨 Risk Monitor": page_risk_monitor if "page_risk_monitor" in globals() else None,
     "👁️ Watchlist": page_watchlist if "page_watchlist" in globals() else None,
-    "📄 Paper Trading": None,
+    "📄 Paper Trading": page_paper_trading if "page_paper_trading" in globals() else None,
     "⚙️ Settings": page_settings if "page_settings" in globals() else None,
 }
 
@@ -478,9 +478,9 @@ def get_client():
     if (_time.time() - last_check) >= _SESSION_HEALTH_CHECK_INTERVAL:
         st.session_state["_session_health_ts"] = _time.time()
         if not check_session_health(c):
-            Credentials.clear_runtime_credentials()
             SessionState.set_authentication(False, None)
-            st.error("🔴 Session expired or revoked. Please re-login from the sidebar.")
+            SessionState.navigate_to("⚙️ Settings")
+            st.error("🔴 Session expired or revoked. Please re-login from Settings.")
             return None
     return c
 
