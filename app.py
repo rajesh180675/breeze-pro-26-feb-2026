@@ -46,7 +46,7 @@ from analytics import (
 )
 from session_manager import (
     Credentials, SessionState, CacheManager, Notifications,
-    generate_totp, auto_connect_with_totp, AppWarmupManager
+    generate_totp, auto_connect_with_totp, AppWarmupManager, check_session_health
 )
 from breeze_api import BreezeAPIClient
 from validators import validate_date_range
@@ -447,6 +447,14 @@ def get_client():
     if not c or not c.is_connected():
         st.error("❌ Not connected to Breeze API")
         return None
+    now_ts = time.time()
+    last_check_ts = float(st.session_state.get("session_health_last_check_ts", 0.0))
+    if now_ts - last_check_ts >= 300:
+        st.session_state["session_health_last_check_ts"] = now_ts
+        if not check_session_health(c):
+            SessionState.navigate_to("⚙️ Settings")
+            st.error("🔐 Session is invalid or expired. Reconnect from Settings.")
+            return None
     return c
 
 

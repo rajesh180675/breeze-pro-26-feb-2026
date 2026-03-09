@@ -15,6 +15,15 @@ import app_config as C
 
 log = logging.getLogger(__name__)
 
+PERMANENT_SESSION_ERROR_PATTERNS = (
+    "invalid session",
+    "session expired",
+    "unauthorized",
+    "invalid api key",
+    "forbidden",
+    "not connected",
+)
+
 
 class Credentials:
     @staticmethod
@@ -80,7 +89,7 @@ class Credentials:
     def clear_runtime_credentials():
         for k in ("api_key", "api_secret", "session_token"):
             st.session_state[k] = ""
-        st.session_state.login_time = None
+        st.session_state["login_time"] = None
 
 
 class SessionState:
@@ -107,8 +116,8 @@ class SessionState:
 
     @staticmethod
     def set_authentication(auth, client=None):
-        st.session_state.authenticated = auth
-        st.session_state.breeze_client = client
+        st.session_state["authenticated"] = auth
+        st.session_state["breeze_client"] = client
 
     @staticmethod
     def get_current_page():
@@ -249,6 +258,49 @@ class Notifications:
             st.toast(msg, icon="ℹ️")
         except Exception:
             pass
+
+
+def _is_permanent_session_error(resp: Dict[str, Any]) -> bool:
+    """Detect permanent auth/session errors from normalized API responses."""
+    if not isinstance(resp, dict):
+        return False
+    if str(resp.get("error_code", "")).upper() == "PERMANENT":
+        return True
+    data = resp.get("data", {})
+    message = str(resp.get("message", "") or "")
+    if isinstance(data, dict):
+        message = f"{message} {str(data.get('Error', '') or '')}"
+    msg = message.lower()
+    return any(pattern in msg for pattern in PERMANENT_SESSION_ERROR_PATTERNS)
+
+
+def check_session_health(client: Any) -> bool:
+    """Validate session token health using a cheap funds call.
+
+    Returns False only on clear/permanent auth errors so callers can force
+    reconnect and redirect to settings. Transient failures are ignored.
+    """
+    if client is None or not hasattr(client, "get_funds"):
+        return False
+
+    try:
+        resp = client.get_funds()
+    except Exception as exc:  # pragma: no cover
+        msg = str(exc).lower()
+        if any(pattern in msg for pattern in PERMANENT_SESSION_ERROR_PATTERNS):
+            Credentials.clear_runtime_credentials()
+            SessionState.set_authentication(False, None)
+            return False
+        log.warning("Session health check transient exception: %s", exc)
+        return True
+
+    if isinstance(resp, dict) and resp.get("success"):
+        return True
+    if _is_permanent_session_error(resp):
+        Credentials.clear_runtime_credentials()
+        SessionState.set_authentication(False, None)
+        return False
+    return True
 
 
 def generate_totp(secret: str, digits: int = 6, period: int = 30) -> str:
