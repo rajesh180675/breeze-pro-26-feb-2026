@@ -650,7 +650,8 @@ class TradeDB:
                         """,
                         (today, instrument, expiry, strike, option_type, iv, vol),
                     )
-                except Exception:
+                except (TypeError, ValueError, KeyError) as exc:
+                    log.warning("Skipping invalid option-chain row for %s/%s: %s", instrument, expiry, exc)
                     continue
 
     def get_volume_baseline_map(self, instrument: str, lookback_days: int = 5) -> Dict[tuple, float]:
@@ -686,6 +687,22 @@ class AccountProfileDB:
     def __init__(self, db: TradeDB):
         self._db = db
 
+    @staticmethod
+    def _looks_encrypted(value: str) -> bool:
+        return bool(value) and str(value).startswith("gAAAA")
+
+    def _validate_encrypted_payload(self, api_key: str, api_secret: str, totp_secret: str) -> None:
+        for field_name, value in (
+            ("api_key", api_key),
+            ("api_secret", api_secret),
+            ("totp_secret", totp_secret),
+        ):
+            if value and not self._looks_encrypted(value):
+                raise ValueError(
+                    f"{field_name} must be Fernet-encrypted before persistence. "
+                    "Use MultiAccountManager for profile writes."
+                )
+
     def save_profile(
         self,
         profile_name: str,
@@ -694,6 +711,7 @@ class AccountProfileDB:
         broker: str = "ICICI",
         api_secret: str = "",
     ) -> None:
+        self._validate_encrypted_payload(api_key, api_secret, totp_secret)
         now = datetime.now().isoformat()
         with self._db._tx() as conn:
             existing = conn.execute(

@@ -1,7 +1,7 @@
 import json
 import logging
 
-from lib.logging_config import JsonFormatter, configure_logging
+from app.lib.logging_config import JsonFormatter, configure_logging
 
 
 def test_json_formatter_includes_message_and_defaults():

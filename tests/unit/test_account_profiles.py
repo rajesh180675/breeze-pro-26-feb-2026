@@ -1,12 +1,14 @@
 from persistence import AccountProfileDB, TradeDB
+from session_manager import AccountProfile, MultiAccountManager
 
 
 def test_account_profiles_save_switch_delete():
     db = TradeDB()
     adb = AccountProfileDB(db)
+    mgr = MultiAccountManager("test-master-password")
 
-    adb.save_profile("A", "keyA", "totpA")
-    adb.save_profile("B", "keyB", "totpB")
+    mgr.add_profile(AccountProfile(profile_id="", display_name="A", api_key="keyA", api_secret="", totp_secret="totpA"))
+    mgr.add_profile(AccountProfile(profile_id="", display_name="B", api_key="keyB", api_secret="", totp_secret="totpB"))
     profiles = adb.get_profiles()
     names = {p["profile_name"] for p in profiles}
     assert {"A", "B"}.issubset(names)
