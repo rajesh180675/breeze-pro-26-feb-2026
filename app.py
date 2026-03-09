@@ -1178,15 +1178,19 @@ def page_option_chain():
             log.debug(f"Greeks calc failed: {e}")
 
     # ── Display ───────────────────────────────────────────────
+    ddf_display = ddf.copy()
+    if "iv" in ddf_display.columns:
+        ddf_display["iv"] = ddf_display["iv"].apply(lambda v: "—" if pd.isna(v) else v)
+
     if view == "Traditional":
-        pv = create_pivot_table(ddf)
-        tgt = pv if not pv.empty else ddf
+        pv = create_pivot_table(ddf_display)
+        tgt = pv if not pv.empty else ddf_display
         st.dataframe(tgt, height=600, hide_index=True, use_container_width=True)
     elif view == "Calls Only":
-        cd = ddf[ddf["right"] == "Call"] if "right" in ddf.columns else ddf
+        cd = ddf_display[ddf_display["right"] == "Call"] if "right" in ddf_display.columns else ddf_display
         st.dataframe(cd, height=600, hide_index=True, use_container_width=True)
     elif view == "Puts Only":
-        pd_ = ddf[ddf["right"] == "Put"] if "right" in ddf.columns else ddf
+        pd_ = ddf_display[ddf_display["right"] == "Put"] if "right" in ddf_display.columns else ddf_display
         st.dataframe(pd_, height=600, hide_index=True, use_container_width=True)
     elif view == "IV Smile":
         # Compute and plot IV smile
@@ -1206,7 +1210,7 @@ def page_option_chain():
         else:
             st.info("Cannot compute IV smile without spot price")
     else:  # Flat
-        st.dataframe(ddf, height=600, hide_index=True, use_container_width=True)
+        st.dataframe(ddf_display, height=600, hide_index=True, use_container_width=True)
 
     # ── OI Chart ──────────────────────────────────────────────
     if "right" in ddf.columns and "open_interest" in ddf.columns and view != "IV Smile":
@@ -3948,6 +3952,8 @@ If a natural expiry date falls on a holiday → expiry is moved to the **previou
 # ═══════════════════════════════════════════════════════════════
 # ROUTER
 # ═══════════════════════════════════════════════════════════════
+
+PAGES["📄 Paper Trading"] = page_paper_trading
 
 PAGE_FN = {
     "🏠 Dashboard": page_dashboard,
