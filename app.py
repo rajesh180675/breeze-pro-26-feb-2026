@@ -1893,6 +1893,9 @@ def page_strategy_builder():
             if default_atm == 0:
                 default_atm = int((cfg.min_strike + cfg.max_strike) / 2)
                 default_atm = round(default_atm / cfg.strike_gap) * cfg.strike_gap
+            available_strikes = None
+            if df is not None and not df.empty and "strike_price" in df.columns:
+                available_strikes = [int(s) for s in df["strike_price"].dropna().tolist()]
 
             atm = st.number_input("ATM Strike", min_value=cfg.min_strike,
                                   max_value=cfg.max_strike, value=int(default_atm),
@@ -1901,7 +1904,14 @@ def page_strategy_builder():
 
             if st.button("🔧 Build Strategy", type="primary", use_container_width=True):
                 try:
-                    legs = generate_strategy_legs(sname, int(atm), cfg.strike_gap, cfg.lot_size, lots)
+                    legs = generate_strategy_legs(
+                        sname,
+                        int(atm),
+                        cfg.strike_gap,
+                        cfg.lot_size,
+                        lots,
+                        available_strikes=available_strikes,
+                    )
                     st.session_state.strat_legs = legs
                     st.session_state.strat_cfg = cfg
                     st.session_state.strat_expiry = expiry

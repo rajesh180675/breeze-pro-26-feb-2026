@@ -3,7 +3,7 @@ Strategy Builder — 15+ predefined strategies, payoff diagrams, metrics.
 """
 
 from dataclasses import dataclass, field
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Iterable
 import numpy as np
 import pandas as pd
 
@@ -151,16 +151,25 @@ STRATEGY_COMPLEXITIES = ["Beginner", "Intermediate", "Advanced"]
 
 def generate_strategy_legs(strategy_name: str, atm_strike: int,
                            strike_gap: int, lot_size: int,
-                           lots: int = 1) -> List[StrategyLeg]:
+                           lots: int = 1,
+                           available_strikes: Optional[Iterable[int]] = None) -> List[StrategyLeg]:
     strat = PREDEFINED_STRATEGIES.get(strategy_name)
     if not strat:
         raise ValueError(f"Unknown strategy: {strategy_name}")
     qty = lots * lot_size
+    strike_list = sorted({int(s) for s in (available_strikes or [])})
+
+    def _snap_strike(target: int) -> int:
+        if not strike_list:
+            return target
+        return min(strike_list, key=lambda s: (abs(s - target), s))
+
     legs = []
     for leg in strat["legs"]:
         multiplier = leg.get("multiplier", 1)
+        target_strike = atm_strike + leg["offset"] * strike_gap
         legs.append(StrategyLeg(
-            strike=atm_strike + leg["offset"] * strike_gap,
+            strike=_snap_strike(target_strike),
             option_type=leg["type"],
             action=leg["action"],
             quantity=qty * multiplier,
