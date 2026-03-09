@@ -12,6 +12,11 @@ from typing import Dict, List, Optional
 
 import pandas as pd
 
+import app_config as _C
+
+# IST timezone for converting UTC candle timestamps (Task 1.3)
+_IST = _C.IST
+
 log = logging.getLogger(__name__)
 
 
@@ -204,6 +209,12 @@ class HistoricalDataFetcher:
         out["open_interest"] = pd.to_numeric(out["open_interest"], errors="coerce").fillna(0)
         out = out.dropna(subset=["datetime", "open", "high", "low", "close"])
         out["volume"] = out["volume"].fillna(0)
+
+        # Task 1.3: Convert UTC timestamps from Breeze API to IST for Indian traders
+        if out["datetime"].dt.tz is None:
+            out["datetime"] = out["datetime"].dt.tz_localize("UTC")
+        out["datetime"] = out["datetime"].dt.tz_convert(_IST)
+
         return out
 
 

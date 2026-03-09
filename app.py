@@ -274,7 +274,7 @@ PAGES = {
     "🔬 Analytics": page_analytics if "page_analytics" in globals() else None,
     "🚨 Risk Monitor": page_risk_monitor if "page_risk_monitor" in globals() else None,
     "👁️ Watchlist": page_watchlist if "page_watchlist" in globals() else None,
-    "📄 Paper Trading": None,
+    "📄 Paper Trading": page_paper_trading if "page_paper_trading" in globals() else None,
     "⚙️ Settings": page_settings if "page_settings" in globals() else None,
 }
 
@@ -472,6 +472,18 @@ def get_client():
     if not c or not c.is_connected():
         st.error("❌ Not connected to Breeze API")
         return None
+
+    # Session health guard — check every 5 minutes (Task 1.2)
+    import time as _time
+    from session_manager import check_session_health, _SESSION_HEALTH_CHECK_INTERVAL
+    last_check = st.session_state.get("_session_health_ts", 0)
+    if (_time.time() - last_check) >= _SESSION_HEALTH_CHECK_INTERVAL:
+        st.session_state["_session_health_ts"] = _time.time()
+        if not check_session_health(c):
+            Credentials.clear_runtime_credentials()
+            SessionState.set_authentication(False, None)
+            st.error("🔴 Session expired or revoked. Please re-login from the sidebar.")
+            return None
     return c
 
 
@@ -1903,10 +1915,14 @@ def page_strategy_builder():
             expiry = st.selectbox("Expiry", C.get_next_expiries(inst, 6),
                                   format_func=format_expiry, key="sb_e")
 
-            # Try to get live ATM
+            # Try to get live ATM and available strikes from cached chain
             ck = f"oc_{cfg.api_code}_{expiry}"
             df = CacheManager.get(ck, "option_chain")
             default_atm = estimate_atm_strike(df) if df is not None and not df.empty else 0
+            # Task 1.5: Extract available strikes for snap logic
+            _avail_strikes = None
+            if df is not None and not df.empty and "strike_price" in df.columns:
+                _avail_strikes = set(int(s) for s in df["strike_price"].dropna().unique() if s > 0)
             if default_atm == 0:
                 default_atm = int((cfg.min_strike + cfg.max_strike) / 2)
                 default_atm = round(default_atm / cfg.strike_gap) * cfg.strike_gap
@@ -1918,7 +1934,10 @@ def page_strategy_builder():
 
             if st.button("🔧 Build Strategy", type="primary", use_container_width=True):
                 try:
-                    legs = generate_strategy_legs(sname, int(atm), cfg.strike_gap, cfg.lot_size, lots)
+                    legs = generate_strategy_legs(
+                        sname, int(atm), cfg.strike_gap, cfg.lot_size, lots,
+                        available_strikes=_avail_strikes,
+                    )
                     st.session_state.strat_legs = legs
                     st.session_state.strat_cfg = cfg
                     st.session_state.strat_expiry = expiry
