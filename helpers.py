@@ -360,7 +360,12 @@ def add_greeks_to_chain(df: pd.DataFrame, spot_price: float, expiry_date: str) -
                     estimate_implied_volatility(ltp, spot_price, strike, tte, ot)
                     if iv_raw <= 0 else iv_raw
                 )
-                greeks_list.append(calculate_greeks(spot_price, strike, tte, iv, ot))
+                # Task 1.4: If IV is NaN (same-day expiry), use 0 for Greeks calc
+                # and mark the IV column as "—" for display
+                if np.isnan(iv):
+                    greeks_list.append({'delta': 0, 'gamma': 0, 'theta': 0, 'vega': 0, 'rho': 0})
+                else:
+                    greeks_list.append(calculate_greeks(spot_price, strike, tte, iv, ot))
             except Exception:
                 greeks_list.append({'delta': 0, 'gamma': 0, 'theta': 0, 'vega': 0, 'rho': 0})
         else:

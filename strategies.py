@@ -149,9 +149,27 @@ STRATEGY_CATEGORIES = sorted(set(v["category"] for v in PREDEFINED_STRATEGIES.va
 STRATEGY_COMPLEXITIES = ["Beginner", "Intermediate", "Advanced"]
 
 
+def _snap_to_nearest_strike(target: int, available_strikes: Optional[set]) -> int:
+    """Snap a computed strike to the nearest available strike in the chain.
+
+    If *available_strikes* is None or empty the target is returned unchanged.
+    This prevents strategy legs from referencing strikes that don't actually
+    exist in the fetched option chain (Task 1.5).
+    """
+    if not available_strikes:
+        return target
+    return min(available_strikes, key=lambda s: abs(s - target))
+
+
 def generate_strategy_legs(strategy_name: str, atm_strike: int,
                            strike_gap: int, lot_size: int,
-                           lots: int = 1) -> List[StrategyLeg]:
+                           lots: int = 1,
+                           available_strikes: Optional[set] = None) -> List[StrategyLeg]:
+    """Generate legs for a predefined strategy.
+
+    If *available_strikes* is provided, each computed strike is snapped to
+    the nearest real strike in the set (Task 1.5).
+    """
     strat = PREDEFINED_STRATEGIES.get(strategy_name)
     if not strat:
         raise ValueError(f"Unknown strategy: {strategy_name}")
@@ -159,8 +177,10 @@ def generate_strategy_legs(strategy_name: str, atm_strike: int,
     legs = []
     for leg in strat["legs"]:
         multiplier = leg.get("multiplier", 1)
+        raw_strike = atm_strike + leg["offset"] * strike_gap
+        strike = _snap_to_nearest_strike(raw_strike, available_strikes)
         legs.append(StrategyLeg(
-            strike=atm_strike + leg["offset"] * strike_gap,
+            strike=strike,
             option_type=leg["type"],
             action=leg["action"],
             quantity=qty * multiplier,

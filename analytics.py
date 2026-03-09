@@ -113,6 +113,10 @@ def solve_iv(option_price: float, spot: float, strike: float,
 def estimate_implied_volatility(option_price: float, spot: float, strike: float,
                                 tte: float, option_type: str,
                                 r: float = C.RISK_FREE_RATE) -> float:
+    # Task 1.4: Return NaN for same-day / near-expiry options (< 2 days)
+    # to avoid polluting the option chain with a misleading default 20% IV.
+    if tte < 2 / C.DAYS_PER_YEAR:
+        return float('nan')
     return solve_iv(option_price, spot, strike, tte, option_type, r).iv
 
 
