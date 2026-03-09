@@ -200,6 +200,7 @@ def render_candlestick(
         xaxis=dict(
             showgrid=True,
             gridcolor="rgba(48,54,61,0.8)",
+            tickformat="%d %b %H:%M",
             rangeslider=dict(visible=True, thickness=0.04),
             rangeselector=dict(
                 buttons=[
