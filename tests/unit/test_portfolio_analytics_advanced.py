@@ -36,10 +36,12 @@ import numpy as np
 import pandas as pd
 
 from analytics import (
+    estimate_implied_volatility,
     monte_carlo_var,
     portfolio_correlation_matrix,
     rolling_realized_vol,
 )
+from helpers import add_greeks_to_chain
 
 
 def _sample_positions(n=5):
@@ -96,3 +98,31 @@ def test_portfolio_correlation_matrix_is_symmetric_with_unit_diagonal():
     assert not corr.empty
     assert corr.equals(corr.T)
     assert all(abs(float(corr.loc[k, k]) - 1.0) < 1e-9 for k in corr.index)
+
+
+def test_estimate_implied_volatility_returns_nan_for_near_expiry():
+    iv = estimate_implied_volatility(
+        option_price=100.0,
+        spot=22000.0,
+        strike=22000.0,
+        tte=(1 / 365),
+        option_type="CE",
+    )
+    assert math.isnan(iv)
+
+
+def test_add_greeks_to_chain_displays_dash_for_near_expiry_iv():
+    today = pd.Timestamp.now().strftime("%Y-%m-%d")
+    df = pd.DataFrame(
+        [
+            {
+                "strike_price": 22000,
+                "ltp": 100.0,
+                "right": "Call",
+                "iv": 0.0,
+            }
+        ]
+    )
+    out = add_greeks_to_chain(df, spot_price=22000.0, expiry_date=today)
+    assert out.loc[0, "iv"] == "—"
+    assert isinstance(out.loc[0, "delta"], (float, int))

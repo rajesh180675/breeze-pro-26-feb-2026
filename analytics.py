@@ -113,6 +113,8 @@ def solve_iv(option_price: float, spot: float, strike: float,
 def estimate_implied_volatility(option_price: float, spot: float, strike: float,
                                 tte: float, option_type: str,
                                 r: float = C.RISK_FREE_RATE) -> float:
+    if tte < (2 / C.DAYS_PER_YEAR):
+        return float("nan")
     return solve_iv(option_price, spot, strike, tte, option_type, r).iv
 
 

@@ -348,6 +348,7 @@ def add_greeks_to_chain(df: pd.DataFrame, spot_price: float, expiry_date: str) -
         tte = max((expiry - datetime.now()).days / C.DAYS_PER_YEAR, 0.001)
     except Exception:
         tte = 0.05
+    display_iv_values = []
     greeks_list = []
     for _, row in df.iterrows():
         strike = row.get("strike_price", 0)
@@ -360,12 +361,19 @@ def add_greeks_to_chain(df: pd.DataFrame, spot_price: float, expiry_date: str) -
                     estimate_implied_volatility(ltp, spot_price, strike, tte, ot)
                     if iv_raw <= 0 else iv_raw
                 )
-                greeks_list.append(calculate_greeks(spot_price, strike, tte, iv, ot))
+                display_iv_values.append(iv * 100 if pd.notna(iv) else np.nan)
+                iv_for_greeks = iv if pd.notna(iv) else 0.20
+                greeks_list.append(calculate_greeks(spot_price, strike, tte, iv_for_greeks, ot))
             except Exception:
+                display_iv_values.append(np.nan)
                 greeks_list.append({'delta': 0, 'gamma': 0, 'theta': 0, 'vega': 0, 'rho': 0})
         else:
+            display_iv_values.append(np.nan)
             greeks_list.append({'delta': 0, 'gamma': 0, 'theta': 0, 'vega': 0, 'rho': 0})
-    return pd.concat([df.reset_index(drop=True), pd.DataFrame(greeks_list)], axis=1)
+    result = pd.concat([df.reset_index(drop=True), pd.DataFrame(greeks_list)], axis=1)
+    iv_series = pd.Series(display_iv_values)
+    result["iv"] = iv_series.where(iv_series.notna(), "—")
+    return result
 
 
 # ═══════════════════════════════════════════════════════════════
