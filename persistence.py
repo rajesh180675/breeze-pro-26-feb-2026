@@ -9,6 +9,7 @@ import threading
 import time
 import logging
 import io
+import os
 from datetime import datetime, date
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -212,6 +213,11 @@ class TradeDB:
         self._db_path = str(DB_PATH)
         self._local = threading.local()
         self._init_schema()
+        try:
+            if os.path.exists(self._db_path):
+                os.chmod(self._db_path, 0o600)
+        except OSError as exc:
+            log.warning("Could not enforce DB file mode 0600: %s", exc)
         self._initialized = True
         log.info(f"TradeDB ready: {self._db_path}")
 

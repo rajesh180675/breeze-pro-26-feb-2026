@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass
 import threading
+import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 import hashlib
@@ -145,6 +146,7 @@ class SessionState:
         "selected_instrument": "NIFTY", "api_key": "", "api_secret": "",
         "session_token": "", "login_time": None, "user_name": "", "user_id": "",
         "debug_mode": False, "activity_log": [], "_order_in_progress": False,
+        "master_password": os.getenv("BREEZE_MASTER_PASSWORD", ""),
     }
 
     @staticmethod

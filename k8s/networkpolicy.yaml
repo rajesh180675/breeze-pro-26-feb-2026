@@ -1,0 +1,19 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: breeze-service-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app: breeze-service
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 8000
+        - protocol: TCP
+          port: 8501
+  egress:
+    - {}

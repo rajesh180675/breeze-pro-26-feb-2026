@@ -201,6 +201,13 @@ class WebhookDispatcher:
             return ""
         return hmac.new(self._secret.encode(), self._serialize_payload(payload).encode(), hashlib.sha256).hexdigest()
 
+    def verify_signature(self, raw_body: str, provided_signature: str) -> bool:
+        """Verify incoming webhook signature using HMAC-SHA256."""
+        if not self._secret:
+            return False
+        expected = hmac.new(self._secret.encode(), raw_body.encode(), hashlib.sha256).hexdigest()
+        return hmac.compare_digest(expected, provided_signature or "")
+
     def send(self, event: AlertEvent) -> bool:
         if not self._url:
             return False
