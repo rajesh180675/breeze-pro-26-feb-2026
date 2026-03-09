@@ -38,6 +38,7 @@ Use strict mode to fail-fast when integration validation is mandatory:
 ```bash
 BREEZE_INTEGRATION_STRICT=true pytest tests/integration -m integration
 ```
+Strict mode now fails once during test collection with the exact missing env var names.
 
 ## Docker
 ```bash
