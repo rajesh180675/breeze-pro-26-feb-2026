@@ -18,18 +18,23 @@ except ImportError:  # pragma: no cover
     class _Metric:
         def labels(self, **kwargs):
             return self
+
         def inc(self):
             return None
+
         def dec(self):
             return None
+
         def observe(self, _value):
             return None
         def set(self, _value):
             return None
     def Counter(*_args, **_kwargs):
         return _Metric()
+
     def Gauge(*_args, **_kwargs):
         return _Metric()
+
     def Histogram(*_args, **_kwargs):
         return _Metric()
 from requests.adapters import HTTPAdapter
@@ -47,7 +52,6 @@ except Exception:  # pragma: no cover
 from lib.errors import (
     AuthenticationError,
     BadRequestError,
-    BreezeAPIError,
     CircuitOpenError,
     NotFoundError,
     RateLimitError,
@@ -285,7 +289,12 @@ class BreezeClient:
             if resp.status_code >= 500:
                 self.circuit.record_failure(endpoint)
                 REQUEST_COUNTER.labels(method=method.upper(), endpoint=endpoint, result="5xx").inc()
-                raise TransientBreezeError("Transient server error", operation=path, http_status=resp.status_code, request_id=request_id)
+                raise TransientBreezeError(
+                    "Transient server error",
+                    operation=path,
+                    http_status=resp.status_code,
+                    request_id=request_id,
+                )
             if resp.status_code == 429:
                 REQUEST_COUNTER.labels(method=method.upper(), endpoint=endpoint, result="rate_limited").inc()
                 raise RateLimitError("Breeze rate limit hit", operation=path, http_status=429, request_id=request_id)
@@ -333,7 +342,11 @@ class BreezeClient:
 
     def get_historical(self, symbol: str, from_ts: str, to_ts: str, interval: str) -> dict:
         """Fetch historical candles for a symbol."""
-        return self.request("GET", "/historicalcharts", params={"symbol": symbol, "from": from_ts, "to": to_ts, "interval": interval})
+        return self.request(
+            "GET",
+            "/historicalcharts",
+            params={"symbol": symbol, "from": from_ts, "to": to_ts, "interval": interval},
+        )
 
     def get_option_chain(self, symbol: str) -> dict:
         """Fetch option chain data."""

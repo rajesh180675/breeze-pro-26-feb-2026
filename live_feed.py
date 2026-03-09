@@ -402,6 +402,21 @@ class TickStore:
         tick = self._latest.get(stock_token)
         return tick.ltp if tick else None
 
+    def get_all_latest(self) -> Dict[str, "TickData"]:
+        """Return a snapshot of the latest tick for every subscribed token."""
+        with self._lock:
+            return dict(self._latest)
+
+    def get_history(self, stock_token: str) -> List["TickData"]:
+        """Return tick history for a token (oldest first)."""
+        with self._lock:
+            buf = self._history.get(stock_token)
+            return list(buf) if buf else []
+
+    @property
+    def total_ticks(self) -> int:
+        return self._total_ticks
+
 
 class BarStore:
     VALID_INTERVALS = frozenset({"1second", "1minute", "5minute", "30minute", "1day"})
@@ -552,6 +567,46 @@ class LiveFeedManager:
             self._breeze.subscribe_feeds(get_order_notification=True)
             self._subscriptions[key] = SubscriptionRecord("", SubscriptionType.ORDER_NOTIFY, None, False, time.time())
             return True
+
+    def get_health_stats(self) -> Dict:
+        """Return live-feed health statistics for monitoring / tests."""
+        now = time.time()
+        stale = (
+            bool(self._last_tick_time)
+            and (now - self._last_tick_time) > HEALTH_STALE_SECONDS
+            and C.is_market_open()
+        )
+        last_secs_ago = (now - self._last_tick_time) if self._last_tick_time else None
+        with self._lock:
+            sub_count = len(self._subscriptions)
+        return {
+            "state": self._state,
+            "total_subscriptions": sub_count,
+            "total_ticks": self._total_ticks,
+            "last_tick_time": self._last_tick_time,
+            "last_tick_secs_ago": last_secs_ago,   # seconds since last tick, None if no ticks yet
+            "connect_count": self._connect_count,
+            "reconnect_count": self._reconnect_count,
+            "is_stale": stale,
+            "queue_size": self._tick_queue.qsize(),
+        }
+
+    def _restore_subscriptions(self) -> None:
+        """Re-subscribe all previously registered tokens after a reconnect."""
+        with self._lock:
+            subs = dict(self._subscriptions)
+        for key, rec in subs.items():
+            try:
+                if rec.sub_type == SubscriptionType.QUOTE:
+                    depth = DEPTH_L2 if rec.get_market_depth else DEPTH_L1
+                    token = self._adjust_depth(rec.stock_token, depth)
+                    self._breeze.subscribe_feeds(stock_token=token)
+                elif rec.sub_type == SubscriptionType.ORDER_NOTIFY:
+                    self._breeze.subscribe_feeds(get_order_notification=True)
+                # OHLCV subs cannot be fully restored without original params;
+                # their metadata is stored in the SubscriptionRecord if available.
+            except Exception as exc:  # pragma: no cover
+                log.warning("_restore_subscriptions failed for %s: %s", key, exc)
 
     def _connect_with_backoff(self) -> None:
         attempt = 0

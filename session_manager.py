@@ -274,11 +274,18 @@ def generate_totp(secret: str, digits: int = 6, period: int = 30) -> str:
 
 
 def auto_connect_with_totp(client, api_key: str, session_token: str, totp_secret: Optional[str] = None) -> Dict:
-    """Connect with explicit token or auto-generated TOTP from secret."""
+    """Connect with explicit token or auto-generated TOTP from secret.
+
+    ``api_key`` is accepted for interface compatibility but the client already
+    holds its own API key from construction time.  If the caller needs to
+    connect with a *different* API key they should create a new client.
+    """
     token = str(session_token or "").strip()
     if totp_secret and not token:
         token = generate_totp(totp_secret)
         log.info("Auto-generated TOTP for login")
+    if not token:
+        raise ValueError("session_token or totp_secret must be supplied")
     return client.connect(token)
 
 

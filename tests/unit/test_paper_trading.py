@@ -1,6 +1,4 @@
 import time
-from unittest.mock import Mock
-
 from paper_trading import PaperTradingEngine
 
 
@@ -53,8 +51,14 @@ def test_realized_pnl_tracking_on_close():
     client = _QuoteClient(ltp=100.0)
     engine = PaperTradingEngine(client)
     engine.enable()
-    engine.place_order(stock_code="NIFTY", exchange_code="NFO", product="options", action="buy", quantity="10", order_type="market", expiry_date="2026-03-27", right="call", strike_price="22000")
+    engine.place_order(
+        stock_code="NIFTY", exchange_code="NFO", product="options", action="buy",
+        quantity="10", order_type="market", expiry_date="2026-03-27", right="call", strike_price="22000",
+    )
     client._ltp = 110.0
-    engine.place_order(stock_code="NIFTY", exchange_code="NFO", product="options", action="sell", quantity="10", order_type="market", expiry_date="2026-03-27", right="call", strike_price="22000")
+    engine.place_order(
+        stock_code="NIFTY", exchange_code="NFO", product="options", action="sell",
+        quantity="10", order_type="market", expiry_date="2026-03-27", right="call", strike_price="22000",
+    )
     summary = engine.get_paper_summary()
     assert summary["realized_pnl"] == 100.0

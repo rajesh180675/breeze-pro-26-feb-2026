@@ -91,6 +91,14 @@ CREATE TABLE IF NOT EXISTS settings (
     value TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS nse_holidays (
+    iso_date    TEXT PRIMARY KEY,
+    description TEXT    NOT NULL DEFAULT '',
+    year        INTEGER NOT NULL,
+    source      TEXT    NOT NULL DEFAULT 'nse_api',
+    fetched_at  TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_nse_holidays_year ON nse_holidays(year);
 CREATE TABLE IF NOT EXISTS account_profiles (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     profile_name TEXT UNIQUE NOT NULL,

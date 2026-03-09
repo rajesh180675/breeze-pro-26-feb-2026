@@ -218,6 +218,8 @@ def render_candlestick(
         ),
         yaxis=dict(showgrid=True, gridcolor="rgba(48,54,61,0.8)", side="right"),
     )
+    # Task 1.3: IST-aware tick format for chart x-axis labels
+    fig.update_xaxes(tickformat="%d %b %H:%M", row=1, col=1)
     return fig
 
 

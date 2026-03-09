@@ -12,6 +12,11 @@ from typing import Dict, List, Optional
 
 import pandas as pd
 
+import app_config as _C
+
+# IST timezone for converting UTC candle timestamps (Task 1.3)
+_IST = _C.IST
+
 log = logging.getLogger(__name__)
 
 
@@ -152,7 +157,13 @@ class HistoricalDataFetcher:
         if interval == "1day":
             return [(start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))]
 
-        window_days = 60 if interval in {"30minute", "5minute"} else 20
+        # Per spec Appendix C: 1-minute max 3 days, 5-minute/30-minute max 60 days
+        if interval == "1minute":
+            window_days = 3
+        elif interval in {"5minute", "30minute"}:
+            window_days = 60
+        else:
+            window_days = 20
         chunks = []
         cur = start
         while cur <= end:
@@ -180,6 +191,7 @@ class HistoricalDataFetcher:
             "low": ["low", "Low"],
             "close": ["close", "Close"],
             "volume": ["volume", "Volume", "vol"],
+            "open_interest": ["open_interest", "OI", "oi", "openInterest"],
         }
         normalized = {}
         for canon, aliases in col_map.items():
@@ -194,10 +206,49 @@ class HistoricalDataFetcher:
         out["datetime"] = pd.to_datetime(out["datetime"], errors="coerce")
         for c in ["open", "high", "low", "close", "volume"]:
             out[c] = pd.to_numeric(out[c], errors="coerce")
+        out["open_interest"] = pd.to_numeric(out["open_interest"], errors="coerce").fillna(0)
         out = out.dropna(subset=["datetime", "open", "high", "low", "close"])
         out["volume"] = out["volume"].fillna(0)
+
+        # Task 1.3: Convert UTC timestamps from Breeze API to IST for Indian traders
+        if out["datetime"].dt.tz is None:
+            out["datetime"] = out["datetime"].dt.tz_localize("UTC")
+        out["datetime"] = out["datetime"].dt.tz_convert(_IST)
+
         return out
 
 
 def get_historical_cache() -> HistoricalCache:
     return _GLOBAL_CACHE
+
+
+# ---------------------------------------------------------------------------
+# Compat aliases used by unit tests (and externally referenced code)
+# ---------------------------------------------------------------------------
+
+def _chunk_date_range_compat(self, from_date, to_date, interval: str):  # type: ignore[override]
+    """Alias for _build_chunks that also accepts datetime.date objects."""
+    from datetime import date as _date
+    if isinstance(from_date, _date):
+        from_date = from_date.strftime("%Y-%m-%d")
+    if isinstance(to_date, _date):
+        to_date = to_date.strftime("%Y-%m-%d")
+    return HistoricalDataFetcher._build_chunks(from_date, to_date, interval)
+
+
+def _normalize_records_compat(self, records):  # type: ignore[override]
+    """
+    Accepts a raw list of candle dicts (as returned in ``data.Success``)
+    and returns a normalised DataFrame.  This is the public-facing
+    counterpart of the internal ``_response_to_df`` helper.
+    """
+    if not records:
+        import pandas as pd
+        return pd.DataFrame(columns=["datetime", "open", "high", "low", "close", "volume", "open_interest"])
+    fake_resp = {"success": True, "data": {"Success": records}}
+    return HistoricalDataFetcher._response_to_df(fake_resp)
+
+
+# Attach as instance methods so tests can call fetcher._chunk_date_range(...)
+HistoricalDataFetcher._chunk_date_range = _chunk_date_range_compat  # type: ignore[attr-defined]
+HistoricalDataFetcher._normalize_records = _normalize_records_compat  # type: ignore[attr-defined]

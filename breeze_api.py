@@ -322,10 +322,42 @@ class BreezeAPIClient:
 
     # ─── Connection ───────────────────────────────────────────
 
+    # ── Connection timeout constant ──────────────────────────────
+    _CONNECT_TIMEOUT: float = 20.0  # seconds before generate_session is declared hung
+
     @retry_api_call(max_attempts=2, initial_delay=1.0)
     def connect(self, session_token: str):
-        self.breeze = BreezeConnect(api_key=self.api_key)
-        self.breeze.generate_session(api_secret=self.api_secret, session_token=session_token)
+        breeze = BreezeConnect(api_key=self.api_key)
+
+        # BreezeConnect.generate_session() makes a blocking HTTP call with no
+        # built-in timeout.  Run it on a daemon thread so we can abort if it
+        # hangs (bad token, unreachable server, etc.) rather than blocking the
+        # Streamlit main thread forever and showing an infinite spinner.
+        _exc: list = [None]
+
+        def _generate():
+            try:
+                breeze.generate_session(
+                    api_secret=self.api_secret,
+                    session_token=session_token,
+                )
+            except Exception as e:          # noqa: BLE001
+                _exc[0] = e
+
+        t = threading.Thread(target=_generate, name="BreezeGenSession", daemon=True)
+        t.start()
+        t.join(timeout=self._CONNECT_TIMEOUT)
+
+        if t.is_alive():
+            # Thread is still blocked → generate_session never returned.
+            raise TimeoutError(
+                f"generate_session timed out after {self._CONNECT_TIMEOUT}s — "
+                "verify your session token is fresh and ICICI servers are reachable."
+            )
+        if _exc[0] is not None:
+            raise _exc[0]
+
+        self.breeze = breeze          # assign only after success
         self.connected = True
         self._connection_time = time.time()
 
@@ -492,24 +524,47 @@ class BreezeAPIClient:
 
     @retry_api_call(max_attempts=2, initial_delay=0.5)
     def get_order_list(self, exchange="", from_date="", to_date=""):
+        """Fetch order list.
+
+        Breeze requires a non-empty exchange_code.  Default to ``NSE`` when
+        called without an explicit exchange (e.g. from the warmup manager).
+        If no date range is given, default to today.
+        """
         self._require_connection()
+        # Breeze rejects empty exchange_code — default to NSE
+        exchange_code = exchange.strip() if exchange and exchange.strip() else "NSE"
+        # Default date range: today
+        from datetime import date as _date
+        today = _date.today().isoformat()
+        fd = from_date if from_date else today
+        td = to_date if to_date else today
         with self._api_lock:
             self.rate_limiter.wait()
             return self._ok(self.breeze.get_order_list(
-                exchange_code=exchange,
-                from_date=convert_to_breeze_iso_datetime(from_date),
-                to_date=convert_to_breeze_iso_datetime(to_date, end_of_day=True)
+                exchange_code=exchange_code,
+                from_date=convert_to_breeze_iso_datetime(fd),
+                to_date=convert_to_breeze_iso_datetime(td, end_of_day=True)
             ))
 
     @retry_api_call(max_attempts=2, initial_delay=0.5)
     def get_trade_list(self, exchange="", from_date="", to_date=""):
+        """Fetch trade list.
+
+        Breeze requires a non-empty exchange_code.  Default to ``NSE`` and
+        today's date when called without explicit args.
+        """
         self._require_connection()
+        exchange_code = exchange.strip() if exchange and exchange.strip() else "NSE"
+        from datetime import date as _date
+        today = _date.today().isoformat()
+        fd = from_date if from_date else today
+        td = to_date if to_date else today
         with self._api_lock:
             self.rate_limiter.wait()
             return self._ok(self.breeze.get_trade_list(
-                exchange_code=exchange,
-                from_date=convert_to_breeze_iso_datetime(from_date),
-                to_date=convert_to_breeze_iso_datetime(to_date, end_of_day=True)
+                exchange_code=exchange_code,
+                from_date=convert_to_breeze_iso_datetime(fd),
+                to_date=convert_to_breeze_iso_datetime(td, end_of_day=True)
             ))
 
     @retry_api_call(max_attempts=2, initial_delay=0.5)
@@ -583,8 +638,12 @@ class BreezeAPIClient:
                     strike_price=str(strike),
                     user_remark=""
                 )
+            normalized = self._ok(resp)
+            ok, msg = APIResponseValidator.validate_order_response(normalized)
+            if not ok:
+                log.warning(f"place_order response validation warning: {msg}")
             log.info(f"place_order response: {resp}")
-            return self._ok(resp)
+            return normalized
         except Exception as e:
             self.idempotency.release(idem_key)
             log.error(f"Order failed: {e}", exc_info=True)
@@ -804,7 +863,7 @@ class BreezeAPIClient:
     def get_quotes(self, stock_code: str, exchange_code: str, product_type: str,
                    right: str = "", strike_price: str = "", expiry_date: str = ""):
         expiry_iso = convert_to_breeze_datetime(expiry_date) if expiry_date else ""
-        return self.call_sdk(
+        resp = self.call_sdk(
             "get_quotes",
             retryable=True,
             stock_code=stock_code,
@@ -814,6 +873,10 @@ class BreezeAPIClient:
             strike_price=str(strike_price) if strike_price != "" else "",
             expiry_date=expiry_iso,
         )
+        ok, msg = APIResponseValidator.validate_quote_response(resp, expected_symbol=stock_code)
+        if not ok:
+            log.debug("get_quotes validation notice for %s: %s", stock_code, msg)
+        return resp
 
     @retry_api_call(max_attempts=3, initial_delay=0.5)
     def get_historical_data_v2(self, interval: str, from_date: str, to_date: str,
