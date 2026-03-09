@@ -18,7 +18,7 @@ from email.mime.text import MIMEText
 from enum import Enum
 from typing import Any, Dict, List, Tuple
 
-import requests
+import requests  # type: ignore[import-untyped]
 
 log = logging.getLogger(__name__)
 

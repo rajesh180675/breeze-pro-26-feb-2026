@@ -11,10 +11,12 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-import requests
+import requests  # type: ignore[import-untyped]
+
 try:
     from prometheus_client import Counter, Gauge, Histogram
 except ImportError:  # pragma: no cover
+
     class _Metric:
         def labels(self, **kwargs):
             return self
@@ -31,26 +33,21 @@ except ImportError:  # pragma: no cover
         def set(self, _value):
             return None
 
-    def Counter(*_args, **_kwargs):
+    def Counter(*_args, **_kwargs):  # type: ignore[no-redef]
         return _Metric()
 
-    def Gauge(*_args, **_kwargs):
+    def Gauge(*_args, **_kwargs):  # type: ignore[no-redef]
         return _Metric()
 
-    def Histogram(*_args, **_kwargs):
+    def Histogram(*_args, **_kwargs):  # type: ignore[no-redef]
         return _Metric()
-from requests.adapters import HTTPAdapter
+
+
+from requests.adapters import HTTPAdapter  # type: ignore[import-untyped]
 from urllib3.util.retry import Retry
 
 from lib.auth import AuthManager, FileTokenStore, InMemoryTokenStore, TokenRecord, TokenStore
 from lib.config import Settings, get_settings
-try:
-    from alerting import AlertDispatcher, AlertEvent, AlertLevel
-except Exception:  # pragma: no cover
-    AlertDispatcher = None
-    AlertEvent = None
-    AlertLevel = None
-
 from lib.errors import (
     AuthenticationError,
     BadRequestError,
@@ -59,6 +56,18 @@ from lib.errors import (
     RateLimitError,
     TransientBreezeError,
 )
+
+_AlertEvent: Any = None
+_AlertLevel: Any = None
+
+try:
+    from alerting import AlertEvent as _ImportedAlertEvent
+    from alerting import AlertLevel as _ImportedAlertLevel
+
+    _AlertEvent = _ImportedAlertEvent
+    _AlertLevel = _ImportedAlertLevel
+except Exception:  # pragma: no cover
+    pass
 
 REQUEST_COUNTER = Counter("breeze_requests_total", "Breeze requests", ["method", "endpoint", "result"])
 REQUEST_LATENCY = Histogram("breeze_request_duration_seconds", "Breeze request duration", ["method", "endpoint"])
@@ -126,11 +135,11 @@ class CircuitBreaker:
         CIRCUIT_FAILURES.labels(endpoint=endpoint).set(len(self._errors[endpoint]))
 
     def _notify_open(self, endpoint: str) -> None:
-        if not self._alert_dispatcher or not AlertEvent or not AlertLevel:
+        if self._alert_dispatcher is None or _AlertEvent is None or _AlertLevel is None:
             return
-        event = AlertEvent(
+        event = _AlertEvent(
             alert_type="api_circuit_open",
-            level=AlertLevel.CRITICAL,
+            level=_AlertLevel.CRITICAL,
             title="API Circuit Open",
             body=f"Circuit opened for endpoint {endpoint}",
             metadata={"endpoint": endpoint},

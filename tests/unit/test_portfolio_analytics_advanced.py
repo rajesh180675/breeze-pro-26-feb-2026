@@ -15,7 +15,7 @@ class _Norm:
 
     @staticmethod
     def pdf(x):
-        return (1 / math.sqrt(2 * math.pi)) * math.exp(-(x ** 2) / 2)
+        return (1 / math.sqrt(2 * math.pi)) * math.exp(-(x**2) / 2)
 
 
 stats_mod.norm = _Norm()

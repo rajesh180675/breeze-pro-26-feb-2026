@@ -24,7 +24,7 @@ def _totp_at(secret: str, ts: int, digits: int = 6, period: int = 30):
     msg = struct.pack(">Q", counter)
     digest = hmac.new(key, msg, hashlib.sha1).digest()
     offset = digest[-1] & 0x0F
-    val = struct.unpack(">I", digest[offset:offset+4])[0] & 0x7FFFFFFF
+    val = struct.unpack(">I", digest[offset : offset + 4])[0] & 0x7FFFFFFF
     return str(val % (10**digits)).zfill(digits)
 
 

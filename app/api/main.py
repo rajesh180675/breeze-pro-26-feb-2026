@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.responses import PlainTextResponse
+
 try:
     from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 except ImportError:  # pragma: no cover
@@ -13,6 +14,7 @@ except ImportError:  # pragma: no cover
 
     def generate_latest():
         return b""
+
 
 from lib.logging_config import configure_logging
 
