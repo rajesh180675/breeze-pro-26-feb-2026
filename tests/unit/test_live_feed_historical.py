@@ -3,6 +3,7 @@ import types
 
 if "breeze_connect" not in sys.modules:
     stub = types.ModuleType("breeze_connect")
+
     class BreezeConnect:  # noqa: D401
         """Stub BreezeConnect for tests."""
         pass

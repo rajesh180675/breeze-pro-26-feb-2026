@@ -10,6 +10,7 @@ try:
     from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 except ImportError:  # pragma: no cover
     CONTENT_TYPE_LATEST = "text/plain"
+
     def generate_latest():
         return b""
 

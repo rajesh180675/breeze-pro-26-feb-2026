@@ -18,18 +18,25 @@ except ImportError:  # pragma: no cover
     class _Metric:
         def labels(self, **kwargs):
             return self
+
         def inc(self):
             return None
+
         def dec(self):
             return None
+
         def observe(self, _value):
             return None
+
         def set(self, _value):
             return None
+
     def Counter(*_args, **_kwargs):
         return _Metric()
+
     def Gauge(*_args, **_kwargs):
         return _Metric()
+
     def Histogram(*_args, **_kwargs):
         return _Metric()
 from requests.adapters import HTTPAdapter
@@ -47,7 +54,6 @@ except Exception:  # pragma: no cover
 from lib.errors import (
     AuthenticationError,
     BadRequestError,
-    BreezeAPIError,
     CircuitOpenError,
     NotFoundError,
     RateLimitError,
@@ -97,7 +103,13 @@ class CircuitBreakerState(str, Enum):
 class CircuitBreaker:
     """Endpoint-aware circuit breaker with half-open health probe."""
 
-    def __init__(self, threshold: int, window_seconds: int, open_seconds: int, alert_dispatcher: Any = None) -> None:
+    def __init__(
+        self,
+        threshold: int,
+        window_seconds: int,
+        open_seconds: int,
+        alert_dispatcher: Any = None,
+    ) -> None:
         self.threshold = threshold
         self.window_seconds = window_seconds
         self.base_open_seconds = open_seconds
@@ -154,7 +166,9 @@ class CircuitBreaker:
         if self._state[endpoint] == CircuitBreakerState.HALF_OPEN:
             self._state[endpoint] = CircuitBreakerState.OPEN
             self._opened_at[endpoint] = now
-            self._recovery_timeout[endpoint] = max(self.base_open_seconds, self._recovery_timeout[endpoint] * 2)
+            self._recovery_timeout[endpoint] = max(
+                self.base_open_seconds, self._recovery_timeout[endpoint] * 2
+            )
             self._notify_open(endpoint)
         elif len(errors) >= self.threshold:
             self._state[endpoint] = CircuitBreakerState.OPEN
@@ -251,7 +265,9 @@ class BreezeClient:
                 "X-SessionToken": record.access_token,
                 "X-AppKey": self.client_id or "",
             }
-            probe_resp = self.session.get(probe_url, headers=probe_headers, timeout=self.settings.request_timeout_seconds)
+            probe_resp = self.session.get(
+                probe_url, headers=probe_headers, timeout=self.settings.request_timeout_seconds
+            )
             if probe_resp.status_code >= 400:
                 self.circuit.record_failure(endpoint)
                 raise CircuitOpenError("Circuit breaker probe failed", operation=endpoint)
@@ -285,7 +301,12 @@ class BreezeClient:
             if resp.status_code >= 500:
                 self.circuit.record_failure(endpoint)
                 REQUEST_COUNTER.labels(method=method.upper(), endpoint=endpoint, result="5xx").inc()
-                raise TransientBreezeError("Transient server error", operation=path, http_status=resp.status_code, request_id=request_id)
+                raise TransientBreezeError(
+                    "Transient server error",
+                    operation=path,
+                    http_status=resp.status_code,
+                    request_id=request_id,
+                )
             if resp.status_code == 429:
                 REQUEST_COUNTER.labels(method=method.upper(), endpoint=endpoint, result="rate_limited").inc()
                 raise RateLimitError("Breeze rate limit hit", operation=path, http_status=429, request_id=request_id)
@@ -314,7 +335,6 @@ class BreezeClient:
     def _idempotency(self) -> str:
         return str(uuid.uuid4())
 
-
     def get_customer_details(self) -> dict:
         """Fetch customer profile details (health probe endpoint)."""
         return self.request("GET", "/customerdetails")
@@ -333,7 +353,11 @@ class BreezeClient:
 
     def get_historical(self, symbol: str, from_ts: str, to_ts: str, interval: str) -> dict:
         """Fetch historical candles for a symbol."""
-        return self.request("GET", "/historicalcharts", params={"symbol": symbol, "from": from_ts, "to": to_ts, "interval": interval})
+        return self.request(
+            "GET",
+            "/historicalcharts",
+            params={"symbol": symbol, "from": from_ts, "to": to_ts, "interval": interval},
+        )
 
     def get_option_chain(self, symbol: str) -> dict:
         """Fetch option chain data."""
