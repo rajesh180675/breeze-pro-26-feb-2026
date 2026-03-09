@@ -52,26 +52,33 @@ def test_export_trades_for_tax_csv_and_excel(tmp_path):
 
 def test_quote_response_validator(monkeypatch):
     monkeypatch.setattr(C, "is_market_open", lambda: True)
-    ok, msg = APIResponseValidator.validate_quote_response({
-        "success": True,
-        "data": {"Success": [{"ltp": "0"}]},
-    })
+    ok, msg = APIResponseValidator.validate_quote_response(
+        {
+            "success": True,
+            "data": {"Success": [{"ltp": "0"}]},
+        }
+    )
     assert not ok
     assert "Zero LTP" in msg
 
-    ok, msg = APIResponseValidator.validate_quote_response({
-        "success": True,
-        "data": {"Success": [{"ltp": "101.2", "stock_code": "NIFTY"}]},
-    }, expected_symbol="NIFTY")
+    ok, msg = APIResponseValidator.validate_quote_response(
+        {
+            "success": True,
+            "data": {"Success": [{"ltp": "101.2", "stock_code": "NIFTY"}]},
+        },
+        expected_symbol="NIFTY",
+    )
     assert ok
     assert msg == ""
 
 
 def test_order_response_validator_and_sanitize_price():
-    ok, msg = APIResponseValidator.validate_order_response({
-        "success": True,
-        "data": {"Success": [{"order_id": "ABC123"}]},
-    })
+    ok, msg = APIResponseValidator.validate_order_response(
+        {
+            "success": True,
+            "data": {"Success": [{"order_id": "ABC123"}]},
+        }
+    )
     assert ok
     assert msg == ""
 

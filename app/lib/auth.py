@@ -7,7 +7,7 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Protocol
+from typing import Callable, Protocol
 
 from lib.errors import AuthenticationError
 
@@ -97,7 +97,7 @@ class AuthManager:
         self.token_store.save(record)
         return record
 
-    def ensure_fresh_token(self, authenticator: callable) -> TokenRecord:
+    def ensure_fresh_token(self, authenticator: Callable[[], TokenRecord]) -> TokenRecord:
         """Refresh token when near expiry using lock for concurrent callers."""
 
         record = self.token_store.load()

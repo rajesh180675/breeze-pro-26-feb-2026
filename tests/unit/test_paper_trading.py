@@ -15,8 +15,15 @@ def test_market_order_fills_immediately():
     engine = PaperTradingEngine(client)
     engine.enable()
     resp = engine.place_order(
-        stock_code="NIFTY", exchange_code="NFO", product="options", action="buy",
-        quantity="10", order_type="market", expiry_date="2026-03-27", right="call", strike_price="22000"
+        stock_code="NIFTY",
+        exchange_code="NFO",
+        product="options",
+        action="buy",
+        quantity="10",
+        order_type="market",
+        expiry_date="2026-03-27",
+        right="call",
+        strike_price="22000",
     )
     oid = resp["data"]["Success"][0]["order_id"]
     order = [o for o in engine.get_paper_orders() if o.order_id == oid][0]
@@ -30,8 +37,16 @@ def test_limit_order_fills_on_cross():
     engine.FILL_CHECK_INTERVAL = 1
     engine.enable()
     resp = engine.place_order(
-        stock_code="NIFTY", exchange_code="NFO", product="options", action="buy",
-        quantity="5", order_type="limit", price="100", expiry_date="2026-03-27", right="call", strike_price="22000"
+        stock_code="NIFTY",
+        exchange_code="NFO",
+        product="options",
+        action="buy",
+        quantity="5",
+        order_type="limit",
+        price="100",
+        expiry_date="2026-03-27",
+        right="call",
+        strike_price="22000",
     )
     oid = resp["data"]["Success"][0]["order_id"]
     time.sleep(0.2)
@@ -52,13 +67,27 @@ def test_realized_pnl_tracking_on_close():
     engine = PaperTradingEngine(client)
     engine.enable()
     engine.place_order(
-        stock_code="NIFTY", exchange_code="NFO", product="options", action="buy",
-        quantity="10", order_type="market", expiry_date="2026-03-27", right="call", strike_price="22000",
+        stock_code="NIFTY",
+        exchange_code="NFO",
+        product="options",
+        action="buy",
+        quantity="10",
+        order_type="market",
+        expiry_date="2026-03-27",
+        right="call",
+        strike_price="22000",
     )
     client._ltp = 110.0
     engine.place_order(
-        stock_code="NIFTY", exchange_code="NFO", product="options", action="sell",
-        quantity="10", order_type="market", expiry_date="2026-03-27", right="call", strike_price="22000",
+        stock_code="NIFTY",
+        exchange_code="NFO",
+        product="options",
+        action="sell",
+        quantity="10",
+        order_type="market",
+        expiry_date="2026-03-27",
+        right="call",
+        strike_price="22000",
     )
     summary = engine.get_paper_summary()
     assert summary["realized_pnl"] == 100.0

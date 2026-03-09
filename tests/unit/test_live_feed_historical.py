@@ -6,7 +6,9 @@ if "breeze_connect" not in sys.modules:
 
     class BreezeConnect:  # noqa: D401
         """Stub BreezeConnect for tests."""
+
         pass
+
     stub.BreezeConnect = BreezeConnect
     sys.modules["breeze_connect"] = stub
 
@@ -51,17 +53,19 @@ def test_historical_chunking_and_normalize():
     chunks = fetcher._chunk_date_range(date(2025, 1, 1), date(2025, 1, 10), "1minute")
     assert len(chunks) == 4
 
-    df = fetcher._normalize_records([
-        {
-            "datetime": "2025-01-01T09:15:00+05:30",
-            "open": "100",
-            "high": "110",
-            "low": "90",
-            "close": "105",
-            "volume": "1000",
-            "open_interest": "50",
-        }
-    ])
+    df = fetcher._normalize_records(
+        [
+            {
+                "datetime": "2025-01-01T09:15:00+05:30",
+                "open": "100",
+                "high": "110",
+                "low": "90",
+                "close": "105",
+                "volume": "1000",
+                "open_interest": "50",
+            }
+        ]
+    )
     assert isinstance(df, pd.DataFrame)
     assert list(df.columns) == ["datetime", "open", "high", "low", "close", "volume", "open_interest"]
     assert float(df.iloc[0]["close"]) == 105.0

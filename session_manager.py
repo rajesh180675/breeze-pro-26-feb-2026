@@ -14,6 +14,7 @@ import hmac
 import struct
 import time as _time
 import app_config as C
+
 try:
     from cryptography.fernet import Fernet
     from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
@@ -52,12 +53,14 @@ def check_session_health(client: Any) -> bool:
 
     payload = resp.get("data") if isinstance(resp.get("data"), dict) else {}
     err_text = " ".join(
-        str(v) for v in [
+        str(v)
+        for v in [
             resp.get("error"),
             resp.get("message"),
             payload.get("Error"),
             payload.get("Status"),
-        ] if v
+        ]
+        if v
     ).lower()
 
     permanent_markers = (
@@ -105,7 +108,7 @@ class Credentials:
     @staticmethod
     def get_all_credentials() -> Tuple[str, str, str]:
         """
-        Get credentials with priority: 
+        Get credentials with priority:
         1. Secrets (if available)
         2. Session State (runtime input)
         """
@@ -119,11 +122,7 @@ class Credentials:
         if not api_secret:
             api_secret = st.session_state.get("api_secret", "")
 
-        return (
-            api_key,
-            api_secret,
-            st.session_state.get("session_token", "")
-        )
+        return (api_key, api_secret, st.session_state.get("session_token", ""))
 
     @staticmethod
     def save_runtime_credentials(api_key, api_secret, session_token):
@@ -142,10 +141,19 @@ class Credentials:
 
 class SessionState:
     DEFAULTS = {
-        "authenticated": False, "breeze_client": None, "current_page": "🏠 Dashboard",
-        "selected_instrument": "NIFTY", "api_key": "", "api_secret": "",
-        "session_token": "", "login_time": None, "user_name": "", "user_id": "",
-        "debug_mode": False, "activity_log": [], "_order_in_progress": False,
+        "authenticated": False,
+        "breeze_client": None,
+        "current_page": "🏠 Dashboard",
+        "selected_instrument": "NIFTY",
+        "api_key": "",
+        "api_secret": "",
+        "session_token": "",
+        "login_time": None,
+        "user_name": "",
+        "user_id": "",
+        "debug_mode": False,
+        "activity_log": [],
+        "_order_in_progress": False,
         "master_password": os.getenv("BREEZE_MASTER_PASSWORD", ""),
     }
 
@@ -180,11 +188,10 @@ class SessionState:
     def log_activity(action, detail=""):
         if "activity_log" not in st.session_state:
             st.session_state.activity_log = []
-        st.session_state.activity_log.insert(0, {
-            "time": datetime.now(C.IST).strftime("%H:%M:%S"),
-            "action": action, "detail": detail
-        })
-        st.session_state.activity_log = st.session_state.activity_log[:C.MAX_ACTIVITY_LOG_ENTRIES]
+        st.session_state.activity_log.insert(
+            0, {"time": datetime.now(C.IST).strftime("%H:%M:%S"), "action": action, "detail": detail}
+        )
+        st.session_state.activity_log = st.session_state.activity_log[: C.MAX_ACTIVITY_LOG_ENTRIES]
 
     @staticmethod
     def get_activity_log():
@@ -254,6 +261,7 @@ class MultiAccountManager:
         self._master_password = master_password
         self._fernet = self._build_fernet(master_password)
         from persistence import TradeDB, AccountProfileDB
+
         self._profile_db = AccountProfileDB(TradeDB())
 
     def _build_fernet(self, master_password: str):
@@ -349,7 +357,7 @@ class MultiAccountManager:
 class CacheManager:
     @staticmethod
     def _key(k, t):
-        return f"{t}_{hashlib.md5(k.encode()).hexdigest()}"
+        return f"{t}_{hashlib.sha256(k.encode()).hexdigest()}"
 
     @staticmethod
     def set(key, value, cache_type="general", ttl=30):
@@ -385,8 +393,7 @@ class CacheManager:
 
     @staticmethod
     def clear_all(cache_type=None):
-        keys = [k for k in list(st.session_state.keys())
-                if k.endswith("_cache") or k.endswith("_ts")]
+        keys = [k for k in list(st.session_state.keys()) if k.endswith("_cache") or k.endswith("_ts")]
         if cache_type:
             keys = [k for k in keys if k.startswith(cache_type)]
         for k in keys:
@@ -440,7 +447,7 @@ def generate_totp(secret: str, digits: int = 6, period: int = 30) -> str:
     msg = struct.pack(">Q", counter)
     digest = hmac.new(key, msg, hashlib.sha1).digest()
     offset = digest[-1] & 0x0F
-    code_int = struct.unpack(">I", digest[offset:offset + 4])[0] & 0x7FFFFFFF
+    code_int = struct.unpack(">I", digest[offset : offset + 4])[0] & 0x7FFFFFFF
     code = code_int % (10 ** int(digits))
     return str(code).zfill(int(digits))
 

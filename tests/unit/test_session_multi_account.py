@@ -1,5 +1,3 @@
-import pytest
-
 from session_manager import MultiAccountManager, AccountProfile
 from persistence import TradeDB, AccountProfileDB
 

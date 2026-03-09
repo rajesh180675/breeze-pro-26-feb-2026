@@ -1,4 +1,5 @@
 import pytest
+
 plotly = pytest.importorskip("plotly")
 
 import pandas as pd
