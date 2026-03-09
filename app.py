@@ -47,7 +47,8 @@ from analytics import (
 )
 from session_manager import (
     Credentials, SessionState, CacheManager, Notifications,
-    generate_totp, auto_connect_with_totp, AppWarmupManager
+    generate_totp, auto_connect_with_totp, AppWarmupManager,
+    MultiAccountManager, AccountProfile
 )
 from breeze_api import BreezeAPIClient
 from validators import validate_date_range
@@ -925,6 +926,23 @@ def render_sidebar():
         st.markdown("---")
 
         if SessionState.is_authenticated():
+            profile_db = AccountProfileDB(_db)
+            profiles = profile_db.get_profiles()
+            active_profile = profile_db.get_active_profile()
+            if profiles:
+                opts = [p["profile_name"] for p in profiles]
+                def _fmt_profile(name: str) -> str:
+                    rec = next((p for p in profiles if p["profile_name"] == name), {})
+                    last_used = rec.get("last_used") or "never"
+                    return f"{name} ({last_used[:16]})"
+                current_profile_name = (active_profile or {}).get("profile_name", opts[0])
+                selected_profile = st.selectbox("Switch Account", opts, index=opts.index(current_profile_name) if current_profile_name in opts else 0, format_func=_fmt_profile, key="sidebar_profile_switch")
+                if selected_profile != current_profile_name:
+                    profile_db.set_active(selected_profile)
+                    _cleanup_session()
+                    st.success(f"Switched to {selected_profile}. Please login again.")
+                    st.rerun()
+
             # Status
             ms = C.get_market_status()
             mkt_class = "mkt-open" if ms["status"] == "open" else "mkt-closed"
@@ -1005,6 +1023,16 @@ def render_sidebar():
 def _render_login_form(has_secrets: bool):
     profile_db = AccountProfileDB(_db)
     active_profile = profile_db.get_active_profile()
+    decrypted_active = None
+    if active_profile and st.session_state.get("master_password"):
+        try:
+            mgr = MultiAccountManager(st.session_state.get("master_password"))
+            for p in mgr.list_profiles():
+                if p.display_name == active_profile.get("profile_name"):
+                    decrypted_active = p
+                    break
+        except Exception:
+            decrypted_active = None
     if active_profile:
         st.caption(f"Active Profile: {active_profile.get('profile_name')}")
 
@@ -1026,8 +1054,13 @@ def _render_login_form(has_secrets: bool):
         with st.form("full_login"):
             k, s, _ = Credentials.get_all_credentials()
             if active_profile and not k:
-                k = active_profile.get("api_key", "")
-                st.session_state["totp_secret"] = active_profile.get("totp_secret", st.session_state.get("totp_secret", ""))
+                if decrypted_active:
+                    k = decrypted_active.api_key
+                    s = decrypted_active.api_secret or s
+                    st.session_state["totp_secret"] = decrypted_active.totp_secret or st.session_state.get("totp_secret", "")
+                else:
+                    k = active_profile.get("api_key", "")
+                    st.session_state["totp_secret"] = active_profile.get("totp_secret", st.session_state.get("totp_secret", ""))
             nk = st.text_input("API Key", value=k, type="password")
             ns = st.text_input("API Secret", value=s, type="password")
             tok = st.text_input("Session Token (optional if TOTP secret set)", type="password")
@@ -1505,6 +1538,17 @@ def page_option_chain():
     token_map = {}
     if visible_strikes:
         token_map = auto_subscribe_option_chain(inst, expiry, visible_strikes, client)
+        mgr = lf.get_live_feed_manager()
+        tick_store = lf.get_tick_store()
+        ws_key = f"oc_ws_tokens_{cfg.api_code}_{expiry}"
+        prev_tokens = set(st.session_state.get(ws_key, []))
+        cur_tokens = {tok for tok in token_map.values() if tok}
+        to_remove = sorted(prev_tokens - cur_tokens)
+        if mgr and to_remove:
+            for tok in to_remove:
+                mgr.unsubscribe_quote(tok)
+            tick_store.clear_tokens(to_remove)
+        st.session_state[ws_key] = sorted(cur_tokens)
 
     spot_for_greeks = atm if atm > 0 else (ddf["strike_price"].median() if "strike_price" in ddf.columns else 0)
 
@@ -4277,6 +4321,21 @@ def render_totp_section() -> None:
 def render_account_switcher(db: TradeDB) -> None:
     """Account profile manager in Settings."""
     profile_db = AccountProfileDB(db)
+    master_password = st.text_input(
+        "Master Password (for encrypted profiles)",
+        type="password",
+        value=st.session_state.get("master_password", ""),
+        key="master_password_input",
+    )
+    if master_password:
+        st.session_state["master_password"] = master_password
+    mgr = None
+    if master_password:
+        try:
+            mgr = MultiAccountManager(master_password)
+        except Exception as exc:
+            st.warning(f"Encrypted profile manager unavailable: {exc}")
+
     st.markdown("#### 👤 Account Profiles")
     profiles = profile_db.get_profiles()
     active = profile_db.get_active_profile()
@@ -4309,7 +4368,18 @@ def render_account_switcher(db: TradeDB) -> None:
         new_totp = st.text_input("TOTP Secret (optional)", type="password", key="new_totp")
         if st.button("Save Profile", key="save_profile_btn"):
             if new_name and new_key:
-                profile_db.save_profile(new_name, new_key, new_totp, api_secret=new_secret)
+                if mgr:
+                    mgr.add_profile(
+                        AccountProfile(
+                            profile_id="",
+                            display_name=new_name,
+                            api_key=new_key,
+                            api_secret=new_secret,
+                            totp_secret=new_totp,
+                        )
+                    )
+                else:
+                    profile_db.save_profile(new_name, new_key, new_totp, api_secret=new_secret)
                 if not active:
                     profile_db.set_active(new_name)
                 st.success(f"Profile '{new_name}' saved.")
