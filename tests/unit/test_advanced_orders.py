@@ -2,8 +2,6 @@ import sys
 import types
 from unittest.mock import Mock
 
-import pytest
-
 fake_mod = types.ModuleType("breeze_connect")
 fake_mod.BreezeConnect = object
 sys.modules.setdefault("breeze_connect", fake_mod)

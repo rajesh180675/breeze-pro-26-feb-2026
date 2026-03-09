@@ -20,8 +20,10 @@ class _Norm:
 
 stats_mod.norm = _Norm()
 
+
 def _brentq(func, a, b, *args, **kwargs):
     return (a + b) / 2
+
 
 opt_mod.brentq = _brentq
 scipy_mod.stats = stats_mod

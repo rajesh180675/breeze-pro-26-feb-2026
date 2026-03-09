@@ -1,0 +1,30 @@
+[tool.ruff]
+line-length = 120
+# Exclude legacy root-level Streamlit files from ruff checks;
+# they are not part of the production app/ package and are too large to lint-fix safely.
+exclude = [
+    "app.py",
+    "analytics.py",
+    "breeze_api.py",
+    "helpers.py",
+    "session_manager.py",
+    "live_feed.py",
+    "gtt_manager.py",
+    "holiday_calendar.py",
+    "persistence.py",
+    "risk_monitor.py",
+    "strategies.py",
+    "ta_indicators.py",
+    "futures.py",
+    "historical.py",
+    "alerting.py",
+    "charts.py",
+    "paper_trading.py",
+    "basket_orders.py",
+    "validators.py",
+    "app_config.py",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["E402"]
+"tests/conftest.py" = ["E402"]
