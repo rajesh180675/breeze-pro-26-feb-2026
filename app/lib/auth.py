@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Protocol
 
-from lib.errors import AuthenticationError
+from app.lib.errors import AuthenticationError
 
 
 @dataclass
@@ -17,12 +17,13 @@ class TokenRecord:
     """Token value and expiry metadata."""
 
     access_token: str
+    issued_at: datetime
     expires_at: datetime
 
     @property
     def refresh_at(self) -> datetime:
-        lifetime = self.expires_at - datetime.now(tz=timezone.utc)
-        return datetime.now(tz=timezone.utc) + lifetime * 0.9
+        lifetime = self.expires_at - self.issued_at
+        return self.issued_at + lifetime * 0.9
 
     def is_expired(self) -> bool:
         return datetime.now(tz=timezone.utc) >= self.expires_at
@@ -62,15 +63,25 @@ class FileTokenStore:
         if not self.path.exists():
             return None
         raw = json.loads(self.path.read_text(encoding="utf-8"))
+        expires_at = datetime.fromisoformat(raw["expires_at"])
+        issued_at_raw = raw.get("issued_at")
+        issued_at = datetime.fromisoformat(issued_at_raw) if issued_at_raw else (expires_at - timedelta(hours=24))
         return TokenRecord(
             access_token=raw["access_token"],
-            expires_at=datetime.fromisoformat(raw["expires_at"]),
+            issued_at=issued_at,
+            expires_at=expires_at,
         )
 
     def save(self, token: TokenRecord) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(
-            json.dumps({"access_token": token.access_token, "expires_at": token.expires_at.isoformat()}),
+            json.dumps(
+                {
+                    "access_token": token.access_token,
+                    "issued_at": token.issued_at.isoformat(),
+                    "expires_at": token.expires_at.isoformat(),
+                }
+            ),
             encoding="utf-8",
         )
 
@@ -90,9 +101,11 @@ class AuthManager:
 
         if not session_token:
             raise AuthenticationError("Session token missing", operation="authenticate")
+        now = datetime.now(tz=timezone.utc)
         record = TokenRecord(
             access_token=session_token,
-            expires_at=datetime.now(tz=timezone.utc) + timedelta(hours=24),
+            issued_at=now,
+            expires_at=now + timedelta(hours=24),
         )
         self.token_store.save(record)
         return record

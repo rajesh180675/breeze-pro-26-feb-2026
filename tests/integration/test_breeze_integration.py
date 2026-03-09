@@ -2,7 +2,7 @@ import os
 
 import pytest
 
-from lib.breeze_client import BreezeClient
+from app.lib.breeze_client import BreezeClient
 
 _REQUIRED_ENV_VARS = (
     "BREEZE_CLIENT_ID",

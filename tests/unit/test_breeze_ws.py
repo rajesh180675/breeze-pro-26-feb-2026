@@ -2,15 +2,15 @@ from unittest.mock import Mock
 
 import pytest
 
-from lib.breeze_ws import BreezeWebsocketClient
-from lib.errors import RateLimitError
+from app.lib.breeze_ws import BreezeWebsocketClient
+from app.lib.errors import RateLimitError
 
 
 def test_connect_retries_once_then_marks_connected(monkeypatch):
     client = Mock()
     client.ws_connect.side_effect = [RuntimeError("down"), None]
     sleeps: list[int] = []
-    monkeypatch.setattr("lib.breeze_ws.time.sleep", lambda secs: sleeps.append(secs))
+    monkeypatch.setattr("app.lib.breeze_ws.time.sleep", lambda secs: sleeps.append(secs))
 
     ws = BreezeWebsocketClient(client, max_subscriptions=3)
     ws.connect()

@@ -15,6 +15,9 @@ env/
 
 # Database (contains trade history)
 data/
+*.db
+*.sqlite
+*.sqlite3
 
 # Logs
 logs/

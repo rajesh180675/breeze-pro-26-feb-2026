@@ -7,7 +7,7 @@ import threading
 import time
 import uuid
 from collections import defaultdict, deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 
@@ -46,9 +46,9 @@ except ImportError:  # pragma: no cover
 from requests.adapters import HTTPAdapter  # type: ignore[import-untyped]
 from urllib3.util.retry import Retry
 
-from lib.auth import AuthManager, FileTokenStore, InMemoryTokenStore, TokenRecord, TokenStore
-from lib.config import Settings, get_settings
-from lib.errors import (
+from app.lib.auth import AuthManager, FileTokenStore, InMemoryTokenStore, TokenRecord, TokenStore
+from app.lib.config import Settings, get_settings
+from app.lib.errors import (
     AuthenticationError,
     BadRequestError,
     CircuitOpenError,
@@ -66,8 +66,8 @@ try:
 
     _AlertEvent = _ImportedAlertEvent
     _AlertLevel = _ImportedAlertLevel
-except Exception:  # pragma: no cover
-    pass
+except ImportError:  # pragma: no cover
+    logging.getLogger(__name__).debug("alerting_module_not_available")
 
 REQUEST_COUNTER = Counter("breeze_requests_total", "Breeze requests", ["method", "endpoint", "result"])
 REQUEST_LATENCY = Histogram("breeze_request_duration_seconds", "Breeze request duration", ["method", "endpoint"])
@@ -243,7 +243,8 @@ class BreezeClient:
             token = self.settings.breeze_session_token
             if not token:
                 raise AuthenticationError("Unable to refresh token", operation="ensure_authenticated")
-            return TokenRecord(access_token=token, expires_at=datetime.now(tz=timezone.utc).replace(hour=23, minute=59))
+            now = datetime.now(tz=timezone.utc)
+            return TokenRecord(access_token=token, issued_at=now, expires_at=now + timedelta(hours=24))
 
         self.auth_manager.ensure_fresh_token(_refresh)
 
@@ -404,7 +405,8 @@ class BreezeClient:
         for row in rows:
             try:
                 pnl += float(row.get("pnl", 0) or 0)
-            except Exception:
+            except (TypeError, ValueError, AttributeError) as exc:
+                LOGGER.warning("invalid_position_pnl_row", extra={"error": str(exc)})
                 continue
         PNL_GAUGE.set(pnl)
         return resp

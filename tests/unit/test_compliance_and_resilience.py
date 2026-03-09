@@ -16,7 +16,7 @@ if "breeze_connect" not in sys.modules:
 import app_config as C
 from breeze_api import APIResponseValidator
 from persistence import TradeDB, export_trades_for_tax
-from lib.breeze_client import CircuitBreaker, CircuitBreakerState
+from app.lib.breeze_client import CircuitBreaker, CircuitBreakerState
 
 
 def test_export_trades_for_tax_csv_and_excel(tmp_path):

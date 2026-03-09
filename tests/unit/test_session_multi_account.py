@@ -1,5 +1,5 @@
 from session_manager import MultiAccountManager, AccountProfile
-from persistence import TradeDB, AccountProfileDB
+from persistence import TradeDB
 
 
 def test_multi_account_encrypt_and_list(monkeypatch):
@@ -19,8 +19,15 @@ def test_multi_account_encrypt_and_list(monkeypatch):
 
 def test_ensure_profiles_encrypted_migrates_plaintext():
     db = TradeDB()
-    pdb = AccountProfileDB(db)
-    pdb.save_profile("legacy-plain", "plain-key", "plain-totp", api_secret="plain-secret")
+    with db._tx() as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO account_profiles
+            (profile_name, api_key, api_secret, totp_secret, broker, is_active, created_at, last_used)
+            VALUES (?, ?, ?, ?, ?, 0, datetime('now'), NULL)
+            """,
+            ("legacy-plain", "plain-key", "plain-secret", "plain-totp", "ICICI"),
+        )
     mgr = MultiAccountManager("test-master-password")
     migrated = mgr.ensure_profiles_encrypted()
     assert migrated >= 1

@@ -3,8 +3,8 @@ from unittest.mock import Mock
 import pytest
 import requests
 
-from lib.breeze_client import BreezeClient, CircuitBreakerState
-from lib.errors import (
+from app.lib.breeze_client import BreezeClient, CircuitBreakerState
+from app.lib.errors import (
     AuthenticationError,
     BadRequestError,
     CircuitOpenError,

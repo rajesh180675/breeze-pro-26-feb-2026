@@ -9,8 +9,8 @@ from collections.abc import Callable
 
 from breeze_connect import BreezeConnect
 
-from lib.config import get_settings
-from lib.errors import RateLimitError
+from app.lib.config import get_settings
+from app.lib.errors import RateLimitError
 
 LOGGER = logging.getLogger(__name__)
 
