@@ -5,7 +5,7 @@ Helpers — type conversion, API response parsing, option chain processing, form
 import pandas as pd
 import numpy as np
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 import logging
 
 import app_config as C
@@ -349,10 +349,12 @@ def add_greeks_to_chain(df: pd.DataFrame, spot_price: float, expiry_date: str) -
     except Exception:
         tte = 0.05
     greeks_list = []
+    computed_iv_values = []
     for _, row in df.iterrows():
         strike = row.get("strike_price", 0)
         ot = C.normalize_option_type(row.get("right"))
         ltp = row.get("ltp", 0)
+        iv_display_value = row.get("iv", np.nan)
         if ot in ("CE", "PE") and strike > 0 and spot_price > 0 and ltp > 0:
             try:
                 iv_raw = row.get("iv", 0)
@@ -364,15 +366,20 @@ def add_greeks_to_chain(df: pd.DataFrame, spot_price: float, expiry_date: str) -
                 # and mark the IV column as "—" for display
                 if np.isnan(iv):
                     greeks_list.append({'delta': 0, 'gamma': 0, 'theta': 0, 'vega': 0, 'rho': 0})
+                    iv_display_value = np.nan
                 else:
                     greeks_list.append(calculate_greeks(spot_price, strike, tte, iv, ot))
+                    if iv_raw <= 0:
+                        iv_display_value = iv
             except Exception:
                 greeks_list.append({'delta': 0, 'gamma': 0, 'theta': 0, 'vega': 0, 'rho': 0})
+                iv_display_value = np.nan
         else:
             greeks_list.append({'delta': 0, 'gamma': 0, 'theta': 0, 'vega': 0, 'rho': 0})
+        computed_iv_values.append(iv_display_value)
     out = pd.concat([df.reset_index(drop=True), pd.DataFrame(greeks_list)], axis=1)
-    if "iv" in out.columns:
-        out["iv"] = out["iv"].apply(lambda v: "—" if pd.isna(v) else v)
+    out["iv"] = pd.Series(computed_iv_values, index=out.index)
+    out["iv"] = out["iv"].apply(lambda v: "—" if pd.isna(v) else v)
     return out
 
 
