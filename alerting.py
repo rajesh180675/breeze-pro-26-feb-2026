@@ -56,11 +56,31 @@ class AlertConfig:
     webhook_url: str = ""
     webhook_secret: str = ""
 
+    # Task 3.5: WhatsApp via Twilio
+    whatsapp_enabled: bool = False
+    whatsapp_account_sid: str = ""
+    whatsapp_auth_token: str = ""
+    whatsapp_from: str = ""
+    whatsapp_to: str = ""
+
+    # Task 3.5: Discord webhook
+    discord_enabled: bool = False
+    discord_webhook_url: str = ""
+
+    # Task 3.5: Voice confirmation
+    voice_enabled: bool = False
+
     alert_on_fill: bool = True
     alert_on_stop_loss: bool = True
     alert_on_gtt_trigger: bool = True
     alert_on_margin_warning: bool = True
     alert_on_errors: bool = False
+
+    # Task 3.5: Alert deduplication window (seconds)
+    dedupe_window_seconds: int = 300
+
+    # Task 3.5: Custom alert template
+    custom_template: str = ""
 
 
 class TelegramDispatcher:
@@ -207,6 +227,75 @@ class WebhookDispatcher:
             return False
 
 
+# ── Task 3.5: WhatsApp Dispatcher (via Twilio) ────────────────
+
+class WhatsAppDispatcher:
+    """Send WhatsApp messages via Twilio API (Task 3.5)."""
+
+    BASE_URL = "https://api.twilio.com/2010-04-01/Accounts/{sid}/Messages.json"
+
+    def __init__(self, account_sid: str, auth_token: str, from_number: str, to_number: str, timeout: int = 15):
+        self._sid = account_sid
+        self._token = auth_token
+        self._from = from_number if from_number.startswith("whatsapp:") else f"whatsapp:{from_number}"
+        self._to = to_number if to_number.startswith("whatsapp:") else f"whatsapp:{to_number}"
+        self._timeout = timeout
+
+    def send(self, text: str) -> bool:
+        if not all([self._sid, self._token, self._from, self._to]):
+            return False
+        try:
+            url = self.BASE_URL.format(sid=self._sid)
+            resp = requests.post(
+                url,
+                data={"From": self._from, "To": self._to, "Body": text[:1600]},
+                auth=(self._sid, self._token),
+                timeout=self._timeout,
+            )
+            return resp.status_code < 300
+        except Exception as e:
+            log.error("WhatsApp dispatch error: %s", e)
+            return False
+
+    def format_alert(self, event: AlertEvent) -> str:
+        level_emoji = {"INFO": "ℹ️", "WARNING": "⚠️", "CRITICAL": "🚨"}.get(event.level.value, "📢")
+        lines = [f"{level_emoji} *{event.title}*", f"_{event.timestamp[:19]}_", "", event.body]
+        for k, v in event.metadata.items():
+            lines.append(f"• *{k}:* {v}")
+        return "\n".join(lines)
+
+
+# ── Task 3.5: Discord Dispatcher ──────────────────────────────
+
+class DiscordDispatcher:
+    """Send alerts to Discord via webhook (Task 3.5)."""
+
+    def __init__(self, webhook_url: str, timeout: int = 10):
+        self._url = webhook_url
+        self._timeout = timeout
+
+    def send(self, event: AlertEvent) -> bool:
+        if not self._url:
+            return False
+        try:
+            level_color = {"INFO": 0x0D6EFD, "WARNING": 0xFD7E14, "CRITICAL": 0xDC3545}.get(
+                event.level.value, 0x6C757D
+            )
+            embed = {
+                "title": event.title,
+                "description": event.body,
+                "color": level_color,
+                "timestamp": event.timestamp,
+                "fields": [{"name": k, "value": str(v), "inline": True} for k, v in event.metadata.items()],
+            }
+            payload = {"embeds": [embed]}
+            resp = requests.post(self._url, json=payload, timeout=self._timeout)
+            return resp.status_code < 300
+        except Exception as e:
+            log.error("Discord dispatch error: %s", e)
+            return False
+
+
 class AlertDispatcher:
     MAX_HISTORY = 500
 
@@ -214,7 +303,7 @@ class AlertDispatcher:
         self._config = config
         self._history: List[Dict] = []
         self._lock = threading.Lock()
-        self._dedupe_window_seconds = 60
+        self._dedupe_window_seconds = config.dedupe_window_seconds
         self._dedupe_cache: Dict[str, float] = {}
         self._queue: "queue.Queue[AlertEvent]" = queue.Queue(maxsize=1000)
         self._stop = threading.Event()
@@ -224,6 +313,7 @@ class AlertDispatcher:
 
     def update_config(self, config: AlertConfig) -> None:
         self._config = config
+        self._dedupe_window_seconds = config.dedupe_window_seconds
         self._rebuild_dispatchers()
 
     def _rebuild_dispatchers(self) -> None:
@@ -231,6 +321,11 @@ class AlertDispatcher:
         self._telegram = TelegramDispatcher(cfg.telegram_bot_token, cfg.telegram_chat_id) if cfg.telegram_enabled else None
         self._email = EmailDispatcher(cfg.email_smtp_host, cfg.email_smtp_port, cfg.email_username, cfg.email_password, cfg.email_to) if cfg.email_enabled else None
         self._webhook = WebhookDispatcher(cfg.webhook_url, cfg.webhook_secret) if cfg.webhook_enabled else None
+        # Task 3.5: WhatsApp & Discord
+        self._whatsapp = WhatsAppDispatcher(
+            cfg.whatsapp_account_sid, cfg.whatsapp_auth_token, cfg.whatsapp_from, cfg.whatsapp_to
+        ) if cfg.whatsapp_enabled else None
+        self._discord = DiscordDispatcher(cfg.discord_webhook_url) if cfg.discord_enabled else None
 
     def _event_key(self, event: AlertEvent) -> str:
         blob = json.dumps(
@@ -283,16 +378,36 @@ class AlertDispatcher:
             self._email.send(subject, html)
         if self._webhook:
             self._webhook.send(event)
+        # Task 3.5: WhatsApp & Discord
+        if self._whatsapp:
+            self._whatsapp.send(self._whatsapp.format_alert(event))
+        if self._discord:
+            self._discord.send(event)
 
-    def get_history(self, limit: int = 50) -> List[Dict]:
+    def get_history(self, limit: int = 100) -> List[Dict]:
         with self._lock:
             return list(reversed(self._history[-limit:]))
 
     def test_telegram(self) -> bool:
-        return bool(self._telegram and self._telegram.send("✅ Breeze PRO: Telegram alerts are working correctly."))
+        return bool(self._telegram and self._telegram.send("Breeze PRO: Telegram alerts are working correctly."))
 
     def test_email(self) -> bool:
-        return bool(self._email and self._email.send("[Breeze PRO] Alert Test", "<p>✅ Email alerts are configured correctly.</p>"))
+        return bool(self._email and self._email.send("[Breeze PRO] Alert Test", "<p>Email alerts are configured correctly.</p>"))
+
+    def test_whatsapp(self) -> bool:
+        """Test WhatsApp alert delivery (Task 3.5)."""
+        return bool(self._whatsapp and self._whatsapp.send("Breeze PRO: WhatsApp alerts are working correctly."))
+
+    def test_discord(self) -> bool:
+        """Test Discord alert delivery (Task 3.5)."""
+        if not self._discord:
+            return False
+        test_event = AlertEvent(
+            alert_type="TEST", level=AlertLevel.INFO,
+            title="Breeze PRO: Discord Test",
+            body="Discord alerts are configured correctly.",
+        )
+        return self._discord.send(test_event)
 
 
 def create_fill_alert(stock_code: str, exchange: str, action: str, quantity: int, price: float, order_id: str) -> AlertEvent:

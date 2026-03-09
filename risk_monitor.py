@@ -1,6 +1,7 @@
 """
 Enhanced Risk Monitor — per-position stops + portfolio-level limits.
 Background daemon thread with thread-safe alert queue.
+Includes SmartStopManager (Task 2.4) for intelligent auto-stop placement.
 """
 
 import threading
@@ -11,7 +12,10 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, field
 
+import pytz
+
 log = logging.getLogger(__name__)
+IST = pytz.timezone("Asia/Kolkata")
 
 
 @dataclass
@@ -337,3 +341,194 @@ class RiskMonitor:
                     message=f"ℹ️ Expiry Tomorrow: {pos.stock_code} {pos.strike} {pos.option_type}",
                     position_id=pos.position_id, data={"dte": 1}
                 ))
+
+
+# ═══════════════════════════════════════════════════════════════
+# TASK 2.4 — INTELLIGENT AUTO-STOP SYSTEM (SmartStopManager)
+# ═══════════════════════════════════════════════════════════════
+
+
+@dataclass
+class SmartStopConfig:
+    """Configuration for intelligent stop placement."""
+    short_stop_multiplier: float = 2.0
+    long_stop_multiplier: float = 0.5
+    trail_lock_pct: float = 0.30
+    time_based_close_hour: int = 15
+    time_based_close_minute: int = 15
+    max_portfolio_loss: float = 50000.0
+
+
+class SmartStopManager:
+    """Per-position intelligent stop placement engine (Task 2.4).
+
+    ALGORITHM:
+    1. SHORT positions: initial stop at avg_price × (1 + stop_multiplier)
+       - Default stop_multiplier = 2.0 (100% loss = stop)
+       - Trail: if position moves in favour, raise stop to lock in premium × trail_lock_pct
+    2. LONG positions: initial stop at avg_price × (1 - stop_multiplier)
+       - Default stop_multiplier = 0.5 (50% loss = stop)
+    3. TIME-BASED STOP: For short options on expiry day, auto-close if:
+       - Time > 15:15 IST AND position still open
+    4. PORTFOLIO STOP: If total portfolio loss > max_portfolio_loss, trigger ALL stops
+    """
+
+    def __init__(self, config: Optional[SmartStopConfig] = None) -> None:
+        self._config = config or SmartStopConfig()
+        self._active_stops: Dict[str, Dict[str, Any]] = {}
+        self._lock = threading.RLock()
+        log.info("SmartStopManager initialised with config: %s", self._config)
+
+    @property
+    def config(self) -> SmartStopConfig:
+        return self._config
+
+    def update_config(self, config: SmartStopConfig) -> None:
+        """Update the smart stop configuration."""
+        self._config = config
+        log.info("SmartStopManager config updated: %s", config)
+
+    def compute_initial_stop(self, pos: MonitoredPosition) -> float:
+        """Compute the initial stop-loss price for a position."""
+        if pos.position_type == "short":
+            return round(pos.avg_price * (1 + self._config.short_stop_multiplier), 2)
+        return round(pos.avg_price * (1 - self._config.long_stop_multiplier), 2)
+
+    def register_position(self, pos: MonitoredPosition) -> None:
+        """Register a position for smart stop monitoring."""
+        stop_price = self.compute_initial_stop(pos)
+        with self._lock:
+            self._active_stops[pos.position_id] = {
+                "initial_stop": stop_price,
+                "current_stop": stop_price,
+                "high_water": pos.avg_price,
+                "low_water": pos.avg_price,
+                "trail_active": False,
+            }
+        log.info("SmartStop registered %s: stop=%.2f", pos.position_id, stop_price)
+
+    def unregister_position(self, position_id: str) -> None:
+        """Remove a position from smart stop monitoring."""
+        with self._lock:
+            self._active_stops.pop(position_id, None)
+
+    def evaluate(self, pos: MonitoredPosition, portfolio_pnl: float) -> List[Alert]:
+        """Evaluate smart stop conditions for a single position.
+
+        Returns list of alerts if any conditions are triggered.
+        """
+        alerts: List[Alert] = []
+        now = datetime.now(IST)
+        now_str = now.strftime("%H:%M:%S")
+
+        with self._lock:
+            stop_info = self._active_stops.get(pos.position_id)
+            if not stop_info:
+                self.register_position(pos)
+                stop_info = self._active_stops[pos.position_id]
+
+        if pos.current_price <= 0:
+            return alerts
+
+        # 1. Update high/low watermarks and trailing stop for SHORT positions
+        if pos.position_type == "short":
+            with self._lock:
+                if pos.current_price < stop_info["low_water"]:
+                    stop_info["low_water"] = pos.current_price
+                    # Trail: lock in some profit when price drops in our favour
+                    profit_per_unit = pos.avg_price - pos.current_price
+                    if profit_per_unit > 0:
+                        locked = pos.avg_price - profit_per_unit * self._config.trail_lock_pct
+                        new_stop = locked * (1 + self._config.short_stop_multiplier * 0.5)
+                        if new_stop < stop_info["current_stop"]:
+                            stop_info["current_stop"] = round(new_stop, 2)
+                            stop_info["trail_active"] = True
+
+                # Check stop
+                if pos.current_price >= stop_info["current_stop"]:
+                    pos.stop_triggered = True
+                    alerts.append(Alert(
+                        timestamp=now_str, level="CRITICAL", category="STOP_LOSS",
+                        message=(
+                            f"🚨 SMART STOP: {pos.stock_code} {pos.strike} {pos.option_type} — "
+                            f"price ₹{pos.current_price:.2f} hit stop ₹{stop_info['current_stop']:.2f}. "
+                            f"Avg: ₹{pos.avg_price:.2f}"
+                        ),
+                        position_id=pos.position_id,
+                        data={"current": pos.current_price, "stop": stop_info["current_stop"],
+                              "avg": pos.avg_price, "type": "smart_stop_short"},
+                    ))
+
+        # 2. LONG positions stop check
+        elif pos.position_type == "long":
+            with self._lock:
+                if pos.current_price > stop_info["high_water"]:
+                    stop_info["high_water"] = pos.current_price
+
+                if pos.current_price <= stop_info["current_stop"]:
+                    pos.stop_triggered = True
+                    alerts.append(Alert(
+                        timestamp=now_str, level="CRITICAL", category="STOP_LOSS",
+                        message=(
+                            f"🚨 SMART STOP: {pos.stock_code} {pos.strike} {pos.option_type} — "
+                            f"price ₹{pos.current_price:.2f} hit stop ₹{stop_info['current_stop']:.2f}. "
+                            f"Avg: ₹{pos.avg_price:.2f}"
+                        ),
+                        position_id=pos.position_id,
+                        data={"current": pos.current_price, "stop": stop_info["current_stop"],
+                              "avg": pos.avg_price, "type": "smart_stop_long"},
+                    ))
+
+        # 3. TIME-BASED STOP: auto-close short options on expiry day after 15:15 IST
+        if pos.position_type == "short" and not pos.stop_triggered:
+            from helpers import calculate_days_to_expiry
+            dte = calculate_days_to_expiry(pos.expiry)
+            if dte == 0:
+                close_time_hour = self._config.time_based_close_hour
+                close_time_minute = self._config.time_based_close_minute
+                if now.hour > close_time_hour or (now.hour == close_time_hour and now.minute >= close_time_minute):
+                    pos.stop_triggered = True
+                    alerts.append(Alert(
+                        timestamp=now_str, level="CRITICAL", category="EXPIRY",
+                        message=(
+                            f"⏰ TIME STOP: {pos.stock_code} {pos.strike} {pos.option_type} — "
+                            f"Expiry day auto-close triggered at {now.strftime('%H:%M')} IST"
+                        ),
+                        position_id=pos.position_id,
+                        data={"type": "time_based_stop", "dte": 0},
+                    ))
+
+        # 4. PORTFOLIO STOP: if total loss exceeds max_portfolio_loss
+        if portfolio_pnl < -abs(self._config.max_portfolio_loss) and not pos.stop_triggered:
+            pos.stop_triggered = True
+            alerts.append(Alert(
+                timestamp=now_str, level="CRITICAL", category="PORTFOLIO",
+                message=(
+                    f"🚨 PORTFOLIO STOP: {pos.stock_code} {pos.strike} {pos.option_type} — "
+                    f"total P&L ₹{portfolio_pnl:,.0f} exceeded limit ₹{-self._config.max_portfolio_loss:,.0f}"
+                ),
+                position_id=pos.position_id,
+                data={"type": "portfolio_stop", "pnl": portfolio_pnl},
+            ))
+
+        return alerts
+
+    def get_stop_status(self) -> List[Dict[str, Any]]:
+        """Return current smart stop status for all registered positions."""
+        with self._lock:
+            return [
+                {
+                    "position_id": pid,
+                    "initial_stop": info["initial_stop"],
+                    "current_stop": info["current_stop"],
+                    "high_water": info["high_water"],
+                    "low_water": info["low_water"],
+                    "trail_active": info["trail_active"],
+                }
+                for pid, info in self._active_stops.items()
+            ]
+
+    def reset(self) -> None:
+        """Clear all active stops."""
+        with self._lock:
+            self._active_stops.clear()

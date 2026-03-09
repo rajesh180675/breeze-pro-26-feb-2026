@@ -145,6 +145,37 @@ PREDEFINED_STRATEGIES: Dict[str, Dict[str, Any]] = {
     },
 }
 
+    # ── Multi-Expiry (Task 2.5) ─────────────────────────────────
+    "Calendar Spread CE": {
+        "description": "Buy far-month ATM call + sell near-month ATM call. Profit from time decay differential.",
+        "legs": [{"offset": 0, "type": "CE", "action": "sell", "label": "Near CE", "expiry_offset": 0},
+                 {"offset": 0, "type": "CE", "action": "buy", "label": "Far CE", "expiry_offset": 1}],
+        "view": "Neutral", "risk": "Limited", "reward": "Limited",
+        "category": "Calendar", "complexity": "Advanced", "multi_expiry": True,
+    },
+    "Calendar Spread PE": {
+        "description": "Buy far-month ATM put + sell near-month ATM put. Neutral strategy with time decay edge.",
+        "legs": [{"offset": 0, "type": "PE", "action": "sell", "label": "Near PE", "expiry_offset": 0},
+                 {"offset": 0, "type": "PE", "action": "buy", "label": "Far PE", "expiry_offset": 1}],
+        "view": "Neutral", "risk": "Limited", "reward": "Limited",
+        "category": "Calendar", "complexity": "Advanced", "multi_expiry": True,
+    },
+    "Diagonal Spread Bull": {
+        "description": "Buy far-month lower call + sell near-month higher call. Bullish diagonal with time decay.",
+        "legs": [{"offset": -1, "type": "CE", "action": "buy", "label": "Far ITM CE", "expiry_offset": 1},
+                 {"offset": 1, "type": "CE", "action": "sell", "label": "Near OTM CE", "expiry_offset": 0}],
+        "view": "Bullish", "risk": "Limited", "reward": "Limited",
+        "category": "Calendar", "complexity": "Advanced", "multi_expiry": True,
+    },
+    "Diagonal Spread Bear": {
+        "description": "Buy far-month higher put + sell near-month lower put. Bearish diagonal with time decay.",
+        "legs": [{"offset": 1, "type": "PE", "action": "buy", "label": "Far ITM PE", "expiry_offset": 1},
+                 {"offset": -1, "type": "PE", "action": "sell", "label": "Near OTM PE", "expiry_offset": 0}],
+        "view": "Bearish", "risk": "Limited", "reward": "Limited",
+        "category": "Calendar", "complexity": "Advanced", "multi_expiry": True,
+    },
+}
+
 STRATEGY_CATEGORIES = sorted(set(v["category"] for v in PREDEFINED_STRATEGIES.values()))
 STRATEGY_COMPLEXITIES = ["Beginner", "Intermediate", "Advanced"]
 
@@ -164,27 +195,38 @@ def _snap_to_nearest_strike(target: int, available_strikes: Optional[set]) -> in
 def generate_strategy_legs(strategy_name: str, atm_strike: int,
                            strike_gap: int, lot_size: int,
                            lots: int = 1,
-                           available_strikes: Optional[set] = None) -> List[StrategyLeg]:
+                           available_strikes: Optional[set] = None,
+                           expiry: str = "",
+                           extra_expiries: Optional[List[str]] = None) -> List[StrategyLeg]:
     """Generate legs for a predefined strategy.
 
     If *available_strikes* is provided, each computed strike is snapped to
     the nearest real strike in the set (Task 1.5).
+
+    For multi-expiry strategies (Task 2.5), *extra_expiries* provides a list
+    of available expiry dates sorted by date.  Each leg's ``expiry_offset``
+    indexes into [expiry] + extra_expiries.
     """
     strat = PREDEFINED_STRATEGIES.get(strategy_name)
     if not strat:
         raise ValueError(f"Unknown strategy: {strategy_name}")
     qty = lots * lot_size
     legs = []
+    all_expiries = [expiry] + (extra_expiries or [])
     for leg in strat["legs"]:
         multiplier = leg.get("multiplier", 1)
         raw_strike = atm_strike + leg["offset"] * strike_gap
         strike = _snap_to_nearest_strike(raw_strike, available_strikes)
+        # Multi-expiry support (Task 2.5)
+        expiry_offset = leg.get("expiry_offset", 0)
+        leg_expiry = all_expiries[min(expiry_offset, len(all_expiries) - 1)] if all_expiries else expiry
         legs.append(StrategyLeg(
             strike=strike,
             option_type=leg["type"],
             action=leg["action"],
             quantity=qty * multiplier,
-            label=leg.get("label", "")
+            label=leg.get("label", ""),
+            expiry=leg_expiry,
         ))
     return legs
 

@@ -20,6 +20,82 @@ log = logging.getLogger(__name__)
 
 DB_PATH = Path("data/breeze_trader.db")
 
+# ── Task 4.3: Database Migration Framework ────────────────────
+SCHEMA_VERSION = 5
+
+
+class DBMigrator:
+    """Incremental schema migration runner (Task 4.3).
+
+    Each migration is keyed by version number.  ``run()`` applies only
+    migrations whose version is greater than the current stored version.
+    """
+
+    MIGRATIONS: Dict[int, str] = {
+        1: "ALTER TABLE trades ADD COLUMN notes TEXT",
+        2: "CREATE INDEX IF NOT EXISTS idx_trades_date ON trades(date)",
+        3: (
+            "CREATE TABLE IF NOT EXISTS market_regime_log ("
+            "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "  timestamp TEXT NOT NULL,"
+            "  regime TEXT NOT NULL,"
+            "  confidence REAL DEFAULT 0,"
+            "  signals_json TEXT"
+            ")"
+        ),
+        4: "ALTER TABLE alerts_log ADD COLUMN dispatched_channels TEXT",
+        5: "CREATE INDEX IF NOT EXISTS idx_watchlist_symbol ON watchlist(symbol)",
+    }
+
+    @staticmethod
+    def _ensure_version_table(conn: sqlite3.Connection) -> None:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS schema_version "
+            "(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+        )
+
+    @staticmethod
+    def _get_version(conn: sqlite3.Connection) -> int:
+        try:
+            row = conn.execute(
+                "SELECT MAX(version) as v FROM schema_version"
+            ).fetchone()
+            return int(row[0]) if row and row[0] is not None else 0
+        except sqlite3.OperationalError:
+            return 0
+
+    @staticmethod
+    def _set_version(conn: sqlite3.Connection, version: int) -> None:
+        conn.execute(
+            "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, ?)",
+            (version, datetime.now().isoformat()),
+        )
+
+    def run(self, conn: sqlite3.Connection) -> int:
+        """Apply pending migrations.  Returns count of migrations applied."""
+        self._ensure_version_table(conn)
+        current = self._get_version(conn)
+        applied = 0
+        for ver in sorted(self.MIGRATIONS.keys()):
+            if ver > current:
+                sql = self.MIGRATIONS[ver]
+                try:
+                    conn.execute(sql)
+                    self._set_version(conn, ver)
+                    applied += 1
+                    log.info("Applied migration v%d", ver)
+                except sqlite3.OperationalError as exc:
+                    # Column/index may already exist from initial schema
+                    if "duplicate column" in str(exc).lower() or "already exists" in str(exc).lower():
+                        self._set_version(conn, ver)
+                        log.info("Migration v%d skipped (already applied): %s", ver, exc)
+                    else:
+                        log.error("Migration v%d failed: %s", ver, exc)
+                        raise
+        if applied:
+            conn.commit()
+        return applied
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS trades (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -109,11 +185,29 @@ CREATE TABLE IF NOT EXISTS account_profiles (
     created_at TEXT NOT NULL,
     last_used TEXT
 );
+CREATE TABLE IF NOT EXISTS basket_templates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    instrument TEXT NOT NULL,
+    strategy_type TEXT NOT NULL,
+    legs_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    last_used TEXT,
+    use_count INTEGER DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS market_regime_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    regime TEXT NOT NULL,
+    confidence REAL DEFAULT 0,
+    signals_json TEXT
+);
 CREATE INDEX IF NOT EXISTS idx_trades_ts ON trades(timestamp);
 CREATE INDEX IF NOT EXISTS idx_trades_date ON trades(date);
 CREATE INDEX IF NOT EXISTS idx_activity_ts ON activity_log(timestamp);
 CREATE INDEX IF NOT EXISTS idx_pnl_date ON pnl_history(date);
 CREATE INDEX IF NOT EXISTS idx_alerts_ts ON alerts_log(timestamp);
+CREATE INDEX IF NOT EXISTS idx_watchlist_symbol ON watchlist(symbol);
 """
 
 
@@ -155,6 +249,14 @@ class TradeDB:
         conn = self._get_conn()
         conn.executescript(SCHEMA)
         conn.commit()
+        # Task 4.3: Run incremental migrations after base schema
+        try:
+            migrator = DBMigrator()
+            applied = migrator.run(conn)
+            if applied:
+                log.info("DBMigrator applied %d migration(s)", applied)
+        except Exception as exc:
+            log.error("DBMigrator failed: %s", exc)
 
     @contextmanager
     def _tx(self):
@@ -466,6 +568,89 @@ class TradeDB:
             conn.execute("VACUUM")
         except Exception:
             pass
+
+
+# ── Innovation 3: Basket Order Templates ───────────────────────
+
+class BasketTemplateDB:
+    """Persist and retrieve basket order templates (Innovation 3)."""
+
+    def __init__(self, db: "TradeDB"):
+        self._db = db
+
+    def save_template(
+        self,
+        name: str,
+        instrument: str,
+        strategy_type: str,
+        legs_json: str,
+    ) -> bool:
+        """Save or update a basket template."""
+        try:
+            with self._db._tx() as conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO basket_templates "
+                    "(name, instrument, strategy_type, legs_json, created_at, "
+                    " last_used, use_count) "
+                    "VALUES (?, ?, ?, ?, "
+                    "  COALESCE((SELECT created_at FROM basket_templates WHERE name=?), ?), "
+                    "  (SELECT last_used FROM basket_templates WHERE name=?), "
+                    "  COALESCE((SELECT use_count FROM basket_templates WHERE name=?), 0))",
+                    (
+                        name, instrument, strategy_type, legs_json,
+                        name, datetime.now().isoformat(),
+                        name, name,
+                    ),
+                )
+            return True
+        except Exception as e:
+            log.error("save_template failed: %s", e)
+            return False
+
+    def get_templates(self, instrument: str = "") -> List[Dict]:
+        """List saved basket templates, optionally filtered by instrument."""
+        try:
+            conn = self._db._get_conn()
+            if instrument:
+                rows = conn.execute(
+                    "SELECT * FROM basket_templates WHERE instrument=? ORDER BY last_used DESC",
+                    (instrument,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM basket_templates ORDER BY last_used DESC"
+                ).fetchall()
+            return [dict(r) for r in rows]
+        except Exception:
+            return []
+
+    def get_template(self, name: str) -> Optional[Dict]:
+        try:
+            row = self._db._get_conn().execute(
+                "SELECT * FROM basket_templates WHERE name=?", (name,)
+            ).fetchone()
+            return dict(row) if row else None
+        except Exception:
+            return None
+
+    def use_template(self, name: str) -> None:
+        """Mark template as used (update last_used + increment use_count)."""
+        try:
+            with self._db._tx() as conn:
+                conn.execute(
+                    "UPDATE basket_templates SET last_used=?, use_count=use_count+1 WHERE name=?",
+                    (datetime.now().isoformat(), name),
+                )
+        except Exception as e:
+            log.error("use_template failed: %s", e)
+
+    def delete_template(self, name: str) -> bool:
+        try:
+            with self._db._tx() as conn:
+                conn.execute("DELETE FROM basket_templates WHERE name=?", (name,))
+            return True
+        except Exception:
+            return False
 
 
 class AccountProfileDB:
