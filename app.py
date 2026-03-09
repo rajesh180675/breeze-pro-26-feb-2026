@@ -469,6 +469,19 @@ def auto_subscribe_option_chain(
     return token_map
 
 
+def cleanup_option_chain_ws_subscriptions() -> None:
+    mgr = lf.get_live_feed_manager()
+    tick_store = lf.get_tick_store()
+    ws_keys = [k for k in st.session_state.keys() if str(k).startswith("oc_ws_tokens_")]
+    for key in ws_keys:
+        tokens = st.session_state.get(key, []) or []
+        if mgr:
+            for tok in tokens:
+                mgr.unsubscribe_quote(tok)
+        tick_store.clear_tokens(tokens)
+        st.session_state.pop(key, None)
+
+
 def get_client():
     c = SessionState.get_client()
     if not c or not c.is_connected():
@@ -920,6 +933,8 @@ def render_sidebar():
             label_visibility="collapsed", key="nav"
         )
         if sel != cur:
+            if cur == "⛓️ Option Chain" and sel != "⛓️ Option Chain":
+                cleanup_option_chain_ws_subscriptions()
             SessionState.navigate_to(sel)
             st.rerun()
 
@@ -1072,6 +1087,7 @@ def _render_login_form(has_secrets: bool):
 
 
 def _cleanup_session():
+    cleanup_option_chain_ws_subscriptions()
     mgr = lf.get_live_feed_manager()
     if mgr is not None:
         mgr.disconnect()
