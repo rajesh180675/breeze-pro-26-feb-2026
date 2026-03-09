@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass
 import threading
+import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 import hashlib
@@ -145,6 +146,7 @@ class SessionState:
         "selected_instrument": "NIFTY", "api_key": "", "api_secret": "",
         "session_token": "", "login_time": None, "user_name": "", "user_id": "",
         "debug_mode": False, "activity_log": [], "_order_in_progress": False,
+        "master_password": os.getenv("BREEZE_MASTER_PASSWORD", ""),
     }
 
     @staticmethod
@@ -268,6 +270,38 @@ class MultiAccountManager:
         if not value:
             return ""
         return self._fernet.decrypt(value.encode("utf-8")).decode("utf-8")
+
+    @staticmethod
+    def _looks_encrypted(value: str) -> bool:
+        return bool(value) and str(value).startswith("gAAAA")
+
+    def ensure_profiles_encrypted(self) -> int:
+        """
+        Migrate legacy plaintext profile fields to Fernet-encrypted values.
+        Returns number of migrated profiles.
+        """
+        migrated = 0
+        for row in self._profile_db.get_profiles():
+            name = row.get("profile_name", "")
+            api_key = row.get("api_key", "") or ""
+            api_secret = row.get("api_secret", "") or ""
+            totp_secret = row.get("totp_secret", "") or ""
+            needs = (
+                (api_key and not self._looks_encrypted(api_key))
+                or (api_secret and not self._looks_encrypted(api_secret))
+                or (totp_secret and not self._looks_encrypted(totp_secret))
+            )
+            if not needs:
+                continue
+            self._profile_db.save_profile(
+                profile_name=name,
+                api_key=self._enc(api_key),
+                api_secret=self._enc(api_secret),
+                totp_secret=self._enc(totp_secret),
+                broker=row.get("broker", "ICICI"),
+            )
+            migrated += 1
+        return migrated
 
     def list_profiles(self) -> List[AccountProfile]:
         out: List[AccountProfile] = []

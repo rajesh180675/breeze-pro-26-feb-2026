@@ -944,7 +944,7 @@ def render_sidebar():
             profile_db = AccountProfileDB(_db)
             profiles = profile_db.get_profiles()
             active_profile = profile_db.get_active_profile()
-            if profiles:
+            if profiles and st.session_state.get("master_password"):
                 opts = [p["profile_name"] for p in profiles]
                 def _fmt_profile(name: str) -> str:
                     rec = next((p for p in profiles if p["profile_name"] == name), {})
@@ -957,6 +957,8 @@ def render_sidebar():
                     _cleanup_session()
                     st.success(f"Switched to {selected_profile}. Please login again.")
                     st.rerun()
+            elif profiles:
+                st.caption("Set master password in Settings to enable account switching.")
 
             # Status
             ms = C.get_market_status()
@@ -1074,8 +1076,7 @@ def _render_login_form(has_secrets: bool):
                     s = decrypted_active.api_secret or s
                     st.session_state["totp_secret"] = decrypted_active.totp_secret or st.session_state.get("totp_secret", "")
                 else:
-                    k = active_profile.get("api_key", "")
-                    st.session_state["totp_secret"] = active_profile.get("totp_secret", st.session_state.get("totp_secret", ""))
+                    st.warning("Active profile is encrypted. Enter master password in Settings to decrypt.")
             nk = st.text_input("API Key", value=k, type="password")
             ns = st.text_input("API Secret", value=s, type="password")
             tok = st.text_input("Session Token (optional if TOTP secret set)", type="password")
@@ -1569,12 +1570,13 @@ def page_option_chain():
     spot_for_greeks = atm if atm > 0 else (ddf["strike_price"].median() if "strike_price" in ddf.columns else 0)
 
     if quote_mode == "🔴 Live WS" and not ddf.empty and token_map:
-        try:
+        def _apply_live_prices(frame: pd.DataFrame) -> pd.DataFrame:
+            out = frame.copy()
             resolver = lf.get_token_resolver(client.breeze)
             tick_store = lf.get_tick_store()
             cfg_obj = C.get_instrument(inst)
             live_prices = []
-            for _, row in ddf.iterrows():
+            for _, row in out.iterrows():
                 strike = safe_float(row.get("strike_price", 0))
                 right = str(row.get("right", "")).lower()
                 right_key = "call" if "call" in right or "ce" in right else "put"
@@ -1582,8 +1584,12 @@ def page_option_chain():
                 token = token_map.get(key)
                 live_ltp = tick_store.get_latest_ltp(token) if token else None
                 live_prices.append(live_ltp)
-            if live_prices:
-                ddf["ltp"] = [lp if lp is not None and lp > 0 else old for lp, old in zip(live_prices, ddf["ltp"])]
+            if live_prices and "ltp" in out.columns:
+                out["ltp"] = [lp if lp is not None and lp > 0 else old for lp, old in zip(live_prices, out["ltp"])]
+            return out
+
+        try:
+            ddf = _apply_live_prices(ddf)
         except Exception as exc:
             log.debug(f"Live WS quote overlay failed: {exc}")
 
@@ -1616,6 +1622,20 @@ def page_option_chain():
     ddf_display = ddf.copy()
     if "iv" in ddf_display.columns:
         ddf_display["iv"] = ddf_display["iv"].apply(lambda v: "—" if pd.isna(v) else v)
+    if quote_mode == "🔴 Live WS" and token_map and view != "IV Smile":
+        stream_live = st.toggle("In-place Live Stream", value=False, key="oc_live_stream")
+        if stream_live:
+            cycles = st.slider("Stream Cycles", 5, 40, 10, key="oc_live_cycles")
+            placeholder = st.empty()
+            for _ in range(cycles):
+                try:
+                    stream_df = _apply_live_prices(ddf)
+                    with placeholder.container():
+                        st.dataframe(stream_df, height=400, hide_index=True, use_container_width=True)
+                    time.sleep(0.7)
+                except Exception as exc:
+                    log.debug(f"Live stream frame failed: {exc}")
+                    break
 
     if view == "Traditional":
         pv = create_pivot_table(ddf_display)
@@ -4349,8 +4369,13 @@ def render_account_switcher(db: TradeDB) -> None:
     if master_password:
         try:
             mgr = MultiAccountManager(master_password)
+            migrated = mgr.ensure_profiles_encrypted()
+            if migrated:
+                st.success(f"Migrated {migrated} legacy plaintext profile(s) to encrypted storage.")
         except Exception as exc:
             st.warning(f"Encrypted profile manager unavailable: {exc}")
+    else:
+        st.info("Master password is required for encrypted account profile access.")
 
     st.markdown("#### 👤 Account Profiles")
     profiles = profile_db.get_profiles()
@@ -4384,18 +4409,18 @@ def render_account_switcher(db: TradeDB) -> None:
         new_totp = st.text_input("TOTP Secret (optional)", type="password", key="new_totp")
         if st.button("Save Profile", key="save_profile_btn"):
             if new_name and new_key:
-                if mgr:
-                    mgr.add_profile(
-                        AccountProfile(
-                            profile_id="",
-                            display_name=new_name,
-                            api_key=new_key,
-                            api_secret=new_secret,
-                            totp_secret=new_totp,
-                        )
+                if not mgr:
+                    st.error("Master password required. Profile not saved.")
+                    return
+                mgr.add_profile(
+                    AccountProfile(
+                        profile_id="",
+                        display_name=new_name,
+                        api_key=new_key,
+                        api_secret=new_secret,
+                        totp_secret=new_totp,
                     )
-                else:
-                    profile_db.save_profile(new_name, new_key, new_totp, api_secret=new_secret)
+                )
                 if not active:
                     profile_db.set_active(new_name)
                 st.success(f"Profile '{new_name}' saved.")

@@ -32,7 +32,7 @@ def test_webhook_signature_matches_hmac_sha256():
     assert got == expected
 
 
-def test_dispatch_is_async_and_deduplicates_within_60s(monkeypatch):
+def test_dispatch_is_async_and_deduplicates_within_5m(monkeypatch):
     d = AlertDispatcher(AlertConfig())
     tg = _DummyDispatcher()
     d._telegram = tg
@@ -53,6 +53,14 @@ def test_dispatch_is_async_and_deduplicates_within_60s(monkeypatch):
     d.dispatch(event)
     time.sleep(0.02)
     assert tg.calls == first_calls
+
+
+def test_webhook_verify_signature():
+    wh = WebhookDispatcher(url="https://example.com/hook", secret="secret")
+    raw = '{"a":1}'
+    sig = hmac.new(b"secret", raw.encode(), hashlib.sha256).hexdigest()
+    assert wh.verify_signature(raw, sig) is True
+    assert wh.verify_signature(raw, "bad-signature") is False
 
 
 def test_webhook_payload_contains_all_event_fields():
