@@ -47,6 +47,7 @@ def test_render_candlestick_full_options():
     names = [trace.name for trace in fig.data]
     assert "Price" in names
     assert "Volume" in names
+    assert fig.layout.xaxis.tickformat == "%d %b %H:%M"
 
 
 def test_render_technical_subplots():

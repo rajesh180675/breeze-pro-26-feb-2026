@@ -8,11 +8,13 @@ import logging
 import threading
 import time
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from typing import Dict, List, Optional
 
 import pandas as pd
 
 log = logging.getLogger(__name__)
+IST = ZoneInfo("Asia/Kolkata")
 
 
 class HistoricalCache:
@@ -140,6 +142,8 @@ class HistoricalDataFetcher:
 
         out = pd.concat(frames, ignore_index=True)
         out = out.drop_duplicates(subset=["datetime"]).sort_values("datetime").reset_index(drop=True)
+        out["datetime"] = pd.to_datetime(out["datetime"], utc=True, errors="coerce").dt.tz_convert(IST)
+        out = out.dropna(subset=["datetime"]).sort_values("datetime").reset_index(drop=True)
         self.cache.set(params, out)
         return out
 

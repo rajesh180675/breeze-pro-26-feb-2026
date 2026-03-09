@@ -83,3 +83,20 @@ def test_intraday_chunking_is_bounded():
     )
 
     assert fetcher.last_api_calls <= 5
+
+
+def test_fetch_converts_datetime_to_ist_timezone():
+    client = _FakeClient()
+    fetcher = HistoricalDataFetcher(client, cache=HistoricalCache(ttl_seconds=600))
+
+    df = fetcher.fetch(
+        stock_code="NIFTY",
+        exchange_code="NSE",
+        product_type="cash",
+        from_date="2025-01-01",
+        to_date="2025-01-03",
+        interval="1day",
+    )
+
+    assert not df.empty
+    assert str(df["datetime"].dt.tz) == "Asia/Kolkata"
