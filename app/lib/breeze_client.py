@@ -27,8 +27,10 @@ except ImportError:  # pragma: no cover
 
         def observe(self, _value):
             return None
+
         def set(self, _value):
             return None
+
     def Counter(*_args, **_kwargs):
         return _Metric()
 
@@ -255,7 +257,11 @@ class BreezeClient:
                 "X-SessionToken": record.access_token,
                 "X-AppKey": self.client_id or "",
             }
-            probe_resp = self.session.get(probe_url, headers=probe_headers, timeout=self.settings.request_timeout_seconds)
+            probe_resp = self.session.get(
+                probe_url,
+                headers=probe_headers,
+                timeout=self.settings.request_timeout_seconds,
+            )
             if probe_resp.status_code >= 400:
                 self.circuit.record_failure(endpoint)
                 raise CircuitOpenError("Circuit breaker probe failed", operation=endpoint)
@@ -322,7 +328,6 @@ class BreezeClient:
 
     def _idempotency(self) -> str:
         return str(uuid.uuid4())
-
 
     def get_customer_details(self) -> dict:
         """Fetch customer profile details (health probe endpoint)."""

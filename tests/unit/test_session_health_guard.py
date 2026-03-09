@@ -1,5 +1,6 @@
 import sys
 import types
+from unittest.mock import patch
 
 
 class _SessionState(dict):
@@ -18,7 +19,7 @@ fake_st.secrets = {}
 fake_st.session_state = _SessionState({"api_key": "k", "api_secret": "s", "session_token": "t"})
 sys.modules.setdefault("streamlit", fake_st)
 
-from session_manager import check_session_health
+import session_manager
 
 
 class _Client:
@@ -30,19 +31,23 @@ class _Client:
 
 
 def test_check_session_health_true_on_success():
-    assert check_session_health(_Client({"success": True, "data": {}})) is True
+    with patch.object(session_manager, "st", fake_st):
+        assert session_manager.check_session_health(_Client({"success": True, "data": {}})) is True
 
 
 def test_check_session_health_false_and_clears_on_permanent_error():
-    ok = check_session_health(_Client({"success": False, "error": "invalid session"}))
-    assert ok is False
-    assert fake_st.session_state["api_key"] == ""
-    assert fake_st.session_state["api_secret"] == ""
-    assert fake_st.session_state["session_token"] == ""
+    fake_st.session_state.update({"api_key": "k", "api_secret": "s", "session_token": "t"})
+    with patch.object(session_manager, "st", fake_st):
+        ok = session_manager.check_session_health(_Client({"success": False, "error": "invalid session"}))
+        assert ok is False
+        assert fake_st.session_state["api_key"] == ""
+        assert fake_st.session_state["api_secret"] == ""
+        assert fake_st.session_state["session_token"] == ""
 
 
 def test_check_session_health_true_on_transient_error():
     fake_st.session_state.update({"api_key": "k", "api_secret": "s", "session_token": "t"})
-    ok = check_session_health(_Client({"success": False, "error": "503 service unavailable"}))
-    assert ok is True
-    assert fake_st.session_state["api_key"] == "k"
+    with patch.object(session_manager, "st", fake_st):
+        ok = session_manager.check_session_health(_Client({"success": False, "error": "503 service unavailable"}))
+        assert ok is True
+        assert fake_st.session_state["api_key"] == "k"
