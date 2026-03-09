@@ -19,6 +19,8 @@ import time
 import random
 import hashlib
 import threading
+import json
+from urllib.request import Request, urlopen
 from pathlib import Path
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Callable
@@ -521,6 +523,35 @@ class BreezeAPIClient:
                 strike_price=""
             )
         return self._ok(data)
+
+    @retry_api_call(max_attempts=2, initial_delay=0.5)
+    def get_india_vix(self):
+        """
+        Fetch India VIX from NSE public API.
+        Returns payload shaped like other client methods:
+            {"success": True, "data": {"vix": <float>}, ...}
+        """
+        self._require_connection()
+        req = Request(
+            "https://www.nseindia.com/api/allIndices",
+            headers={
+                "User-Agent": "Mozilla/5.0",
+                "Accept": "application/json",
+                "Referer": "https://www.nseindia.com/",
+            },
+        )
+        with urlopen(req, timeout=5) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+        rows = payload.get("data", []) if isinstance(payload, dict) else []
+        for row in rows:
+            if str(row.get("index", "")).strip().upper() == "INDIA VIX":
+                return {
+                    "success": True,
+                    "data": {"vix": float(row.get("last", 0) or 0)},
+                    "message": "",
+                    "error_code": None,
+                }
+        return self._err("INDIA VIX not found in NSE response", "VIX_NOT_FOUND")
 
     @retry_api_call(max_attempts=2, initial_delay=0.5)
     def get_order_list(self, exchange="", from_date="", to_date=""):

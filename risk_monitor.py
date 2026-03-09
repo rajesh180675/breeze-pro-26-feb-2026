@@ -43,6 +43,77 @@ class MonitoredPosition:
     stop_triggered: bool = False
 
 
+class SmartStopManager:
+    """
+    Per-position intelligent stop placement engine.
+
+    Short options:
+      - Initial stop: avg_price * (1 + short_stop_multiplier)
+      - Trailing lock: when premium falls, lock trail_lock_pct of gained premium
+
+    Long options:
+      - Initial stop: avg_price * (1 - long_stop_multiplier)
+
+    Time-based stop:
+      - On expiry day, short options are marked for close after 15:15 IST.
+    """
+
+    def __init__(
+        self,
+        short_stop_multiplier: float = 1.0,
+        long_stop_multiplier: float = 0.5,
+        trail_lock_pct: float = 0.5,
+    ):
+        self.short_stop_multiplier = short_stop_multiplier
+        self.long_stop_multiplier = long_stop_multiplier
+        self.trail_lock_pct = trail_lock_pct
+
+    def evaluate(
+        self,
+        positions: List[MonitoredPosition],
+        max_portfolio_loss: float,
+        portfolio_pnl: float,
+    ) -> Dict[str, Dict[str, Any]]:
+        decisions: Dict[str, Dict[str, Any]] = {}
+        now = datetime.now()
+        is_portfolio_stop = portfolio_pnl < -abs(max_portfolio_loss)
+        for pos in positions:
+            decision = {
+                "auto_close": False,
+                "reason": "",
+                "recommended_stop": None,
+            }
+            if is_portfolio_stop:
+                decision["auto_close"] = True
+                decision["reason"] = "Portfolio max loss breached"
+                decisions[pos.position_id] = decision
+                continue
+
+            if pos.position_type == "short":
+                base_stop = pos.avg_price * (1 + self.short_stop_multiplier)
+                # If trade moved in favor (premium down), lock some gain.
+                favorable_move = max(pos.avg_price - pos.current_price, 0.0)
+                locked_gain = favorable_move * self.trail_lock_pct
+                trailed_stop = max(base_stop - locked_gain, pos.current_price)
+                decision["recommended_stop"] = round(max(trailed_stop, 0.01), 2)
+            else:
+                decision["recommended_stop"] = round(
+                    max(pos.avg_price * (1 - self.long_stop_multiplier), 0.01), 2
+                )
+
+            try:
+                from helpers import calculate_days_to_expiry
+                dte = calculate_days_to_expiry(pos.expiry)
+                if dte == 0 and pos.position_type == "short" and (now.hour > 15 or (now.hour == 15 and now.minute >= 15)):
+                    decision["auto_close"] = True
+                    decision["reason"] = "Expiry day time-based close (after 15:15)"
+            except Exception:
+                pass
+
+            decisions[pos.position_id] = decision
+        return decisions
+
+
 class RiskMonitor:
     """
     Background risk monitor with:
@@ -68,6 +139,8 @@ class RiskMonitor:
         self._lock = threading.RLock()
         self._portfolio_stop_triggered = False
         self._poll_count = 0
+        self._smart_stops = SmartStopManager()
+        self._smart_stop_state: Dict[str, Dict[str, Any]] = {}
 
     # ─── Configuration ────────────────────────────────────────
 
@@ -184,6 +257,26 @@ class RiskMonitor:
                 "running": self.is_running(),
             }
 
+    def get_smart_stop_summary(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows: List[Dict[str, Any]] = []
+            for pos in self._positions.values():
+                smart = self._smart_stop_state.get(pos.position_id, {})
+                rows.append(
+                    {
+                        "id": pos.position_id,
+                        "stock": pos.stock_code,
+                        "strike": pos.strike,
+                        "type": pos.option_type,
+                        "pos": pos.position_type,
+                        "current": pos.current_price,
+                        "recommended_stop": smart.get("recommended_stop"),
+                        "auto_close": smart.get("auto_close", False),
+                        "reason": smart.get("reason", ""),
+                    }
+                )
+            return rows
+
     # ─── Private helpers ──────────────────────────────────────
 
     def _calc_pos_pnl(self, pos: MonitoredPosition) -> float:
@@ -227,6 +320,37 @@ class RiskMonitor:
         for pos in positions:
             if not pos.stop_triggered:
                 self._check_position_stop(pos)
+
+        # Smart stop recommendations / overrides.
+        portfolio_pnl = sum(self._calc_pos_pnl(p) for p in positions)
+        smart_decisions = self._smart_stops.evaluate(
+            positions=positions,
+            max_portfolio_loss=self._max_portfolio_loss,
+            portfolio_pnl=portfolio_pnl,
+        )
+        with self._lock:
+            self._smart_stop_state = smart_decisions
+            for pos in positions:
+                decision = smart_decisions.get(pos.position_id, {})
+                rec_stop = decision.get("recommended_stop")
+                if rec_stop is not None and not pos.stop_triggered:
+                    if pos.stop_loss_price is None:
+                        pos.stop_loss_price = float(rec_stop)
+                    else:
+                        if pos.position_type == "short":
+                            pos.stop_loss_price = min(pos.stop_loss_price, float(rec_stop))
+                        else:
+                            pos.stop_loss_price = max(pos.stop_loss_price, float(rec_stop))
+                if decision.get("auto_close") and not pos.stop_triggered:
+                    self._emit(Alert(
+                        timestamp=datetime.now().strftime("%H:%M:%S"),
+                        level="CRITICAL",
+                        category="STOP_LOSS",
+                        message=f"🚨 SMART STOP AUTO-CLOSE: {pos.stock_code} {pos.strike} {pos.option_type} | {decision.get('reason', '')}",
+                        position_id=pos.position_id,
+                        data=decision,
+                    ))
+                    pos.stop_triggered = True
 
         # Portfolio-level checks
         if not self._portfolio_stop_triggered:

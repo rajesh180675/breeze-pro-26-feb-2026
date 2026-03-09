@@ -3,6 +3,7 @@
 import streamlit as st
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
+from dataclasses import dataclass
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
@@ -12,6 +13,14 @@ import hmac
 import struct
 import time as _time
 import app_config as C
+try:
+    from cryptography.fernet import Fernet
+    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+    from cryptography.hazmat.primitives import hashes
+except Exception:  # pragma: no cover
+    Fernet = None
+    PBKDF2HMAC = None
+    hashes = None
 
 log = logging.getLogger(__name__)
 
@@ -219,6 +228,88 @@ class SessionState:
             return (datetime.now(C.IST) - d).total_seconds() > C.SESSION_TIMEOUT_SECONDS
         except Exception:
             return True
+
+
+@dataclass
+class AccountProfile:
+    profile_id: str
+    display_name: str
+    api_key: str
+    api_secret: str
+    totp_secret: str
+    last_used: str = ""
+    is_active: bool = False
+
+
+class MultiAccountManager:
+    """Encrypted account profile store backed by TradeDB account_profiles."""
+
+    _SALT = b"breeze-pro-profile-salt"
+
+    def __init__(self, master_password: str):
+        if not master_password:
+            raise ValueError("Master password is required for profile encryption")
+        self._master_password = master_password
+        self._fernet = self._build_fernet(master_password)
+        from persistence import TradeDB, AccountProfileDB
+        self._profile_db = AccountProfileDB(TradeDB())
+
+    def _build_fernet(self, master_password: str):
+        if not (Fernet and PBKDF2HMAC and hashes):
+            raise RuntimeError("cryptography package not available for profile encryption")
+        kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=self._SALT, iterations=390000)
+        key = base64.urlsafe_b64encode(kdf.derive(master_password.encode("utf-8")))
+        return Fernet(key)
+
+    def _enc(self, value: str) -> str:
+        return self._fernet.encrypt((value or "").encode("utf-8")).decode("utf-8")
+
+    def _dec(self, value: str) -> str:
+        if not value:
+            return ""
+        return self._fernet.decrypt(value.encode("utf-8")).decode("utf-8")
+
+    def list_profiles(self) -> List[AccountProfile]:
+        out: List[AccountProfile] = []
+        for row in self._profile_db.get_profiles():
+            out.append(
+                AccountProfile(
+                    profile_id=str(row.get("id", "")),
+                    display_name=row.get("profile_name", ""),
+                    api_key=self._dec(row.get("api_key", "")),
+                    api_secret=self._dec(row.get("api_secret", "")),
+                    totp_secret=self._dec(row.get("totp_secret", "")),
+                    last_used=row.get("last_used") or "",
+                    is_active=bool(row.get("is_active", 0)),
+                )
+            )
+        return out
+
+    def add_profile(self, profile: AccountProfile) -> None:
+        self._profile_db.save_profile(
+            profile_name=profile.display_name,
+            api_key=self._enc(profile.api_key),
+            api_secret=self._enc(profile.api_secret),
+            totp_secret=self._enc(profile.totp_secret),
+        )
+
+    def switch_to(self, profile_id: str) -> Dict[str, str]:
+        for row in self._profile_db.get_profiles():
+            if str(row.get("id", "")) == str(profile_id):
+                self._profile_db.set_active(row.get("profile_name", ""))
+                return {
+                    "api_key": self._dec(row.get("api_key", "")),
+                    "api_secret": self._dec(row.get("api_secret", "")),
+                    "totp_secret": self._dec(row.get("totp_secret", "")),
+                }
+        raise KeyError(f"Profile not found: {profile_id}")
+
+    def delete_profile(self, profile_id: str) -> None:
+        for row in self._profile_db.get_profiles():
+            if str(row.get("id", "")) == str(profile_id):
+                self._profile_db.delete_profile(row.get("profile_name", ""))
+                return
+        raise KeyError(f"Profile not found: {profile_id}")
 
 
 class CacheManager:

@@ -1,28 +1,23 @@
-FROM python:3.11-slim
-
+FROM python:3.11-slim AS builder
 WORKDIR /app
-
-RUN apt-get update && apt-get install -y \
-    curl gcc libssl-dev libffi-dev \
-    && rm -rf /var/lib/apt/lists/*
-
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --user -r requirements.txt
 
+FROM python:3.11-slim
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /root/.local /root/.local
+ENV PATH=/root/.local/bin:$PATH
 COPY . .
 
-RUN mkdir -p /app/data/security_master /app/logs
+RUN useradd -m -u 1000 breeze && chown -R breeze:breeze /app
+USER breeze
 
-RUN useradd -m -u 1000 breezepro && chown -R breezepro:breezepro /app
-USER breezepro
+RUN mkdir -p logs data
 
-EXPOSE 8501
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+  CMD curl -f http://localhost:8000/healthz || exit 1
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
-  CMD curl -f http://localhost:8501/_stcore/health || exit 1
+EXPOSE 8501 8000
 
-CMD ["streamlit", "run", "app.py", \
-     "--server.port=8501", \
-     "--server.address=0.0.0.0", \
-     "--server.headless=true", \
-     "--browser.gatherUsageStats=false"]
+CMD ["sh", "-c", "uvicorn app.api.main:app --host 0.0.0.0 --port 8000 & streamlit run app.py --server.port=8501 --server.address=0.0.0.0 --server.headless=true --browser.gatherUsageStats=false"]

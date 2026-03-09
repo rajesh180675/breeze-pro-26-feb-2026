@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import norm
 from scipy.optimize import brentq
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass
 import logging
 from datetime import datetime
@@ -475,3 +475,92 @@ def portfolio_correlation_matrix(historical_data: Dict[str, pd.Series]) -> pd.Da
     if returns.empty:
         return pd.DataFrame()
     return returns.corr()
+
+
+def detect_market_regime(
+    historical_df: pd.DataFrame,
+    vix: float,
+    pcr: float,
+    spot: float,
+) -> Dict[str, Any]:
+    """
+    Classify current market regime using trend, volatility and expiry context.
+    """
+    df = historical_df.copy()
+    if df.empty or "close" not in df.columns:
+        return {
+            "regime": "RANGE_BOUND",
+            "confidence": 0.5,
+            "recommended_strategies": ["Iron Condor"],
+            "risk_level": "MEDIUM",
+            "signals": {"trend": "unknown", "volatility": "unknown", "momentum": "neutral"},
+        }
+
+    close = pd.to_numeric(df["close"], errors="coerce").dropna()
+    if close.empty:
+        return {
+            "regime": "RANGE_BOUND",
+            "confidence": 0.5,
+            "recommended_strategies": ["Iron Condor"],
+            "risk_level": "MEDIUM",
+            "signals": {"trend": "unknown", "volatility": "unknown", "momentum": "neutral"},
+        }
+
+    ema20 = close.ewm(span=20, adjust=False).mean().iloc[-1]
+    ema50 = close.ewm(span=50, adjust=False).mean().iloc[-1]
+    ema200 = close.ewm(span=200, adjust=False).mean().iloc[-1] if len(close) >= 200 else close.ewm(span=100, adjust=False).mean().iloc[-1]
+    rv5 = rolling_realized_vol(close, window=5).dropna()
+    realized_vol_5d = float(rv5.iloc[-1]) if not rv5.empty else 0.0
+
+    # Lightweight ADX approximation using directional move intensity.
+    diff = close.diff().dropna()
+    pos = diff.clip(lower=0).rolling(14).mean().iloc[-1] if len(diff) >= 14 else 0.0
+    neg = (-diff.clip(upper=0)).rolling(14).mean().iloc[-1] if len(diff) >= 14 else 0.0
+    adx = float((abs(pos - neg) / (pos + neg + 1e-9)) * 50 + 10)
+
+    regime = "RANGE_BOUND"
+    confidence = 0.6
+    risk_level = "MEDIUM"
+    recommended = ["Iron Condor", "Short Straddle"]
+    trend_signal = "sideways"
+    vol_signal = "normal"
+    momentum_signal = "neutral"
+
+    implied_vol = max(vix, 1.0)
+    if ema20 > ema50 > ema200 and adx > 25 and pcr < 0.8:
+        regime = "TRENDING_UP"
+        confidence = 0.78
+        recommended = ["Bull Call Spread", "Bull Put Spread", "Long Call"]
+        trend_signal = "uptrend"
+        momentum_signal = "bullish"
+    elif ema20 < ema50 < ema200 and adx > 25 and pcr > 1.2:
+        regime = "TRENDING_DOWN"
+        confidence = 0.78
+        recommended = ["Bear Put Spread", "Bear Call Spread", "Long Put"]
+        trend_signal = "downtrend"
+        momentum_signal = "bearish"
+    elif adx < 20 and vix < 15 and abs(pcr - 1.0) < 0.2:
+        regime = "RANGE_BOUND"
+        confidence = 0.74
+        recommended = ["Iron Condor", "Short Straddle"]
+        trend_signal = "sideways"
+    elif vix > 20 or realized_vol_5d > implied_vol * 1.5:
+        regime = "HIGH_VOLATILITY"
+        confidence = 0.8
+        recommended = ["Long Straddle", "Long Strangle"]
+        risk_level = "HIGH"
+        vol_signal = "high"
+    else:
+        risk_level = "MEDIUM"
+
+    return {
+        "regime": regime,
+        "confidence": round(confidence, 2),
+        "recommended_strategies": recommended,
+        "risk_level": risk_level,
+        "signals": {
+            "trend": trend_signal,
+            "volatility": vol_signal,
+            "momentum": momentum_signal,
+        },
+    }

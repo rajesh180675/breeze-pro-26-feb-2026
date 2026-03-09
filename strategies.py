@@ -3,6 +3,7 @@ Strategy Builder — 15+ predefined strategies, payoff diagrams, metrics.
 """
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import List, Dict, Any, Optional
 import numpy as np
 import pandas as pd
@@ -17,6 +18,13 @@ class StrategyLeg:
     premium: float = 0.0
     expiry: str = ""
     label: str = ""
+
+
+@dataclass
+class SuggestionResult:
+    strategy: str
+    score: float
+    reason: str
 
 
 PREDEFINED_STRATEGIES: Dict[str, Dict[str, Any]] = {
@@ -143,6 +151,20 @@ PREDEFINED_STRATEGIES: Dict[str, Dict[str, Any]] = {
         "view": "Neutral/Mildly Bearish", "risk": "Unlimited (below)", "reward": "Limited",
         "category": "Advanced", "complexity": "Advanced",
     },
+    "Calendar Spread": {
+        "description": "Buy near-month option and sell far-month option at same strike (expiry differential play).",
+        "legs": [{"offset": 0, "type": "CE", "action": "buy", "label": "Near CE"},
+                 {"offset": 0, "type": "CE", "action": "sell", "label": "Far CE"}],
+        "view": "Volatility/Theta", "risk": "Limited", "reward": "Limited",
+        "category": "Advanced", "complexity": "Advanced",
+    },
+    "Diagonal Spread": {
+        "description": "Buy near-month ITM and sell far-month OTM (different strikes + expiries).",
+        "legs": [{"offset": -1, "type": "CE", "action": "buy", "label": "Near ITM CE"},
+                 {"offset": 1, "type": "CE", "action": "sell", "label": "Far OTM CE"}],
+        "view": "Directional/Theta", "risk": "Limited", "reward": "Limited",
+        "category": "Advanced", "complexity": "Advanced",
+    },
 }
 
 STRATEGY_CATEGORIES = sorted(set(v["category"] for v in PREDEFINED_STRATEGIES.values()))
@@ -164,7 +186,9 @@ def _snap_to_nearest_strike(target: int, available_strikes: Optional[set]) -> in
 def generate_strategy_legs(strategy_name: str, atm_strike: int,
                            strike_gap: int, lot_size: int,
                            lots: int = 1,
-                           available_strikes: Optional[set] = None) -> List[StrategyLeg]:
+                           available_strikes: Optional[set] = None,
+                           default_expiry: str = "",
+                           expiry_by_action: Optional[Dict[str, str]] = None) -> List[StrategyLeg]:
     """Generate legs for a predefined strategy.
 
     If *available_strikes* is provided, each computed strike is snapped to
@@ -184,6 +208,7 @@ def generate_strategy_legs(strategy_name: str, atm_strike: int,
             option_type=leg["type"],
             action=leg["action"],
             quantity=qty * multiplier,
+            expiry=(expiry_by_action or {}).get(leg["action"], default_expiry),
             label=leg.get("label", "")
         ))
     return legs
@@ -210,12 +235,23 @@ def calculate_strategy_metrics(legs: List[StrategyLeg]) -> Dict[str, Any]:
             be = spots[i] - payoffs[i] * (spots[i + 1] - spots[i]) / (payoffs[i + 1] - payoffs[i])
             breakevens.append(round(float(be), 0))
 
+    theta_differential = 0.0
+    for leg in legs:
+        if leg.expiry:
+            try:
+                dte = max((datetime.strptime(str(leg.expiry)[:10], "%Y-%m-%d") - datetime.now()).days, 1)
+            except ValueError:
+                dte = 1
+            theta_weight = (leg.quantity / np.sqrt(dte))
+            theta_differential += theta_weight if leg.action == "sell" else -theta_weight
+
     return {
         "net_premium": round(net_premium, 2),
         "max_profit": round(float(max(payoffs)), 2),
         "max_loss": round(float(min(payoffs)), 2),
         "breakevens": breakevens,
         "reward_risk": abs(round(float(max(payoffs)) / float(min(payoffs)), 2)) if min(payoffs) != 0 else float('inf'),
+        "theta_differential": round(float(theta_differential), 2),
     }
 
 
@@ -255,3 +291,57 @@ def get_strategies_by_view(view: str) -> Dict:
     view_lower = view.lower()
     return {k: v for k, v in PREDEFINED_STRATEGIES.items()
             if view_lower in v["view"].lower()}
+
+
+class AIStrategySuggester:
+    """Rule-based strategy ranker with trader-specific win-rate weighting."""
+
+    def suggest(
+        self,
+        regime: Dict[str, Any],
+        vix: float,
+        pcr: float,
+        trader_win_rates: Dict[str, float],
+        available_capital: float,
+        days_to_expiry: int,
+    ) -> List[SuggestionResult]:
+        regime_name = str(regime.get("regime", "RANGE_BOUND"))
+        preferred = set(regime.get("recommended_strategies", []))
+        results: List[SuggestionResult] = []
+        for name, meta in PREDEFINED_STRATEGIES.items():
+            score = 0.0
+            # 1) Regime fit 0-30
+            if name in preferred:
+                score += 30.0
+            elif regime_name.lower() in str(meta.get("view", "")).lower():
+                score += 20.0
+            else:
+                score += 8.0
+            # 2) Trader history 0-25
+            score += min(max(trader_win_rates.get(name, 50.0), 0.0), 100.0) * 0.25
+            # 3) Risk/reward proxy 0-20 (favor defined-risk in high VIX)
+            risk = str(meta.get("risk", "")).lower()
+            if vix >= 20 and "limited" in risk:
+                score += 16.0
+            elif vix < 15 and "unlimited" in risk:
+                score += 8.0
+            else:
+                score += 12.0
+            # 4) Capital efficiency 0-15 (penalize complex advanced)
+            complexity = str(meta.get("complexity", "Intermediate")).lower()
+            if complexity == "beginner":
+                score += 14.0
+            elif complexity == "intermediate":
+                score += 10.0
+            else:
+                score += 7.0 if available_capital > 100000 else 4.0
+            # 5) DTE suitability 0-10
+            if 3 <= days_to_expiry <= 15:
+                score += 10.0
+            elif 16 <= days_to_expiry <= 35:
+                score += 7.0
+            else:
+                score += 4.0
+            reason = f"Regime={regime_name}, VIX={vix:.1f}, PCR={pcr:.2f}, DTE={days_to_expiry}"
+            results.append(SuggestionResult(strategy=name, score=round(score, 2), reason=reason))
+        return sorted(results, key=lambda x: x.score, reverse=True)[:3]
