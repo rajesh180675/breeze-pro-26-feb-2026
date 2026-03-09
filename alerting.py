@@ -388,11 +388,22 @@ def create_fill_alert(stock_code: str, exchange: str, action: str, quantity: int
 
 
 def create_stop_loss_alert(stock_code: str, strike: int, right: str, ltp: float, stop_price: float, loss: float) -> AlertEvent:
+    formatted_body = (
+        f"🚨 STOP LOSS HIT — {stock_code} {strike} {right.upper()}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📍 Position: SELL 1 lot\n"
+        f"⚡ Current: ₹{ltp:.2f}\n"
+        f"💥 Loss: ₹{loss:,.0f}\n"
+        f"⏰ Time: {datetime.now().strftime('%H:%M:%S')} IST\n"
+        f"🎯 Action: AUTO-SQUARE OFF triggered\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"[View Position] [Dismiss]"
+    )
     return AlertEvent(
         alert_type="STOP_LOSS_HIT",
         level=AlertLevel.CRITICAL,
-        title=f"🚨 Stop-Loss Hit: {stock_code} {strike} {right.upper()}",
-        body=f"LTP ₹{ltp:.2f} breached stop at ₹{stop_price:.2f}. Loss: ₹{loss:,.0f}",
+        title=f"🚨 STOP LOSS HIT — {stock_code} {strike} {right.upper()}",
+        body=formatted_body,
         metadata={
             "Instrument": f"{stock_code} {strike} {right.upper()}",
             "LTP": f"₹{ltp:.2f}",

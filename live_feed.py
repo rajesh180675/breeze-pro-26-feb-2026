@@ -413,6 +413,12 @@ class TickStore:
             buf = self._history.get(stock_token)
             return list(buf) if buf else []
 
+    def clear_tokens(self, tokens: List[str]) -> None:
+        with self._lock:
+            for token in tokens:
+                self._latest.pop(token, None)
+                self._history.pop(token, None)
+
     @property
     def total_ticks(self) -> int:
         return self._total_ticks
@@ -566,6 +572,19 @@ class LiveFeedManager:
                 return True
             self._breeze.subscribe_feeds(get_order_notification=True)
             self._subscriptions[key] = SubscriptionRecord("", SubscriptionType.ORDER_NOTIFY, None, False, time.time())
+            return True
+
+    def unsubscribe_quote(self, stock_token: str) -> bool:
+        with self._lock:
+            if stock_token not in self._subscriptions:
+                return False
+            try:
+                token = self._adjust_depth(stock_token, DEPTH_L1)
+                if hasattr(self._breeze, "unsubscribe_feeds"):
+                    self._breeze.unsubscribe_feeds(stock_token=token)
+            except Exception:
+                pass
+            self._subscriptions.pop(stock_token, None)
             return True
 
     def get_health_stats(self) -> Dict:
