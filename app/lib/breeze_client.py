@@ -65,6 +65,12 @@ REQUEST_LATENCY = Histogram("breeze_request_duration_seconds", "Breeze request d
 INFLIGHT = Gauge("breeze_client_inflight_requests", "Inflight Breeze requests")
 CIRCUIT_STATE = Gauge("breeze_circuit_state", "Circuit state by endpoint", ["endpoint"])
 CIRCUIT_FAILURES = Gauge("breeze_circuit_failures", "Circuit failures by endpoint", ["endpoint"])
+ORDER_COUNTER = Counter("breeze_orders_total", "Orders placed", ["action", "instrument", "status"])
+POSITION_GAUGE = Gauge("breeze_open_positions", "Open positions count")
+PNL_GAUGE = Gauge("breeze_unrealized_pnl_inr", "Unrealized P&L in INR")
+WEBSOCKET_SUBS = Gauge("breeze_ws_subscriptions", "Active WS subscriptions")
+ALERT_COUNTER = Counter("breeze_alerts_dispatched_total", "Alerts sent", ["channel", "level"])
+CACHE_HIT_RATE = Gauge("breeze_cache_hit_rate", "Cache hit rate by namespace", ["namespace"])
 
 LOGGER = logging.getLogger(__name__)
 
@@ -359,7 +365,15 @@ class BreezeClient:
 
     def place_order(self, order_payload: dict) -> dict:
         """Place an order with idempotency key support."""
-        return self.request("POST", "/orders", json=order_payload, idempotency_key=self._idempotency())
+        action = str(order_payload.get("action", "unknown")).lower()
+        instrument = str(order_payload.get("stock_code", order_payload.get("symbol", "unknown"))).upper()
+        try:
+            resp = self.request("POST", "/orders", json=order_payload, idempotency_key=self._idempotency())
+            ORDER_COUNTER.labels(action=action, instrument=instrument, status="success").inc()
+            return resp
+        except Exception:
+            ORDER_COUNTER.labels(action=action, instrument=instrument, status="failed").inc()
+            raise
 
     def modify_order(self, order_id: str, updates: dict) -> dict:
         """Modify an existing order."""
@@ -371,7 +385,20 @@ class BreezeClient:
 
     def get_positions(self) -> dict:
         """Fetch current positions."""
-        return self.request("GET", "/positions")
+        resp = self.request("GET", "/positions")
+        rows = resp.get("Success") if isinstance(resp, dict) else []
+        if rows is None and isinstance(resp, dict):
+            rows = resp.get("data", [])
+        rows = rows if isinstance(rows, list) else []
+        POSITION_GAUGE.set(len(rows))
+        pnl = 0.0
+        for row in rows:
+            try:
+                pnl += float(row.get("pnl", 0) or 0)
+            except Exception:
+                continue
+        PNL_GAUGE.set(pnl)
+        return resp
 
     def get_order_status(self, order_id: str) -> dict:
         """Fetch status for one order."""

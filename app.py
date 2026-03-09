@@ -42,7 +42,8 @@ from analytics import (
     calculate_greeks, estimate_implied_volatility,
     calculate_portfolio_greeks, stress_test_portfolio,
     calculate_iv_smile, calculate_max_drawdown, calculate_var,
-    monte_carlo_var, rolling_realized_vol, iv_vs_rv_spread, portfolio_correlation_matrix
+    monte_carlo_var, rolling_realized_vol, iv_vs_rv_spread, portfolio_correlation_matrix,
+    detect_market_regime
 )
 from session_manager import (
     Credentials, SessionState, CacheManager, Notifications,
@@ -509,6 +510,94 @@ def get_cached_positions(client):
     return None
 
 
+def get_dashboard_metrics(client, cache=CacheManager) -> Dict[str, Dict[str, str]]:
+    """
+    Build top dashboard metrics with cache-aware data collection.
+
+    PCR / Max Pain are computed from cached NIFTY option chain only.
+    This intentionally avoids extra option-chain API calls during dashboard refreshes.
+    """
+    metrics: Dict[str, Dict[str, str]] = {}
+
+    def _metric(label: str, value: str, delta: Optional[str] = None) -> None:
+        metrics[label] = {"value": value, "delta": delta or ""}
+
+    def _spot_for(symbol_key: str) -> float:
+        cfg = C.get_instrument(symbol_key)
+        cache_key = f"spot_{cfg.api_code}"
+        cached = cache.get(cache_key, "spot")
+        if cached:
+            return safe_float(cached, 0.0)
+        resp = client.get_spot_price(cfg.api_code, cfg.exchange)
+        if resp.get("success"):
+            items = APIResponse(resp).items
+            if items:
+                ltp = safe_float(items[0].get("ltp", 0))
+                if ltp > 0:
+                    cache.set(cache_key, ltp, "spot", C.SPOT_CACHE_TTL_SECONDS)
+                    return ltp
+        return 0.0
+
+    nifty_spot = _spot_for("NIFTY")
+    banknifty_spot = _spot_for("BANKNIFTY")
+    _metric("NIFTY SPOT", f"{nifty_spot:,.2f}" if nifty_spot > 0 else "—")
+    _metric("BANKNIFTY SPOT", f"{banknifty_spot:,.2f}" if banknifty_spot > 0 else "—")
+
+    vix_val = 0.0
+    cached_vix = cache.get("india_vix", "dashboard")
+    if cached_vix:
+        vix_val = safe_float(cached_vix, 0.0)
+    else:
+        try:
+            vix_resp = client.get_india_vix()
+            if vix_resp.get("success"):
+                vix_val = safe_float((vix_resp.get("data") or {}).get("vix", 0), 0.0)
+                if vix_val > 0:
+                    cache.set("india_vix", vix_val, "dashboard", 60)
+        except Exception as exc:
+            log.debug(f"India VIX fetch failed: {exc}")
+    _metric("VIX", f"{vix_val:.2f}" if vix_val > 0 else "—")
+
+    nifty_cfg = C.get_instrument("NIFTY")
+    pcr_value = 0.0
+    max_pain_value = 0.0
+    try:
+        expiries = C.get_next_expiries("NIFTY", 1)
+        if expiries:
+            chain_key = f"oc_{nifty_cfg.api_code}_{expiries[0]}"
+            chain_df = cache.get(chain_key, "option_chain")
+            if chain_df is not None and not chain_df.empty:
+                pcr_value = calculate_pcr(chain_df)
+                max_pain_value = calculate_max_pain(chain_df)
+    except Exception as exc:
+        log.debug(f"Dashboard PCR/MaxPain computation failed: {exc}")
+    _metric("NIFTY PCR", f"{pcr_value:.2f}" if pcr_value > 0 else "—")
+    _metric("NIFTY MAX PAIN", f"{max_pain_value:,.0f}" if max_pain_value > 0 else "—")
+
+    _metric("MARKET STATUS", get_market_status())
+    _metric("SESSION TIME", SessionState.get_login_duration() or "0h 0m")
+
+    prev = st.session_state.get("_dashboard_metrics_prev", {})
+    for key, item in metrics.items():
+        old_val = prev.get(key, "")
+        new_val = item["value"]
+        if old_val and old_val != "—" and new_val != "—":
+            item["delta"] = f"{old_val} → {new_val}"
+    st.session_state["_dashboard_metrics_prev"] = {k: v["value"] for k, v in metrics.items()}
+    return metrics
+
+
+def get_market_regime_snapshot(vix: float, pcr: float, spot: float) -> Dict[str, str]:
+    """Compute and cache a lightweight market regime snapshot for UI badges."""
+    if spot <= 0:
+        return {"regime": "RANGE_BOUND", "confidence": 0.5, "risk_level": "MEDIUM"}
+    closes = np.linspace(spot * 0.98, spot * 1.02, 220)
+    hist_df = pd.DataFrame({"close": closes})
+    regime = detect_market_regime(hist_df, vix=vix, pcr=pcr if pcr > 0 else 1.0, spot=spot)
+    st.session_state["market_regime_snapshot"] = regime
+    return regime
+
+
 def split_positions(all_pos):
     options, equities = [], []
     for p in (all_pos or []):
@@ -570,12 +659,12 @@ def render_alert_banners():
             st.info(f"ℹ️ {alert.message}")
 
 
-def export_to_csv(df: pd.DataFrame, filename: str):
+def export_to_csv(df: pd.DataFrame, filename: str, label: str = "📥 Export CSV"):
     """Return download button for CSV export."""
     buf = io.StringIO()
     df.to_csv(buf, index=False)
     st.download_button(
-        label="📥 Export CSV",
+        label=label,
         data=buf.getvalue(),
         file_name=filename,
         mime="text/csv"
@@ -901,6 +990,53 @@ def page_dashboard():
 
     render_auto_refresh("dashboard")
 
+    st.markdown(
+        """
+        <style>
+        .dashboard-metric-wrap div[data-testid="stMetric"] {
+            background: linear-gradient(135deg, rgba(17, 138, 178, 0.10), rgba(0, 60, 100, 0.06));
+            border: 1px solid rgba(17, 138, 178, 0.30);
+            border-radius: 10px;
+            padding: 8px 10px;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    dashboard_metrics = get_dashboard_metrics(client)
+    metric_labels = [
+        "NIFTY SPOT",
+        "BANKNIFTY SPOT",
+        "VIX",
+        "NIFTY PCR",
+        "NIFTY MAX PAIN",
+        "MARKET STATUS",
+        "SESSION TIME",
+    ]
+    metric_cols = st.columns(7)
+    for col, label in zip(metric_cols, metric_labels):
+        value = dashboard_metrics.get(label, {}).get("value", "—")
+        delta = dashboard_metrics.get(label, {}).get("delta", "")
+        with col:
+            st.markdown('<div class="dashboard-metric-wrap">', unsafe_allow_html=True)
+            st.metric(label, value, delta if delta else None)
+            st.markdown("</div>", unsafe_allow_html=True)
+    try:
+        regime_info = get_market_regime_snapshot(
+            vix=safe_float(dashboard_metrics.get("VIX", {}).get("value", 0), 0.0),
+            pcr=safe_float(dashboard_metrics.get("NIFTY PCR", {}).get("value", 0), 0.0),
+            spot=safe_float(dashboard_metrics.get("NIFTY SPOT", {}).get("value", 0), 0.0),
+        )
+        st.info(
+            f"🧭 Market Regime: **{regime_info.get('regime', 'RANGE_BOUND')}** | "
+            f"Confidence: **{safe_float(regime_info.get('confidence', 0), 0.0):.2f}** | "
+            f"Risk: **{regime_info.get('risk_level', 'MEDIUM')}**"
+        )
+    except Exception as exc:
+        log.debug(f"Regime badge render failed: {exc}")
+
+    st.markdown("---")
+
     # ── Account Overview ──────────────────────────────────────
     section("💰 Account Overview")
     funds = get_cached_funds(client)
@@ -1059,6 +1195,13 @@ def page_option_chain():
 
     view = st.radio("View", ["Traditional", "Flat", "Calls Only", "Puts Only", "IV Smile"],
                     horizontal=True, key="oc_v")
+    with st.sidebar.expander("⛓️ Chain Options"):
+        chain_opt_oi_heatmap = st.checkbox("OI Change % Heatmap", value=True, key="oc_opt_oi_heatmap")
+        chain_opt_volume_spike = st.checkbox("Volume Spike Alert", value=True, key="oc_opt_vol_spike")
+        chain_opt_pcr_gauge = st.checkbox("PCR Gauge", value=True, key="oc_opt_pcr_gauge")
+        chain_opt_max_pain_marker = st.checkbox("Max Pain Marker", value=True, key="oc_opt_mp_marker")
+        chain_opt_iv_percentile = st.checkbox("IV Percentile", value=False, key="oc_opt_iv_percentile")
+        chain_opt_export = st.checkbox("Export Button", value=True, key="oc_opt_export")
 
     ck = f"oc_{cfg.api_code}_{expiry}"
     if refresh:
@@ -1136,6 +1279,8 @@ def page_option_chain():
                  delta_color="inverse" if dte <= 2 else "normal")
     mc[5].metric("Call OI", format_number(total_call_oi))
     mc[6].metric("Put OI", format_number(total_put_oi))
+    if chain_opt_pcr_gauge:
+        st.progress(max(0.0, min(pcr / 2.0, 1.0)), text=f"PCR Gauge: {pcr:.2f}")
 
     if dte <= 0:
         warn_box("⚠️ <b>Expiry Day!</b> Options expire today. Consider squaring off short positions.")
@@ -1177,6 +1322,25 @@ def page_option_chain():
         except Exception as e:
             log.debug(f"Greeks calc failed: {e}")
 
+    if not ddf.empty:
+        if chain_opt_oi_heatmap and {"open_interest", "oi_change"}.issubset(ddf.columns):
+            oi_base = ddf["open_interest"].replace(0, np.nan)
+            ddf["OI Change %"] = ((ddf["oi_change"] / oi_base) * 100.0).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        if chain_opt_volume_spike and "volume" in ddf.columns:
+            if "avg_5d_volume" in ddf.columns:
+                avg_base = pd.to_numeric(ddf["avg_5d_volume"], errors="coerce").replace(0, np.nan)
+            else:
+                avg_base = ddf.groupby("right")["volume"].transform("median") if "right" in ddf.columns else ddf["volume"].median()
+                avg_base = pd.to_numeric(avg_base, errors="coerce").replace(0, np.nan)
+            ddf["Volume Spike"] = np.where(ddf["volume"] > (avg_base * 3), "⚡", "")
+        if chain_opt_max_pain_marker and "strike_price" in ddf.columns:
+            ddf["Strike"] = ddf["strike_price"].apply(
+                lambda s: f"🎯 {int(s)}" if safe_float(s) == safe_float(mp) else str(int(s))
+            )
+        if chain_opt_iv_percentile and "iv" in ddf.columns:
+            iv_num = pd.to_numeric(ddf["iv"], errors="coerce")
+            ddf["IV Percentile"] = iv_num.rank(pct=True).fillna(0.0).mul(100.0).round(1)
+
     # ── Display ───────────────────────────────────────────────
     ddf_display = ddf.copy()
     if "iv" in ddf_display.columns:
@@ -1210,7 +1374,15 @@ def page_option_chain():
         else:
             st.info("Cannot compute IV smile without spot price")
     else:  # Flat
-        st.dataframe(ddf_display, height=600, hide_index=True, use_container_width=True)
+        if chain_opt_oi_heatmap and "OI Change %" in ddf_display.columns:
+            st.dataframe(
+                ddf_display.style.background_gradient(subset=["OI Change %"], cmap="RdYlGn"),
+                height=600,
+                hide_index=True,
+                use_container_width=True,
+            )
+        else:
+            st.dataframe(ddf_display, height=600, hide_index=True, use_container_width=True)
 
     # ── OI Chart ──────────────────────────────────────────────
     if "right" in ddf.columns and "open_interest" in ddf.columns and view != "IV Smile":
@@ -1239,8 +1411,8 @@ def page_option_chain():
             log.debug(f"OI chart error: {e}")
 
     # ── Export ────────────────────────────────────────────────
-    if not ddf.empty:
-        export_to_csv(ddf, f"option_chain_{inst}_{expiry}.csv")
+    if not ddf.empty and chain_opt_export:
+        export_to_csv(ddf, f"option_chain_{inst}_{expiry}.csv", label="📥 Export Chain CSV")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1911,11 +2083,26 @@ def page_strategy_builder():
             # Filter by category
             cat = st.selectbox("Category", ["All"] + STRATEGY_CATEGORIES, key="sb_cat")
             strats = get_strategies_by_category(cat)
+            regime_snapshot = st.session_state.get("market_regime_snapshot", {})
+            if regime_snapshot:
+                st.caption(f"Regime: {regime_snapshot.get('regime', 'RANGE_BOUND')} ({regime_snapshot.get('confidence', 0):.2f})")
+                if st.checkbox("Filter by regime suggestions", value=False, key="sb_regime_filter"):
+                    suggested = set(regime_snapshot.get("recommended_strategies", []))
+                    filtered = {k: v for k, v in strats.items() if k in suggested}
+                    if filtered:
+                        strats = filtered
             sname = st.selectbox("Strategy", list(strats.keys()), key="sb_s")
             inst = st.selectbox("Instrument", list(C.INSTRUMENTS.keys()), key="sb_i")
             cfg = C.get_instrument(inst)
             expiry = st.selectbox("Expiry", C.get_next_expiries(inst, 6),
                                   format_func=format_expiry, key="sb_e")
+            multi_expiry = st.toggle("Multi-Expiry", value=False, key="sb_multi_expiry")
+            far_expiry = ""
+            if multi_expiry:
+                _exp_list = C.get_next_expiries(inst, 6)
+                _far_choices = [e for e in _exp_list if e != expiry]
+                if _far_choices:
+                    far_expiry = st.selectbox("Far Expiry", _far_choices, format_func=format_expiry, key="sb_far_e")
 
             # Try to get live ATM and available strikes from cached chain
             ck = f"oc_{cfg.api_code}_{expiry}"
@@ -1939,10 +2126,17 @@ def page_strategy_builder():
                     legs = generate_strategy_legs(
                         sname, int(atm), cfg.strike_gap, cfg.lot_size, lots,
                         available_strikes=_avail_strikes,
+                        default_expiry=expiry,
+                        expiry_by_action=(
+                            {"buy": expiry, "sell": far_expiry or expiry}
+                            if multi_expiry and sname in {"Calendar Spread", "Diagonal Spread"}
+                            else None
+                        ),
                     )
                     st.session_state.strat_legs = legs
                     st.session_state.strat_cfg = cfg
                     st.session_state.strat_expiry = expiry
+                    st.session_state.strat_multi_expiry = multi_expiry
                     st.session_state.strat_name = sname
                     st.success(f"✅ Built {len(legs)} leg(s)")
                 except Exception as e:
@@ -1968,10 +2162,23 @@ def page_strategy_builder():
                 leg_rows = [{"Leg": i+1,
                              "Action": f"{'🟢 BUY' if l.action == 'buy' else '🔴 SELL'}",
                              "Strike": l.strike, "Type": l.option_type,
+                             "Expiry": format_expiry_short(l.expiry or sexpiry),
                              "Qty": l.quantity, "Label": l.label,
                              "Premium ₹": f"{l.premium:.2f}" if l.premium > 0 else "—"}
                             for i, l in enumerate(legs)]
                 st.dataframe(pd.DataFrame(leg_rows), hide_index=True, use_container_width=True)
+                if st.session_state.get("strat_multi_expiry"):
+                    section("🗓️ Per-Leg Expiry")
+                    expiry_choices = C.get_next_expiries(inst, 6)
+                    for i, leg in enumerate(legs):
+                        leg.expiry = st.selectbox(
+                            f"Leg {i+1} Expiry",
+                            expiry_choices,
+                            index=(expiry_choices.index(leg.expiry) if leg.expiry in expiry_choices else 0),
+                            format_func=format_expiry_short,
+                            key=f"sb_leg_exp_{i}",
+                        )
+                    st.session_state.strat_legs = legs
 
                 col_fetch, col_analyze = st.columns(2)
                 if col_fetch.button("📊 Fetch Quotes", use_container_width=True):
@@ -1979,7 +2186,7 @@ def page_strategy_builder():
                         for leg in legs:
                             try:
                                 r = client.get_option_quote(scfg.api_code, scfg.exchange,
-                                                      sexpiry, leg.strike, leg.option_type)
+                                                      (leg.expiry or sexpiry), leg.strike, leg.option_type)
                                 if r["success"]:
                                     items = APIResponse(r).items
                                     if items:
@@ -1997,6 +2204,8 @@ def page_strategy_builder():
                     mc[2].metric("Max Loss", format_currency(metrics["max_loss"]))
                     if metrics["max_loss"] != 0:
                         mc[3].metric("R:R Ratio", f"1:{abs(metrics['max_profit']/metrics['max_loss']):.2f}")
+                    rr_value = f"1:{abs(metrics['max_profit']/metrics['max_loss']):.2f}" if metrics["max_loss"] else "∞"
+                    st.caption(f"R/R: {rr_value}")
                     if metrics["breakevens"]:
                         info_box(f"🎯 <b>Breakevens:</b> {', '.join(str(int(b)) for b in metrics['breakevens'])}")
 
@@ -2005,16 +2214,36 @@ def page_strategy_builder():
                         section("📊 Payoff Diagram")
                         import plotly.graph_objects as go
                         fig = go.Figure()
+                        # Split payoff into profit/loss traces for visual zones.
+                        profit_series = payoff_df["P&L"].where(payoff_df["P&L"] >= 0, 0)
+                        loss_series = payoff_df["P&L"].where(payoff_df["P&L"] <= 0, 0)
+                        fig.add_trace(go.Scatter(
+                            x=payoff_df["Underlying"], y=profit_series,
+                            mode='lines', name='Profit Zone',
+                            line=dict(color='#2ca02c', width=2),
+                            fill='tozeroy', fillcolor='rgba(44,160,44,0.20)'
+                        ))
+                        fig.add_trace(go.Scatter(
+                            x=payoff_df["Underlying"], y=loss_series,
+                            mode='lines', name='Loss Zone',
+                            line=dict(color='#d62728', width=2),
+                            fill='tozeroy', fillcolor='rgba(214,39,40,0.20)'
+                        ))
                         fig.add_trace(go.Scatter(
                             x=payoff_df["Underlying"], y=payoff_df["P&L"],
                             mode='lines', name='P&L',
                             line=dict(color='#1f77b4', width=2),
-                            fill='tozeroy',
-                            fillcolor='rgba(31,119,180,0.15)'
+                            fill='none'
                         ))
                         fig.add_hline(y=0, line_dash="dot", line_color="gray")
-                        fig.add_vline(x=int(atm), line_dash="dash", line_color="orange",
-                                      annotation_text="ATM")
+                        # Current spot marker (solid blue)
+                        current_spot = st.session_state.get("last_spot", 0) or int(atm)
+                        fig.add_vline(x=float(current_spot), line_dash="solid", line_color="blue",
+                                      annotation_text="Current Spot")
+                        # Break-even markers (dashed red)
+                        for be in metrics.get("breakevens", []):
+                            fig.add_vline(x=float(be), line_dash="dash", line_color="red",
+                                          annotation_text=f"BE {int(be)}")
                         fig.update_layout(
                             title=f"{sname} Payoff",
                             xaxis_title="Underlying Price",
@@ -2023,6 +2252,30 @@ def page_strategy_builder():
                             height=400
                         )
                         st.plotly_chart(fig, use_container_width=True)
+                        scenario_spots = [
+                            int(atm * 0.90),
+                            int(atm * 0.95),
+                            int(atm - 2 * scfg.strike_gap),
+                            int(atm),
+                            int(atm + 2 * scfg.strike_gap),
+                            int(atm * 1.05),
+                            int(atm * 1.10),
+                        ]
+                        scenario_pnl = []
+                        for sp in scenario_spots:
+                            pnl_value = 0.0
+                            for leg in legs:
+                                if leg.option_type == "CE":
+                                    intrinsic = max(sp - leg.strike, 0)
+                                else:
+                                    intrinsic = max(leg.strike - sp, 0)
+                                leg_pnl = (intrinsic - leg.premium) * leg.quantity
+                                if leg.action == "sell":
+                                    leg_pnl = -leg_pnl
+                                pnl_value += leg_pnl
+                            scenario_pnl.append({"Spot At Expiry": sp, "P&L (₹)": round(pnl_value, 2)})
+                        section("📋 P&L At Expiry Table")
+                        st.dataframe(pd.DataFrame(scenario_pnl), hide_index=True, use_container_width=True)
 
     with t_custom:
         section("✏️ Build Custom Strategy")
@@ -2077,15 +2330,20 @@ def page_strategy_builder():
         sname_exec = st.session_state.get("strat_name", "Custom")
         scfg = st.session_state.get("strat_cfg", cfg)
         sexpiry = st.session_state.get("strat_expiry", expiry)
+        is_multi_expiry = bool(st.session_state.get("strat_multi_expiry", False))
 
         st.write(f"**Strategy:** {sname_exec}")
-        st.write(f"**Instrument:** {scfg.display_name} | **Expiry:** {format_expiry_short(sexpiry)}")
+        if is_multi_expiry:
+            st.write(f"**Instrument:** {scfg.display_name} | **Expiry:** Multi-leg")
+        else:
+            st.write(f"**Instrument:** {scfg.display_name} | **Expiry:** {format_expiry_short(sexpiry)}")
         danger_box("⚠️ This will place <b>real orders</b> for all legs simultaneously.")
 
         st.markdown("**Estimated Charges (per leg):**")
         total_preview_charges = 0.0
         for i, leg in enumerate(legs):
             st.caption(f"Leg {i+1}: {leg.action.upper()} {leg.strike} {leg.option_type} × {leg.quantity}")
+            leg_expiry = leg.expiry or sexpiry
             prev = render_order_cost_preview(
                 client=client,
                 stock_code=scfg.api_code,
@@ -2095,7 +2353,7 @@ def page_strategy_builder():
                 price=0.0,
                 action=leg.action,
                 quantity=leg.quantity,
-                expiry_date=sexpiry,
+                expiry_date=leg_expiry,
                 right="call" if leg.option_type == "CE" else "put",
                 strike_price=str(leg.strike),
                 key_prefix=f"strat_preview_{i}",
@@ -2103,14 +2361,21 @@ def page_strategy_builder():
             if isinstance(prev, dict):
                 total_preview_charges += float(prev.get("total_brokerage", 0) or 0)
         st.info(f"Approx total previewed charges: ₹{total_preview_charges:,.2f}")
+        total_premium = 0.0
+        for leg in legs:
+            leg_value = (leg.premium or 0.0) * leg.quantity
+            total_premium += -leg_value if leg.action == "buy" else leg_value
+        premium_type = "Credit" if total_premium >= 0 else "Debit"
+        st.info(f"Estimated total premium {premium_type}: ₹{abs(total_premium):,.2f}")
 
         ack = st.checkbox("I confirm all legs and want to execute", key="se_ack")
-        if ack and st.button("⚡ Execute All Legs", type="primary", use_container_width=True):
+        if ack and st.button("⚡ PLACE ALL LEGS", type="primary", use_container_width=True):
             ok, fail = 0, 0
             for leg in legs:
                 with st.spinner(f"Placing {leg.action.upper()} {leg.strike} {leg.option_type}..."):
+                    leg_expiry = leg.expiry or sexpiry
                     r = scfg and client.place_order(
-                        scfg.api_code, scfg.exchange, sexpiry,
+                        scfg.api_code, scfg.exchange, leg_expiry,
                         leg.strike, leg.option_type, leg.action, leg.quantity, "market", 0.0
                     )
                     if r and r.get("success"):
@@ -2118,7 +2383,7 @@ def page_strategy_builder():
                         _db.log_trade(
                             stock_code=scfg.api_code, exchange=scfg.exchange,
                             strike=leg.strike, option_type=leg.option_type,
-                            expiry=sexpiry, action=leg.action, quantity=leg.quantity,
+                            expiry=leg_expiry, action=leg.action, quantity=leg.quantity,
                             price=0, order_type="market",
                             notes=f"Strategy: {sname_exec}"
                         )
@@ -3202,7 +3467,7 @@ def page_risk_monitor():
             st.success("✅ Limits updated")
 
     st.markdown("---")
-    tab1, tab2, tab3 = st.tabs(["📍 Positions", "⚙️ Stop-Losses", "🚨 Alerts"])
+    tab1, tab2, tab3, tab4 = st.tabs(["📍 Positions", "⚙️ Stop-Losses", "🧠 Smart Stops", "🚨 Alerts"])
 
     with tab1:
         all_pos = get_cached_positions(client)
@@ -3281,6 +3546,24 @@ def page_risk_monitor():
                             st.rerun()
 
     with tab3:
+        smart_rows = monitor.get_smart_stop_summary()
+        if smart_rows:
+            section("🧠 Smart Stops Status")
+            out = []
+            for row in smart_rows:
+                out.append({
+                    "Instrument": f"{C.api_code_to_display(row['stock'])} {row['strike']} {row['type']}",
+                    "Position": row["pos"].upper(),
+                    "Current ₹": f"{safe_float(row['current']):.2f}",
+                    "Recommended Stop ₹": "—" if row["recommended_stop"] is None else f"{safe_float(row['recommended_stop']):.2f}",
+                    "Auto Close": "YES" if row["auto_close"] else "NO",
+                    "Reason": row["reason"] or "—",
+                })
+            st.dataframe(pd.DataFrame(out), hide_index=True, use_container_width=True)
+        else:
+            empty_state("🧠", "No smart-stop data yet", "Add and monitor positions first")
+
+    with tab4:
         history = monitor.get_alert_history()
         db_alerts = _db.get_alerts(limit=50)
         if history or db_alerts:

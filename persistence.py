@@ -19,6 +19,7 @@ import pandas as pd
 log = logging.getLogger(__name__)
 
 DB_PATH = Path("data/breeze_trader.db")
+SCHEMA_VERSION = 5
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS trades (
@@ -117,6 +118,68 @@ CREATE INDEX IF NOT EXISTS idx_alerts_ts ON alerts_log(timestamp);
 """
 
 
+class DBMigrator:
+    """Versioned SQLite schema migration runner."""
+
+    def __init__(self):
+        self.migrations: Dict[int, List[str]] = {
+            1: ["ALTER TABLE trades ADD COLUMN notes TEXT"],
+            2: ["CREATE INDEX IF NOT EXISTS idx_trades_date ON trades(date)"],
+            3: [
+                """
+                CREATE TABLE IF NOT EXISTS market_regime_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    instrument TEXT NOT NULL,
+                    regime TEXT NOT NULL,
+                    confidence REAL DEFAULT 0
+                )
+                """
+            ],
+            4: ["ALTER TABLE alerts_log ADD COLUMN dispatched_channels TEXT"],
+            5: ["CREATE INDEX IF NOT EXISTS idx_watchlist_symbol ON watchlist(symbol)"],
+        }
+
+    def _ensure_version_table(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS schema_version (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL
+            )
+            """
+        )
+
+    def _get_version(self, conn: sqlite3.Connection) -> int:
+        self._ensure_version_table(conn)
+        row = conn.execute("SELECT MAX(version) AS version FROM schema_version").fetchone()
+        return int(row["version"]) if row and row["version"] is not None else 0
+
+    def _set_version(self, conn: sqlite3.Connection, version: int) -> None:
+        conn.execute(
+            "INSERT OR REPLACE INTO schema_version(version, applied_at) VALUES (?, ?)",
+            (version, datetime.now().isoformat()),
+        )
+
+    def run(self, conn: sqlite3.Connection) -> None:
+        current = self._get_version(conn)
+        for version in sorted(self.migrations):
+            if version <= current:
+                continue
+            for statement in self.migrations[version]:
+                try:
+                    conn.execute(statement)
+                except sqlite3.OperationalError as exc:
+                    # Keep migrations idempotent across existing user DBs.
+                    msg = str(exc).lower()
+                    if "duplicate column name" in msg or "already exists" in msg:
+                        log.debug(f"Skipping already-applied migration v{version}: {exc}")
+                        continue
+                    raise
+            self._set_version(conn, version)
+        conn.commit()
+
+
 class TradeDB:
     """Thread-safe singleton SQLite persistence."""
 
@@ -154,6 +217,7 @@ class TradeDB:
     def _init_schema(self):
         conn = self._get_conn()
         conn.executescript(SCHEMA)
+        DBMigrator().run(conn)
         conn.commit()
 
     @contextmanager

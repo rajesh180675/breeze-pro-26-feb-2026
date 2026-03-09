@@ -3,6 +3,7 @@ Strategy Builder — 15+ predefined strategies, payoff diagrams, metrics.
 """
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import List, Dict, Any, Optional
 import numpy as np
 import pandas as pd
@@ -143,6 +144,20 @@ PREDEFINED_STRATEGIES: Dict[str, Dict[str, Any]] = {
         "view": "Neutral/Mildly Bearish", "risk": "Unlimited (below)", "reward": "Limited",
         "category": "Advanced", "complexity": "Advanced",
     },
+    "Calendar Spread": {
+        "description": "Buy near-month option and sell far-month option at same strike (expiry differential play).",
+        "legs": [{"offset": 0, "type": "CE", "action": "buy", "label": "Near CE"},
+                 {"offset": 0, "type": "CE", "action": "sell", "label": "Far CE"}],
+        "view": "Volatility/Theta", "risk": "Limited", "reward": "Limited",
+        "category": "Advanced", "complexity": "Advanced",
+    },
+    "Diagonal Spread": {
+        "description": "Buy near-month ITM and sell far-month OTM (different strikes + expiries).",
+        "legs": [{"offset": -1, "type": "CE", "action": "buy", "label": "Near ITM CE"},
+                 {"offset": 1, "type": "CE", "action": "sell", "label": "Far OTM CE"}],
+        "view": "Directional/Theta", "risk": "Limited", "reward": "Limited",
+        "category": "Advanced", "complexity": "Advanced",
+    },
 }
 
 STRATEGY_CATEGORIES = sorted(set(v["category"] for v in PREDEFINED_STRATEGIES.values()))
@@ -164,7 +179,9 @@ def _snap_to_nearest_strike(target: int, available_strikes: Optional[set]) -> in
 def generate_strategy_legs(strategy_name: str, atm_strike: int,
                            strike_gap: int, lot_size: int,
                            lots: int = 1,
-                           available_strikes: Optional[set] = None) -> List[StrategyLeg]:
+                           available_strikes: Optional[set] = None,
+                           default_expiry: str = "",
+                           expiry_by_action: Optional[Dict[str, str]] = None) -> List[StrategyLeg]:
     """Generate legs for a predefined strategy.
 
     If *available_strikes* is provided, each computed strike is snapped to
@@ -184,6 +201,7 @@ def generate_strategy_legs(strategy_name: str, atm_strike: int,
             option_type=leg["type"],
             action=leg["action"],
             quantity=qty * multiplier,
+            expiry=(expiry_by_action or {}).get(leg["action"], default_expiry),
             label=leg.get("label", "")
         ))
     return legs
@@ -210,12 +228,23 @@ def calculate_strategy_metrics(legs: List[StrategyLeg]) -> Dict[str, Any]:
             be = spots[i] - payoffs[i] * (spots[i + 1] - spots[i]) / (payoffs[i + 1] - payoffs[i])
             breakevens.append(round(float(be), 0))
 
+    theta_differential = 0.0
+    for leg in legs:
+        if leg.expiry:
+            try:
+                dte = max((datetime.strptime(str(leg.expiry)[:10], "%Y-%m-%d") - datetime.now()).days, 1)
+            except ValueError:
+                dte = 1
+            theta_weight = (leg.quantity / np.sqrt(dte))
+            theta_differential += theta_weight if leg.action == "sell" else -theta_weight
+
     return {
         "net_premium": round(net_premium, 2),
         "max_profit": round(float(max(payoffs)), 2),
         "max_loss": round(float(min(payoffs)), 2),
         "breakevens": breakevens,
         "reward_risk": abs(round(float(max(payoffs)) / float(min(payoffs)), 2)) if min(payoffs) != 0 else float('inf'),
+        "theta_differential": round(float(theta_differential), 2),
     }
 
 
