@@ -257,31 +257,6 @@ RESPONSIVE_CSS = """
 # Do NOT add st.markdown() calls here at module scope.
 
 # ═══════════════════════════════════════════════════════════════
-# CONSTANTS
-# ═══════════════════════════════════════════════════════════════
-
-PAGES = {
-    "🏠 Dashboard": page_dashboard if "page_dashboard" in globals() else None,
-    "⛓️ Option Chain": page_option_chain if "page_option_chain" in globals() else None,
-    "💸 Sell Options": page_sell_options if "page_sell_options" in globals() else None,
-    "❌ Square Off": page_square_off if "page_square_off" in globals() else None,
-    "📋 Orders & Trades": page_orders_trades if "page_orders_trades" in globals() else None,
-    "💼 Positions": page_positions if "page_positions" in globals() else None,
-    "📊 Historical Data": page_historical_data if "page_historical_data" in globals() else None,
-    "📈 Futures Trading": page_futures_trading if "page_futures_trading" in globals() else None,
-    "⏰ GTT Orders": page_gtt_orders if "page_gtt_orders" in globals() else None,
-    "🧠 Strategy Builder": page_strategy_builder if "page_strategy_builder" in globals() else None,
-    "🔬 Analytics": page_analytics if "page_analytics" in globals() else None,
-    "🚨 Risk Monitor": page_risk_monitor if "page_risk_monitor" in globals() else None,
-    "👁️ Watchlist": page_watchlist if "page_watchlist" in globals() else None,
-    "📄 Paper Trading": None,
-    "⚙️ Settings": page_settings if "page_settings" in globals() else None,
-}
-
-AUTH_PAGES = set([k for k in PAGES.keys() if k != "🏠 Dashboard"])
-
-
-# ═══════════════════════════════════════════════════════════════
 # DECORATORS
 # ═══════════════════════════════════════════════════════════════
 
@@ -3932,7 +3907,7 @@ If a natural expiry date falls on a holiday → expiry is moved to the **previou
 # ROUTER
 # ═══════════════════════════════════════════════════════════════
 
-PAGE_FN = {
+PAGES = {
     "🏠 Dashboard": page_dashboard,
     "⛓️ Option Chain": page_option_chain,
     "💸 Sell Options": page_sell_options,
@@ -3949,6 +3924,8 @@ PAGE_FN = {
     "📄 Paper Trading": page_paper_trading,
     "⚙️ Settings": page_settings,
 }
+
+AUTH_PAGES = set([k for k in PAGES.keys() if k != "🏠 Dashboard"])
 
 
 def main():
@@ -4002,7 +3979,7 @@ def main():
                 st.rerun()
             return
 
-        PAGE_FN.get(page, page_dashboard)()
+        PAGES.get(page, page_dashboard)()
 
     except Exception as e:
         log.critical(f"Fatal: {e}", exc_info=True)
