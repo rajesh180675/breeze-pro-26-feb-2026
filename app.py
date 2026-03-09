@@ -944,7 +944,7 @@ def render_sidebar():
             profile_db = AccountProfileDB(_db)
             profiles = profile_db.get_profiles()
             active_profile = profile_db.get_active_profile()
-            if profiles:
+            if profiles and st.session_state.get("master_password"):
                 opts = [p["profile_name"] for p in profiles]
                 def _fmt_profile(name: str) -> str:
                     rec = next((p for p in profiles if p["profile_name"] == name), {})
@@ -957,6 +957,8 @@ def render_sidebar():
                     _cleanup_session()
                     st.success(f"Switched to {selected_profile}. Please login again.")
                     st.rerun()
+            elif profiles:
+                st.caption("Set master password in Settings to enable account switching.")
 
             # Status
             ms = C.get_market_status()
@@ -4367,6 +4369,9 @@ def render_account_switcher(db: TradeDB) -> None:
     if master_password:
         try:
             mgr = MultiAccountManager(master_password)
+            migrated = mgr.ensure_profiles_encrypted()
+            if migrated:
+                st.success(f"Migrated {migrated} legacy plaintext profile(s) to encrypted storage.")
         except Exception as exc:
             st.warning(f"Encrypted profile manager unavailable: {exc}")
     else:
