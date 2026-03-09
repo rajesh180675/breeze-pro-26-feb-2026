@@ -21,11 +21,17 @@ _SESSION_HEALTH_CHECK_INTERVAL = 300
 
 
 def check_session_health(client: Any) -> bool:
-    """Validate session token health with a lightweight funds call."""
+    """Validate session token health with a lightweight funds call.
+
+    Returns False only for *permanent* auth/session failures.
+    """
     try:
         resp = client.get_funds()
-    except Exception as exc:
-        log.warning("Session health check failed with exception: %s", exc)
+    except (ConnectionError, TimeoutError) as exc:
+        log.warning("Session health check transient failure: %s", exc)
+        return True
+    except Exception as exc:  # pragma: no cover - defensive for SDK/network errors
+        log.warning("Session health check unexpected error: %s", exc)
         return True
 
     if not isinstance(resp, dict):
@@ -34,9 +40,24 @@ def check_session_health(client: Any) -> bool:
     if resp.get("success"):
         return True
 
-    err_text = str(resp.get("error") or resp.get("message") or "").lower()
-    permanent_markers = ("invalid session", "unauthorized", "forbidden", "token")
+    payload = resp.get("data") if isinstance(resp.get("data"), dict) else {}
+    err_text = " ".join(
+        str(v) for v in [
+            resp.get("error"),
+            resp.get("message"),
+            payload.get("Error"),
+            payload.get("Status"),
+        ] if v
+    ).lower()
+
+    permanent_markers = (
+        "invalid session",
+        "session expired",
+        "unauthorized",
+        "forbidden",
+    )
     if any(marker in err_text for marker in permanent_markers):
+        Credentials.clear_runtime_credentials()
         log.warning("Detected permanent session error during health check: %s", err_text)
         return False
     return True
