@@ -49,6 +49,9 @@ def test_dispatch_is_async_and_deduplicates_within_5m(monkeypatch):
     time.sleep(0.02)
     first_calls = tg.calls
     assert first_calls == 1
+    hist = d.get_history(limit=1)
+    assert hist
+    assert "channels" in hist[0]
 
     d.dispatch(event)
     time.sleep(0.02)

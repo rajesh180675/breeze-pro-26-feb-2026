@@ -526,12 +526,17 @@ class LiveFeedManager:
         threading.Thread(target=self._worker_loop, daemon=True, name="LiveFeedWorker").start()
         threading.Thread(target=self._connect_with_backoff, daemon=True, name="LiveFeedConnector").start()
 
-    def disconnect(self) -> None:
+    def disconnect(self, clear_subscriptions: bool = True) -> None:
         self._stop_event.set()
         try:
             self._breeze.ws_disconnect()
         except Exception:
             pass
+        if clear_subscriptions:
+            with self._lock:
+                stale_tokens = [k for k, v in self._subscriptions.items() if v.sub_type == SubscriptionType.QUOTE]
+                self._subscriptions.clear()
+            self._tick_store.clear_tokens(stale_tokens)
         self._state = FeedState.STOPPED
 
     def is_connected(self) -> bool:

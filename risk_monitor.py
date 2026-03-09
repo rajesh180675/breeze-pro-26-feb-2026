@@ -114,6 +114,51 @@ class SmartStopManager:
         return decisions
 
 
+class ExpiryDayAutopilot:
+    """
+    Expiry-day timeline helper.
+    Does not place orders automatically unless explicitly enabled by user.
+    """
+
+    def evaluate(self, positions: List[MonitoredPosition], enabled: bool = False) -> Dict[str, Any]:
+        now = datetime.now()
+        expiring_today = [p for p in positions if self._is_expiry_today(p.expiry)]
+        timeline_msg = ""
+        stage = "IDLE"
+        if expiring_today:
+            hhmm = now.strftime("%H:%M")
+            if hhmm >= "15:25":
+                stage = "EMERGENCY_CLOSE"
+                timeline_msg = "15:25 IST emergency close window"
+            elif hhmm >= "15:15":
+                stage = "AUTO_CLOSE_WINDOW"
+                timeline_msg = "15:15 IST auto-close window"
+            elif hhmm >= "15:00":
+                stage = "FINAL_WARNING"
+                timeline_msg = "15:00 IST final warning window"
+            elif hhmm >= "14:30":
+                stage = "COUNTDOWN"
+                timeline_msg = "14:30 IST countdown active"
+            elif hhmm >= "14:00":
+                stage = "WARNING"
+                timeline_msg = "14:00 IST expiry warning active"
+        return {
+            "enabled": enabled,
+            "stage": stage,
+            "message": timeline_msg,
+            "expiring_positions": [p.position_id for p in expiring_today],
+            "should_auto_close": bool(enabled and stage in {"AUTO_CLOSE_WINDOW", "EMERGENCY_CLOSE"}),
+        }
+
+    @staticmethod
+    def _is_expiry_today(expiry: str) -> bool:
+        try:
+            exp = datetime.strptime(str(expiry)[:10], "%Y-%m-%d").date()
+            return exp == datetime.now().date()
+        except Exception:
+            return False
+
+
 class RiskMonitor:
     """
     Background risk monitor with:

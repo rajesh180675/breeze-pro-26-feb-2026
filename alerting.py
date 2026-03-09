@@ -325,7 +325,7 @@ class AlertDispatcher:
         return hashlib.sha256(blob.encode()).hexdigest()
 
     def dispatch(self, event: AlertEvent) -> None:
-        """Non-blocking dispatch. Duplicate events within 60s are dropped."""
+        """Non-blocking dispatch. Duplicate events within 5 minutes are dropped."""
         now = time.time()
         key = self._event_key(event)
         with self._lock:
@@ -333,9 +333,6 @@ class AlertDispatcher:
             if key in self._dedupe_cache:
                 return
             self._dedupe_cache[key] = now
-            self._history.append({"type": event.alert_type, "level": event.level.value, "title": event.title, "timestamp": event.timestamp})
-            if len(self._history) > self.MAX_HISTORY:
-                self._history = self._history[-self.MAX_HISTORY :]
 
         try:
             self._queue.put_nowait(event)
@@ -355,17 +352,35 @@ class AlertDispatcher:
 
     def _send_all(self, event: AlertEvent) -> None:
         rendered = self._render_template(event)
+        channels: List[str] = []
         if self._telegram:
-            self._telegram.send(rendered)
+            if self._telegram.send(rendered):
+                channels.append("telegram")
         if self._email:
             subject, html = self._email.format_alert(event)
-            self._email.send(subject, html)
+            if self._email.send(subject, html):
+                channels.append("email")
         if self._webhook:
-            self._webhook.send(event)
+            if self._webhook.send(event):
+                channels.append("webhook")
         if self._discord:
-            self._discord.send(event)
+            if self._discord.send(event):
+                channels.append("discord")
         if self._whatsapp:
-            self._whatsapp.send(rendered)
+            if self._whatsapp.send(rendered):
+                channels.append("whatsapp")
+        with self._lock:
+            self._history.append(
+                {
+                    "type": event.alert_type,
+                    "level": event.level.value,
+                    "title": event.title,
+                    "timestamp": event.timestamp,
+                    "channels": ",".join(channels) if channels else "none",
+                }
+            )
+            if len(self._history) > self.MAX_HISTORY:
+                self._history = self._history[-self.MAX_HISTORY :]
 
     def get_history(self, limit: int = 50) -> List[Dict]:
         with self._lock:
