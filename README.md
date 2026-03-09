@@ -34,6 +34,10 @@ pytest tests/unit --cov=app/lib --cov-report=term-missing
 pytest tests/integration -m integration
 ```
 Integration tests auto-skip when Breeze credentials are missing.
+Use strict mode to fail-fast when integration validation is mandatory:
+```bash
+BREEZE_INTEGRATION_STRICT=true pytest tests/integration -m integration
+```
 
 ## Docker
 ```bash
@@ -62,4 +66,3 @@ See `k8s/deployment.yaml` for deployment, service, probes, and HPA example.
 - Optional bridge mode is now available to route supported frontend calls through the new production wrapper (`app/lib/breeze_client.py`) by setting:
   - `BREEZE_USE_PRODUCTION_CLIENT=true`
 - In bridge mode, `get_positions()` uses the production client first and safely falls back to SDK behavior if needed.
-
