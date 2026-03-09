@@ -16,6 +16,32 @@ import app_config as C
 log = logging.getLogger(__name__)
 
 
+# Session health checks are throttled in app.get_client()
+_SESSION_HEALTH_CHECK_INTERVAL = 300
+
+
+def check_session_health(client: Any) -> bool:
+    """Validate session token health with a lightweight funds call."""
+    try:
+        resp = client.get_funds()
+    except Exception as exc:
+        log.warning("Session health check failed with exception: %s", exc)
+        return True
+
+    if not isinstance(resp, dict):
+        return True
+
+    if resp.get("success"):
+        return True
+
+    err_text = str(resp.get("error") or resp.get("message") or "").lower()
+    permanent_markers = ("invalid session", "unauthorized", "forbidden", "token")
+    if any(marker in err_text for marker in permanent_markers):
+        log.warning("Detected permanent session error during health check: %s", err_text)
+        return False
+    return True
+
+
 class Credentials:
     @staticmethod
     def get_stored_api_key():
