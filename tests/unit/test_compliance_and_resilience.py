@@ -6,8 +6,10 @@ import pandas as pd
 
 if "breeze_connect" not in sys.modules:
     stub = types.ModuleType("breeze_connect")
+
     class _DummyBreezeConnect:  # pragma: no cover
         pass
+
     stub.BreezeConnect = _DummyBreezeConnect
     sys.modules["breeze_connect"] = stub
 
