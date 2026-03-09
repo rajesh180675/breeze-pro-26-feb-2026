@@ -252,9 +252,7 @@ RESPONSIVE_CSS = """
 </style>
 """
 
-# NOTE: THEME_CSS / BREEZE_PRO_CSS are injected inside main() to avoid
-# module-level Streamlit calls which execute on every file reload.
-# Do NOT add st.markdown() calls here at module scope.
+st.markdown(THEME_CSS, unsafe_allow_html=True)
 
 # ═══════════════════════════════════════════════════════════════
 # CONSTANTS
@@ -274,7 +272,7 @@ PAGES = {
     "🔬 Analytics": page_analytics if "page_analytics" in globals() else None,
     "🚨 Risk Monitor": page_risk_monitor if "page_risk_monitor" in globals() else None,
     "👁️ Watchlist": page_watchlist if "page_watchlist" in globals() else None,
-    "📄 Paper Trading": page_paper_trading if "page_paper_trading" in globals() else None,
+    "📄 Paper Trading": None,
     "⚙️ Settings": page_settings if "page_settings" in globals() else None,
 }
 

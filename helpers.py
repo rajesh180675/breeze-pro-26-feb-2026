@@ -476,7 +476,7 @@ def optimize_dataframe_dtypes(df: pd.DataFrame) -> pd.DataFrame:
         optimized[col] = pd.to_numeric(optimized[col], downcast="float")
     for col in optimized.select_dtypes(include=["int64"]).columns:
         optimized[col] = pd.to_numeric(optimized[col], downcast="integer")
-    for col in optimized.select_dtypes(include=["object", "string"]).columns:
+    for col in optimized.select_dtypes(include=["object"]).columns:
         series = optimized[col]
         if len(series) == 0:
             continue

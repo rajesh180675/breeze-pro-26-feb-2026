@@ -289,38 +289,6 @@ def auto_connect_with_totp(client, api_key: str, session_token: str, totp_secret
     return client.connect(token)
 
 
-_SESSION_HEALTH_CHECK_INTERVAL = 300  # seconds — check every 5 minutes
-
-
-def check_session_health(client) -> bool:
-    """Validate that the current Breeze session is still active.
-
-    Makes a cheap API call (get_funds) and inspects the result for
-    PERMANENT error patterns that indicate the session has expired or
-    been revoked.  Returns True if the session is healthy.
-
-    The caller should clear credentials and force re-login when this
-    returns False.
-    """
-    _PERMANENT_PATTERNS = ("invalid session", "session expired", "unauthorized", "forbidden")
-    try:
-        resp = client.get_funds()
-        if isinstance(resp, dict):
-            if resp.get("success"):
-                return True
-            msg = str(resp.get("message", "")).lower()
-            for pat in _PERMANENT_PATTERNS:
-                if pat in msg:
-                    log.warning("Session health check: PERMANENT failure — %s", msg)
-                    return False
-            # Non-permanent failure (e.g. transient 503) — treat as healthy
-            return True
-        return True
-    except Exception as exc:
-        log.warning("Session health check exception: %s", exc)
-        return True  # network blip — don't invalidate
-
-
 class AppWarmupManager:
     """Background prefetch manager to reduce first-page latency after login."""
 
