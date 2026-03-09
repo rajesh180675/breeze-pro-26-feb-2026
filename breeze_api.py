@@ -523,6 +523,19 @@ class BreezeAPIClient:
         return self._ok(data)
 
     @retry_api_call(max_attempts=2, initial_delay=0.5)
+    def get_india_vix(self):
+        """Fetch INDIA VIX quote from NSE cash segment."""
+        self._require_connection()
+        return self.get_quotes(
+            stock_code="INDIAVIX",
+            exchange_code="NSE",
+            product_type="cash",
+            right="",
+            strike_price="",
+            expiry_date="",
+        )
+
+    @retry_api_call(max_attempts=2, initial_delay=0.5)
     def get_order_list(self, exchange="", from_date="", to_date=""):
         """Fetch order list.
 

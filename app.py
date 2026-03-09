@@ -482,6 +482,77 @@ def get_cached_positions(client):
     return None
 
 
+def get_dashboard_metrics(client, cache):
+    """Compute top dashboard metrics with cache-aware fetches."""
+    metrics = {
+        "nifty_spot": 0.0,
+        "banknifty_spot": 0.0,
+        "india_vix": 0.0,
+        "nifty_pcr": 0.0,
+        "nifty_max_pain": 0,
+        "market_status": get_market_status(),
+        "session_time": SessionState.get_login_duration() or "0h 0m",
+    }
+
+    def _fetch_spot(api_code: str, exchange: str) -> float:
+        ck = f"spot_{api_code}"
+        cached_spot = cache.get(ck, "spot")
+        if cached_spot is not None:
+            return safe_float(cached_spot, 0.0)
+        try:
+            spot_resp = client.get_spot_price(api_code, exchange)
+            if spot_resp.get("success"):
+                items = APIResponse(spot_resp).items
+                if items:
+                    ltp = safe_float(items[0].get("ltp", 0), 0.0)
+                    if ltp > 0:
+                        cache.set(ck, ltp, "spot", C.SPOT_CACHE_TTL_SECONDS)
+                        return ltp
+        except Exception as exc:
+            log.debug("Dashboard spot fetch failed for %s: %s", api_code, exc)
+        return 0.0
+
+    nifty_cfg = C.get_instrument("NIFTY")
+    bank_cfg = C.get_instrument("BANKNIFTY")
+    metrics["nifty_spot"] = _fetch_spot(nifty_cfg.api_code, nifty_cfg.exchange)
+    metrics["banknifty_spot"] = _fetch_spot(bank_cfg.api_code, bank_cfg.exchange)
+
+    vix_cached = cache.get("india_vix", "quote")
+    if vix_cached is not None:
+        metrics["india_vix"] = safe_float(vix_cached, 0.0)
+    else:
+        try:
+            vix_resp = client.get_india_vix()
+            if vix_resp.get("success"):
+                items = APIResponse(vix_resp).items
+                if items:
+                    vix_ltp = safe_float(items[0].get("ltp", 0), 0.0)
+                    metrics["india_vix"] = vix_ltp
+                    cache.set("india_vix", vix_ltp, "quote", C.QUOTE_CACHE_TTL_SECONDS)
+        except Exception as exc:
+            log.debug("Dashboard INDIA VIX fetch failed: %s", exc)
+
+    try:
+        expiries = C.get_next_expiries("NIFTY", 1)
+        if expiries:
+            expiry = expiries[0]
+            chain_key = f"oc_{nifty_cfg.api_code}_{expiry}"
+            chain_df = cache.get(chain_key, "option_chain")
+            if chain_df is None:
+                resp = client.get_option_chain(nifty_cfg.api_code, nifty_cfg.exchange, expiry)
+                if resp.get("success"):
+                    chain_df = process_option_chain(resp.get("data", {}))
+                    if chain_df is not None and not chain_df.empty:
+                        cache.set(chain_key, chain_df, "option_chain", C.OC_CACHE_TTL_SECONDS)
+            if chain_df is not None and not chain_df.empty:
+                metrics["nifty_pcr"] = calculate_pcr(chain_df)
+                metrics["nifty_max_pain"] = calculate_max_pain(chain_df)
+    except Exception as exc:
+        log.debug("Dashboard NIFTY chain metrics failed: %s", exc)
+
+    return metrics
+
+
 def split_positions(all_pos):
     options, equities = [], []
     for p in (all_pos or []):
@@ -873,6 +944,68 @@ def page_dashboard():
         return
 
     render_auto_refresh("dashboard")
+
+    dashboard_metrics = get_dashboard_metrics(client, CacheManager)
+    prev_dashboard_metrics = st.session_state.get("dashboard_metrics_prev", {})
+
+    def _numeric_delta(current, previous, decimals=2):
+        if previous is None:
+            return None
+        curr = safe_float(current, 0.0)
+        prev = safe_float(previous, 0.0)
+        return f"{curr - prev:+.{decimals}f}"
+
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stMetric"] {
+            background: linear-gradient(135deg, #f7fbff, #eef6ff);
+            border: 1px solid #cfe2ff;
+            border-radius: 10px;
+            padding: 0.55rem 0.8rem;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    mc = st.columns(7)
+    mc[0].metric(
+        "NIFTY Spot",
+        f"{dashboard_metrics['nifty_spot']:,.2f}" if dashboard_metrics["nifty_spot"] > 0 else "—",
+        _numeric_delta(dashboard_metrics["nifty_spot"], prev_dashboard_metrics.get("nifty_spot"), 2),
+    )
+    mc[1].metric(
+        "BANKNIFTY Spot",
+        f"{dashboard_metrics['banknifty_spot']:,.2f}" if dashboard_metrics["banknifty_spot"] > 0 else "—",
+        _numeric_delta(dashboard_metrics["banknifty_spot"], prev_dashboard_metrics.get("banknifty_spot"), 2),
+    )
+    mc[2].metric(
+        "VIX",
+        f"{dashboard_metrics['india_vix']:.2f}" if dashboard_metrics["india_vix"] > 0 else "—",
+        _numeric_delta(dashboard_metrics["india_vix"], prev_dashboard_metrics.get("india_vix"), 2),
+    )
+    mc[3].metric(
+        "NIFTY PCR",
+        f"{dashboard_metrics['nifty_pcr']:.2f}",
+        _numeric_delta(dashboard_metrics["nifty_pcr"], prev_dashboard_metrics.get("nifty_pcr"), 3),
+    )
+    mc[4].metric(
+        "NIFTY Max Pain",
+        f"{int(dashboard_metrics['nifty_max_pain']):,}" if dashboard_metrics["nifty_max_pain"] else "—",
+        _numeric_delta(dashboard_metrics["nifty_max_pain"], prev_dashboard_metrics.get("nifty_max_pain"), 0),
+    )
+
+    previous_status = prev_dashboard_metrics.get("market_status")
+    status_delta = None
+    if previous_status and previous_status != dashboard_metrics["market_status"]:
+        status_delta = "Changed"
+    mc[5].metric("Market Status", dashboard_metrics["market_status"], status_delta)
+
+    previous_session = prev_dashboard_metrics.get("session_time")
+    session_delta = f"was {previous_session}" if previous_session and previous_session != dashboard_metrics["session_time"] else None
+    mc[6].metric("Session Time", dashboard_metrics["session_time"], session_delta)
+    st.session_state["dashboard_metrics_prev"] = dashboard_metrics
 
     # ── Account Overview ──────────────────────────────────────
     section("💰 Account Overview")
