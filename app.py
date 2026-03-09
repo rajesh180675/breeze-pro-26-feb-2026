@@ -1165,6 +1165,11 @@ def page_option_chain():
 
     view = st.radio("View", ["Traditional", "Flat", "Calls Only", "Puts Only", "IV Smile"],
                     horizontal=True, key="oc_v")
+    with st.sidebar.expander("⛓️ Chain Options", expanded=False):
+        show_oi_heatmap = st.checkbox("OI Change % Heatmap", value=True, key="oc_opt_oi_heatmap")
+        show_pcr_gauge = st.checkbox("PCR Gauge", value=True, key="oc_opt_pcr_gauge")
+        show_max_pain_marker = st.checkbox("Max Pain Marker", value=True, key="oc_opt_max_pain")
+        show_export_chain = st.checkbox("Export Chain CSV", value=True, key="oc_opt_export")
 
     ck = f"oc_{cfg.api_code}_{expiry}"
     if refresh:
@@ -1243,6 +1248,16 @@ def page_option_chain():
     mc[5].metric("Call OI", format_number(total_call_oi))
     mc[6].metric("Put OI", format_number(total_put_oi))
 
+    if show_pcr_gauge:
+        gauge_value = max(0.0, min(pcr / 2.0, 1.0))
+        st.progress(gauge_value, text=f"NIFTY PCR Gauge: {pcr:.2f}")
+        pcr_tone = "Bullish" if pcr >= 1.0 else "Bearish"
+        pcr_color = "#28a745" if pcr >= 1.0 else "#dc3545"
+        st.markdown(
+            f"<span style='font-weight:700;color:{pcr_color}'>PCR Signal: {pcr_tone}</span>",
+            unsafe_allow_html=True,
+        )
+
     if dte <= 0:
         warn_box("⚠️ <b>Expiry Day!</b> Options expire today. Consider squaring off short positions.")
 
@@ -1283,17 +1298,72 @@ def page_option_chain():
         except Exception as e:
             log.debug(f"Greeks calc failed: {e}")
 
+    def _prepare_enhanced_chain(frame: pd.DataFrame) -> pd.DataFrame:
+        if frame is None or frame.empty:
+            return frame
+        enhanced = frame.copy()
+        if show_oi_heatmap and {"oi_change", "open_interest"}.issubset(enhanced.columns):
+            oi = pd.to_numeric(enhanced["open_interest"], errors="coerce")
+            oic = pd.to_numeric(enhanced["oi_change"], errors="coerce")
+            with np.errstate(divide="ignore", invalid="ignore"):
+                enhanced["OI Change %"] = np.where(
+                    oi > 0,
+                    (oic / oi) * 100.0,
+                    np.nan,
+                )
+        if show_max_pain_marker and "strike_price" in enhanced.columns and mp > 0:
+            marked = []
+            for strike in pd.to_numeric(enhanced["strike_price"], errors="coerce").tolist():
+                if pd.isna(strike):
+                    marked.append("—")
+                    continue
+                strike_int = int(round(float(strike)))
+                marked.append(f"🎯 {strike_int}" if strike_int == int(mp) else f"{strike_int}")
+            enhanced["Strike"] = marked
+        return enhanced
+
     # ── Display ───────────────────────────────────────────────
     if view == "Traditional":
         pv = create_pivot_table(ddf)
-        tgt = pv if not pv.empty else ddf
-        st.dataframe(tgt, height=600, hide_index=True, use_container_width=True)
+        if show_max_pain_marker and not pv.empty and "Strike" in pv.columns and mp > 0:
+            pv = pv.copy()
+            pv["Strike"] = pv["Strike"].apply(
+                lambda strike: f"🎯 {int(strike)}" if safe_int(strike) == int(mp) else f"{safe_int(strike)}"
+            )
+        tgt = pv if not pv.empty else _prepare_enhanced_chain(ddf)
+        if show_oi_heatmap and "OI Change %" in tgt.columns:
+            st.dataframe(
+                tgt.style.background_gradient(cmap="RdYlGn", subset=["OI Change %"]),
+                height=600,
+                hide_index=True,
+                use_container_width=True,
+            )
+        else:
+            st.dataframe(tgt, height=600, hide_index=True, use_container_width=True)
     elif view == "Calls Only":
         cd = ddf[ddf["right"] == "Call"] if "right" in ddf.columns else ddf
-        st.dataframe(cd, height=600, hide_index=True, use_container_width=True)
+        cd = _prepare_enhanced_chain(cd)
+        if show_oi_heatmap and "OI Change %" in cd.columns:
+            st.dataframe(
+                cd.style.background_gradient(cmap="RdYlGn", subset=["OI Change %"]),
+                height=600,
+                hide_index=True,
+                use_container_width=True,
+            )
+        else:
+            st.dataframe(cd, height=600, hide_index=True, use_container_width=True)
     elif view == "Puts Only":
         pd_ = ddf[ddf["right"] == "Put"] if "right" in ddf.columns else ddf
-        st.dataframe(pd_, height=600, hide_index=True, use_container_width=True)
+        pd_ = _prepare_enhanced_chain(pd_)
+        if show_oi_heatmap and "OI Change %" in pd_.columns:
+            st.dataframe(
+                pd_.style.background_gradient(cmap="RdYlGn", subset=["OI Change %"]),
+                height=600,
+                hide_index=True,
+                use_container_width=True,
+            )
+        else:
+            st.dataframe(pd_, height=600, hide_index=True, use_container_width=True)
     elif view == "IV Smile":
         # Compute and plot IV smile
         if spot_for_greeks > 0:
@@ -1312,7 +1382,16 @@ def page_option_chain():
         else:
             st.info("Cannot compute IV smile without spot price")
     else:  # Flat
-        st.dataframe(ddf, height=600, hide_index=True, use_container_width=True)
+        flat_df = _prepare_enhanced_chain(ddf)
+        if show_oi_heatmap and "OI Change %" in flat_df.columns:
+            st.dataframe(
+                flat_df.style.background_gradient(cmap="RdYlGn", subset=["OI Change %"]),
+                height=600,
+                hide_index=True,
+                use_container_width=True,
+            )
+        else:
+            st.dataframe(flat_df, height=600, hide_index=True, use_container_width=True)
 
     # ── OI Chart ──────────────────────────────────────────────
     if "right" in ddf.columns and "open_interest" in ddf.columns and view != "IV Smile":
@@ -1341,7 +1420,7 @@ def page_option_chain():
             log.debug(f"OI chart error: {e}")
 
     # ── Export ────────────────────────────────────────────────
-    if not ddf.empty:
+    if show_export_chain and not ddf.empty:
         export_to_csv(ddf, f"option_chain_{inst}_{expiry}.csv")
 
 
