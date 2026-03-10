@@ -1110,6 +1110,12 @@ class BreezeAPIClient:
     ) -> Dict:
         """Get real-time futures quote."""
         self._require_connection()
+        if exchange_code not in {"NFO", "BFO"}:
+            return {
+                "success": False,
+                "message": f"Invalid futures exchange_code: {exchange_code}. Allowed: NFO, BFO",
+                "data": {},
+            }
         expiry_iso = convert_to_breeze_datetime(expiry_date) if expiry_date else ""
         return self.call_sdk(
             "get_quotes",

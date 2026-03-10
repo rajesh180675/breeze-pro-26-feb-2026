@@ -1,3 +1,18 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: trading
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: breeze-service-config
+  namespace: trading
+data:
+  APP_ENV: "production"
+  LOG_LEVEL: "INFO"
+  APP_VERSION: "11.0.0"
+---
 # Breeze PRO — Kubernetes manifests
 # Tested against Kubernetes 1.28+
 apiVersion: apps/v1
@@ -37,6 +52,8 @@ spec:
             - name: streamlit
               containerPort: 8501
           envFrom:
+            - configMapRef:
+                name: breeze-service-config
             - secretRef:
                 name: breeze-service-secrets
           securityContext:

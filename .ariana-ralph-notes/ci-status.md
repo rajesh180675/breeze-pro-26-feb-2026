@@ -51,3 +51,9 @@ Coverage breakdown:
 4. Add tests for `auth.py` gaps (FileTokenStore load/save, edge cases)
 
 Getting `breeze_ws.py` and `logging_config.py` from 0% to even 50% would push overall coverage significantly toward 80%.
+
+## v11 autonomous pass update
+
+- Updated CI to Python 3.11/3.12 matrix with pip cache.
+- Replaced fixed docker sleep with retry-based health polling.
+- Added new unit tests for futures, holiday calendar, GTT validators, historical cache, futures quote validation.

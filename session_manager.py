@@ -354,6 +354,29 @@ class MultiAccountManager:
         raise KeyError(f"Profile not found: {profile_id}")
 
 
+
+_MULTI_ACCOUNT_MANAGER: Optional[MultiAccountManager] = None
+
+
+def get_multi_account_manager(master_password: Optional[str] = None) -> MultiAccountManager:
+    """Return a process-level MultiAccountManager singleton."""
+    global _MULTI_ACCOUNT_MANAGER
+    if _MULTI_ACCOUNT_MANAGER is None:
+        resolved_password = (
+            master_password
+            or os.getenv("BREEZE_MASTER_PASSWORD", "")
+            or st.session_state.get("master_password", "")
+            or "breeze-pro"
+        )
+        _MULTI_ACCOUNT_MANAGER = MultiAccountManager(resolved_password)
+    return _MULTI_ACCOUNT_MANAGER
+
+
+def delete_profile(profile_id: str, master_password: Optional[str] = None) -> None:
+    """Compatibility helper to delete a stored account profile by ID."""
+    mgr = get_multi_account_manager(master_password=master_password)
+    mgr.delete_profile(profile_id)
+
 class CacheManager:
     @staticmethod
     def _key(k, t):

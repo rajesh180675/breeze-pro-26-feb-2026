@@ -194,9 +194,8 @@ class GTTManager:
         self._last_sync: Optional[datetime] = None
 
     def _ensure_schema(self) -> None:
-        conn = self._db._get_conn()
-        conn.executescript(GTT_SCHEMA)
-        conn.commit()
+        with self._db._tx() as conn:
+            conn.executescript(GTT_SCHEMA)
 
     def place_single_leg(self, req: GTTOrderRequest) -> Dict:
         is_valid, err = validate_gtt_request(req)
