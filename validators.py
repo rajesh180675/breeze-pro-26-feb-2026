@@ -101,9 +101,9 @@ def validate_date_range(from_date: date, to_date: date) -> bool:
         )
     
     days_diff = (to_date - from_date).days
-    if days_diff > 90:
+    if days_diff > 365:
         raise ValueError(
-            f"Date range of {days_diff} days exceeds maximum of 90 days. "
+            f"Date range of {days_diff} days exceeds maximum of 365 days. "
             f"Please use a shorter range."
         )
     
@@ -138,4 +138,3 @@ def validate_api_credentials(api_key: str, api_secret: str, session_token: str) 
         )
     
     return True
-
