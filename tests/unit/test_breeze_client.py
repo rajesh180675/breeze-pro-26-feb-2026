@@ -211,7 +211,7 @@ def test_circuit_records_success_after_ok_response(client):
     client.session.request = Mock(return_value=_response(200, {"ok": True}))
     client.request("GET", endpoint)
     # After a success, the closed state should allow the next request through
-    assert client.circuit._failures.get(endpoint, 0) == 0
+    assert len(client.circuit._errors.get(endpoint, [])) == 0
 
 
 def test_request_with_empty_response_body(client):

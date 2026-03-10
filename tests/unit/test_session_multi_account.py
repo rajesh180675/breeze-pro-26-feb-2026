@@ -1,4 +1,9 @@
-from session_manager import MultiAccountManager, AccountProfile
+from session_manager import (
+    AccountProfile,
+    MultiAccountManager,
+    delete_profile,
+    get_multi_account_manager,
+)
 from persistence import TradeDB
 
 
@@ -31,3 +36,31 @@ def test_ensure_profiles_encrypted_migrates_plaintext():
     mgr = MultiAccountManager("test-master-password")
     migrated = mgr.ensure_profiles_encrypted()
     assert migrated >= 1
+
+
+def test_delete_profile_compat_wrapper(monkeypatch):
+    mgr = MultiAccountManager("test-master-password")
+    mgr.add_profile(
+        AccountProfile(
+            profile_id="",
+            display_name="delete-me",
+            api_key="k",
+            api_secret="s",
+            totp_secret="t",
+        )
+    )
+    profiles = mgr.list_profiles()
+    target = next(p for p in profiles if p.display_name == "delete-me")
+
+    monkeypatch.setattr("session_manager._MULTI_ACCOUNT_MANAGER", mgr)
+    delete_profile(target.profile_id)
+
+    names = {p.display_name for p in mgr.list_profiles()}
+    assert "delete-me" not in names
+
+
+def test_get_multi_account_manager_singleton(monkeypatch):
+    monkeypatch.setattr("session_manager._MULTI_ACCOUNT_MANAGER", None)
+    a = get_multi_account_manager(master_password="pw1")
+    b = get_multi_account_manager(master_password="pw2")
+    assert a is b
