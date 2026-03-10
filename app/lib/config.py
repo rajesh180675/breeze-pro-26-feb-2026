@@ -35,6 +35,10 @@ class Settings:
     circuit_open_seconds: int = 45
     token_cache_file: str | None = None
     websocket_max_subscriptions: int = 2000
+    sqlite_db_path: str = "data/breeze_trader.db"
+    app_version: str = "0.1.0"
+    app_build: str | None = None
+    app_commit: str | None = None
 
 
 @lru_cache(maxsize=1)
@@ -58,4 +62,8 @@ def get_settings() -> Settings:
         circuit_open_seconds=_env_int("CIRCUIT_OPEN_SECONDS", 45),
         token_cache_file=os.getenv("TOKEN_CACHE_FILE"),
         websocket_max_subscriptions=_env_int("WEBSOCKET_MAX_SUBSCRIPTIONS", 2000),
+        sqlite_db_path=os.getenv("SQLITE_DB_PATH", "data/breeze_trader.db"),
+        app_version=os.getenv("APP_VERSION", "0.1.0"),
+        app_build=os.getenv("APP_BUILD"),
+        app_commit=os.getenv("APP_COMMIT"),
     )
