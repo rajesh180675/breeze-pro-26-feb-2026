@@ -350,24 +350,48 @@ class AlertDispatcher:
             finally:
                 self._queue.task_done()
 
+    def _send_with_retry(
+        self,
+        send_fn: Any,
+        payload: Tuple[Any, ...],
+        channel_name: str,
+        event_title: str,
+    ) -> bool:
+        try:
+            if send_fn(*payload):
+                return True
+        except Exception as exc:
+            log.error("Alert dispatch error on %s: %s", channel_name, exc)
+
+        time.sleep(2)
+
+        try:
+            if send_fn(*payload):
+                return True
+        except Exception as exc:
+            log.error("Alert retry dispatch error on %s: %s", channel_name, exc)
+
+        log.warning("Alert dispatch failed after retry: channel=%s title=%s", channel_name, event_title)
+        return False
+
     def _send_all(self, event: AlertEvent) -> None:
         rendered = self._render_template(event)
         channels: List[str] = []
         if self._telegram:
-            if self._telegram.send(rendered):
+            if self._send_with_retry(self._telegram.send, (rendered,), "telegram", event.title):
                 channels.append("telegram")
         if self._email:
             subject, html = self._email.format_alert(event)
-            if self._email.send(subject, html):
+            if self._send_with_retry(self._email.send, (subject, html), "email", event.title):
                 channels.append("email")
         if self._webhook:
-            if self._webhook.send(event):
+            if self._send_with_retry(self._webhook.send, (event,), "webhook", event.title):
                 channels.append("webhook")
         if self._discord:
-            if self._discord.send(event):
+            if self._send_with_retry(self._discord.send, (event,), "discord", event.title):
                 channels.append("discord")
         if self._whatsapp:
-            if self._whatsapp.send(rendered):
+            if self._send_with_retry(self._whatsapp.send, (rendered,), "whatsapp", event.title):
                 channels.append("whatsapp")
         with self._lock:
             self._history.append(
