@@ -466,7 +466,7 @@ def calculate_days_to_expiry(expiry_date: str) -> int:
             expiry = datetime.strptime(s, fmt)
             # Use IST (UTC+5:30) for "today" to avoid off-by-one around midnight
             from datetime import timezone, timedelta as _td
-            ist_now = datetime.now(tz=timezone(timedelta(hours=5, minutes=30))).date()
+            ist_now = datetime.now(tz=timezone(_td(hours=5, minutes=30))).date()
             return max(0, (expiry.date() - ist_now).days)
         except ValueError:
             continue
