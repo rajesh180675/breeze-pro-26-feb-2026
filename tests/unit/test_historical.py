@@ -1,5 +1,6 @@
 import pandas as pd
 
+import historical
 from historical import HistoricalCache, HistoricalDataFetcher
 
 
@@ -83,3 +84,44 @@ def test_intraday_chunking_is_bounded():
     )
 
     assert fetcher.last_api_calls <= 5
+
+
+def test_intraday_multi_chunk_fetch_sleeps_between_chunks(monkeypatch):
+    client = _FakeClient()
+    fetcher = HistoricalDataFetcher(client, cache=HistoricalCache(ttl_seconds=0))
+    sleep_calls = []
+
+    monkeypatch.setattr(historical.time, "sleep", lambda seconds: sleep_calls.append(seconds))
+
+    _ = fetcher.fetch(
+        stock_code="NIFTY",
+        exchange_code="NSE",
+        product_type="cash",
+        from_date="2025-01-01",
+        to_date="2025-04-30",
+        interval="30minute",
+    )
+
+    assert fetcher.last_api_calls > 1
+    assert len(sleep_calls) == fetcher.last_api_calls
+    assert sleep_calls == [0.3] * fetcher.last_api_calls
+
+
+def test_single_chunk_fetch_does_not_sleep(monkeypatch):
+    client = _FakeClient()
+    fetcher = HistoricalDataFetcher(client, cache=HistoricalCache(ttl_seconds=0))
+    sleep_calls = []
+
+    monkeypatch.setattr(historical.time, "sleep", lambda seconds: sleep_calls.append(seconds))
+
+    _ = fetcher.fetch(
+        stock_code="NIFTY",
+        exchange_code="NSE",
+        product_type="cash",
+        from_date="2025-01-01",
+        to_date="2025-01-03",
+        interval="1minute",
+    )
+
+    assert fetcher.last_api_calls == 1
+    assert sleep_calls == []
