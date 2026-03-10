@@ -32,3 +32,9 @@ NOT to weaken coverage requirements or skip tests entirely.
 ## Root-level files are tightly coupled
 
 The Streamlit `app.py` imports from nearly every root-level module. Changing any of them (e.g., fixing lint in `analytics.py`) risks breaking the UI. Treat them as a unit — don't touch them unless you're specifically working on Streamlit features.
+
+## v11 autonomous pass
+
+- Readiness checks should validate both env vars and DB connectivity.
+- Alert channel retries reduce transient notification loss with minimal complexity.
+- Historical API chunking benefits from explicit inter-chunk pacing to avoid provider throttling.

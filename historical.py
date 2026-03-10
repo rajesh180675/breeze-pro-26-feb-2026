@@ -27,6 +27,7 @@ class HistoricalCache:
         self.ttl_seconds = ttl_seconds
         self._store: Dict[str, Dict] = {}
         self._lock = threading.RLock()
+        self._cache_misses = 0
 
     @staticmethod
     def _key(params: Dict) -> str:
@@ -38,9 +39,15 @@ class HistoricalCache:
         with self._lock:
             item = self._store.get(key)
             if not item:
+                self._cache_misses += 1
+                if self._cache_misses % 500 == 0:
+                    self.purge_expired()
                 return None
             if (time.time() - item["ts"]) > self.ttl_seconds:
                 self._store.pop(key, None)
+                self._cache_misses += 1
+                if self._cache_misses % 500 == 0:
+                    self.purge_expired()
                 return None
             return item["df"].copy()
 

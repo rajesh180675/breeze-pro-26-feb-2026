@@ -410,6 +410,15 @@ class AlertDispatcher:
         with self._lock:
             return list(reversed(self._history[-limit:]))
 
+    def flush(self, timeout: float = 5.0) -> bool:
+        """Drain pending alerts synchronously (useful in tests and shutdown)."""
+        start = time.time()
+        while not self._queue.empty():
+            if (time.time() - start) > timeout:
+                return False
+            time.sleep(0.05)
+        return True
+
     def test_telegram(self) -> bool:
         return bool(self._telegram and self._telegram.send("✅ Breeze PRO: Telegram alerts are working correctly."))
 
