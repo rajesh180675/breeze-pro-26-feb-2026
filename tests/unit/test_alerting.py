@@ -164,3 +164,19 @@ def test_history_is_capped_and_pruned(monkeypatch):
     assert len(history) == d.MAX_HISTORY
     assert history[0]["title"] == f"Event {total_events - 1}"
     assert history[-1]["title"] == "Event 5"
+
+
+def test_flush_drains_queue(monkeypatch):
+    d = AlertDispatcher(AlertConfig())
+    monkeypatch.setattr("alerting.time.sleep", lambda *_args, **_kwargs: None)
+    d._stop.set()
+    d.dispatch(_base_event("queued"))
+    assert d.flush(timeout=0.2) is True
+
+
+
+def test_dispatcher_status_exposes_observability_fields():
+    d = AlertDispatcher(AlertConfig())
+    status = d.get_dispatcher_status()
+    assert set(["queue_depth", "history_size", "worker_alive", "dedupe_cache_size"]).issubset(status.keys())
+    assert isinstance(d.get_queue_depth(), int)

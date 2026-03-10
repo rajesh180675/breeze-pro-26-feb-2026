@@ -1,0 +1,57 @@
+{
+  "title": "Breeze PRO - API and Trading Health",
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Request Rate",
+      "targets": [
+        { "expr": "sum(rate(breeze_requests_total[1m])) by (result)", "legendFormat": "{{result}}" }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Request Latency p95",
+      "targets": [
+        { "expr": "histogram_quantile(0.95, sum(rate(breeze_request_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p95" }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 }
+    },
+    {
+      "type": "stat",
+      "title": "Open Positions",
+      "targets": [
+        { "expr": "breeze_open_positions", "legendFormat": "positions" }
+      ],
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 8 }
+    },
+    {
+      "type": "stat",
+      "title": "Unrealized P&L (INR)",
+      "targets": [
+        { "expr": "breeze_unrealized_pnl_inr", "legendFormat": "pnl" }
+      ],
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 8 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Orders by Status",
+      "targets": [
+        { "expr": "sum(rate(breeze_orders_total[5m])) by (status)", "legendFormat": "{{status}}" }
+      ],
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 8 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Alerts Dispatched",
+      "targets": [
+        { "expr": "sum(rate(breeze_alerts_dispatched_total[5m])) by (channel, level)", "legendFormat": "{{channel}}/{{level}}" }
+      ],
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 14 }
+    }
+  ]
+}
