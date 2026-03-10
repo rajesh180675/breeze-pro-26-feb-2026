@@ -419,6 +419,20 @@ class AlertDispatcher:
             time.sleep(0.05)
         return True
 
+    def get_queue_depth(self) -> int:
+        """Return pending alert count in dispatch queue."""
+        return int(self._queue.qsize())
+
+    def get_dispatcher_status(self) -> Dict[str, Any]:
+        """Expose lightweight dispatcher health/observability state."""
+        with self._lock:
+            return {
+                "queue_depth": int(self._queue.qsize()),
+                "history_size": len(self._history),
+                "worker_alive": bool(self._worker and self._worker.is_alive()),
+                "dedupe_cache_size": len(self._dedupe_cache),
+            }
+
     def test_telegram(self) -> bool:
         return bool(self._telegram and self._telegram.send("✅ Breeze PRO: Telegram alerts are working correctly."))
 

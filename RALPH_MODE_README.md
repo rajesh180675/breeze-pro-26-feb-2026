@@ -172,12 +172,13 @@ A task batch is complete only when:
 - GTT schema transaction safety.
 - Historical throttle and cache purge behavior.
 - Session multi-account compatibility wrappers.
+- Risk/alert observability expansion (`alert_queue_depth`, `last_poll_ts`, dispatcher queue status helpers).
 - Significant expansion of unit tests across risk/strategies/persistence/session/futures/validators.
 
 ### Next recommended autonomous focus
 1. Continue unresolved spec tasks not yet fully implemented end-to-end (including deeper P2/P3 docs/tooling parity checks).
 2. Add parity tests between root wrappers and `app/lib` behavior on key error/validation paths.
-3. Expand observability signals for risk loop and alert queue operational state.
+3. Surface new observability fields in API/metrics layer where appropriate.
 4. Keep CI green while reducing brittle timing assumptions.
 
 ---

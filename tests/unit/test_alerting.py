@@ -172,3 +172,11 @@ def test_flush_drains_queue(monkeypatch):
     d._stop.set()
     d.dispatch(_base_event("queued"))
     assert d.flush(timeout=0.2) is True
+
+
+
+def test_dispatcher_status_exposes_observability_fields():
+    d = AlertDispatcher(AlertConfig())
+    status = d.get_dispatcher_status()
+    assert set(["queue_depth", "history_size", "worker_alive", "dedupe_cache_size"]).issubset(status.keys())
+    assert isinstance(d.get_queue_depth(), int)

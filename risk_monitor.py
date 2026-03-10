@@ -184,6 +184,8 @@ class RiskMonitor:
         self._lock = threading.RLock()
         self._portfolio_stop_triggered = False
         self._poll_count = 0
+        self._last_poll_ts: float = 0.0
+        self._last_error: str = ""
         self._smart_stops = SmartStopManager()
         self._smart_stop_state: Dict[str, Dict[str, Any]] = {}
 
@@ -296,7 +298,10 @@ class RiskMonitor:
             return {
                 "positions": len(self._positions),
                 "alerts": len(self._alert_history),
+                "alert_queue_depth": int(self._alerts.qsize()),
                 "poll_count": self._poll_count,
+                "last_poll_ts": self._last_poll_ts,
+                "last_error": self._last_error,
                 "portfolio_pnl": self.get_portfolio_pnl(),
                 "portfolio_stop": self._portfolio_stop_triggered,
                 "running": self.is_running(),
@@ -345,8 +350,10 @@ class RiskMonitor:
             try:
                 self._check_all()
                 self._poll_count += 1
+                self._last_poll_ts = time.time()
             except Exception as e:
                 log.error(f"Monitor loop error: {e}")
+                self._last_error = str(e)
                 self._running.clear()
                 break
             for _ in range(int(self._poll_interval * 10)):

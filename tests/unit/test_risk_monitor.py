@@ -137,3 +137,10 @@ def test_loop_clears_running_on_unhandled_exception(monkeypatch):
     monkeypatch.setattr(rm, "_check_all", boom)
     rm._loop()
     assert rm.is_running() is False
+
+
+
+def test_risk_monitor_stats_include_observability_fields():
+    rm = RiskMonitor(DummyClient(), poll_interval=0.01)
+    stats = rm.get_stats()
+    assert set(["alert_queue_depth", "last_poll_ts", "last_error"]).issubset(stats.keys())
