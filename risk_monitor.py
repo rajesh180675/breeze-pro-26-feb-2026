@@ -347,6 +347,8 @@ class RiskMonitor:
                 self._poll_count += 1
             except Exception as e:
                 log.error(f"Monitor loop error: {e}")
+                self._running.clear()
+                break
             for _ in range(int(self._poll_interval * 10)):
                 if not self._running.is_set():
                     break

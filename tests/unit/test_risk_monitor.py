@@ -13,3 +13,15 @@ def test_smart_stop_summary_available():
     rows = rm.get_smart_stop_summary()
     assert rows
     assert rows[0]["id"] == "p1"
+
+
+def test_loop_clears_running_on_unhandled_exception(monkeypatch):
+    rm = RiskMonitor(DummyClient(), poll_interval=0)
+    rm._running.set()
+
+    def boom():
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(rm, "_check_all", boom)
+    rm._loop()
+    assert rm.is_running() is False
