@@ -116,6 +116,7 @@ class HistoricalDataFetcher:
             return cached
 
         chunks = self._build_chunks(from_date, to_date, interval)
+        is_multi_chunk_request = len(chunks) > 1
         frames: List[pd.DataFrame] = []
         calls = 0
 
@@ -135,6 +136,8 @@ class HistoricalDataFetcher:
             frame = self._response_to_df(resp)
             if not frame.empty:
                 frames.append(frame)
+            if is_multi_chunk_request:
+                time.sleep(0.3)
 
         self.last_api_calls = calls
 
