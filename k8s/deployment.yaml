@@ -1,7 +1,13 @@
+# Breeze PRO — Kubernetes manifests
+# Tested against Kubernetes 1.28+
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: breeze-service
+  namespace: trading
+  labels:
+    app: breeze-service
+    version: "v10"
 spec:
   replicas: 2
   selector:
@@ -11,15 +17,34 @@ spec:
     metadata:
       labels:
         app: breeze-service
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
       containers:
         - name: breeze-service
           image: breeze-service:latest
+          imagePullPolicy: IfNotPresent
           ports:
-            - containerPort: 8000
+            - name: http
+              containerPort: 8000
+            - name: streamlit
+              containerPort: 8501
           envFrom:
             - secretRef:
                 name: breeze-service-secrets
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false   # logs/ and data/ dirs need write
+            capabilities:
+              drop:
+                - ALL
           resources:
             requests:
               memory: "512Mi"
@@ -40,22 +65,42 @@ spec:
               port: 8000
             initialDelaySeconds: 10
             periodSeconds: 5
+            successThreshold: 1
+            failureThreshold: 3
+          volumeMounts:
+            - name: app-data
+              mountPath: /app/data
+            - name: app-logs
+              mountPath: /app/logs
+      volumes:
+        - name: app-data
+          emptyDir: {}
+        - name: app-logs
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: breeze-service
+  namespace: trading
+  labels:
+    app: breeze-service
 spec:
   selector:
     app: breeze-service
   ports:
-    - port: 80
+    - name: http
+      port: 80
       targetPort: 8000
+    - name: streamlit
+      port: 8501
+      targetPort: 8501
 ---
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
   name: breeze-service
+  namespace: trading
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
@@ -70,11 +115,18 @@ spec:
         target:
           type: Utilization
           averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
   name: breeze-pdb
+  namespace: trading
 spec:
   minAvailable: 1
   selector:

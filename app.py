@@ -260,22 +260,24 @@ st.markdown(THEME_CSS, unsafe_allow_html=True)
 # CONSTANTS
 # ═══════════════════════════════════════════════════════════════
 
+# PAGES is populated after all page functions are defined (see bottom of file).
+# Using None placeholders here keeps sidebar navigation key order stable at import time.
 PAGES = {
-    "🏠 Dashboard": page_dashboard if "page_dashboard" in globals() else None,
-    "⛓️ Option Chain": page_option_chain if "page_option_chain" in globals() else None,
-    "💸 Sell Options": page_sell_options if "page_sell_options" in globals() else None,
-    "❌ Square Off": page_square_off if "page_square_off" in globals() else None,
-    "📋 Orders & Trades": page_orders_trades if "page_orders_trades" in globals() else None,
-    "💼 Positions": page_positions if "page_positions" in globals() else None,
-    "📊 Historical Data": page_historical_data if "page_historical_data" in globals() else None,
-    "📈 Futures Trading": page_futures_trading if "page_futures_trading" in globals() else None,
-    "⏰ GTT Orders": page_gtt_orders if "page_gtt_orders" in globals() else None,
-    "🧠 Strategy Builder": page_strategy_builder if "page_strategy_builder" in globals() else None,
-    "🔬 Analytics": page_analytics if "page_analytics" in globals() else None,
-    "🚨 Risk Monitor": page_risk_monitor if "page_risk_monitor" in globals() else None,
-    "👁️ Watchlist": page_watchlist if "page_watchlist" in globals() else None,
-    "📄 Paper Trading": page_paper_trading if "page_paper_trading" in globals() else None,
-    "⚙️ Settings": page_settings if "page_settings" in globals() else None,
+    "🏠 Dashboard": None,
+    "⛓️ Option Chain": None,
+    "💸 Sell Options": None,
+    "❌ Square Off": None,
+    "📋 Orders & Trades": None,
+    "💼 Positions": None,
+    "📊 Historical Data": None,
+    "📈 Futures Trading": None,
+    "⏰ GTT Orders": None,
+    "🧠 Strategy Builder": None,
+    "🔬 Analytics": None,
+    "🚨 Risk Monitor": None,
+    "👁️ Watchlist": None,
+    "📄 Paper Trading": None,
+    "⚙️ Settings": None,
 }
 
 AUTH_PAGES = set([k for k in PAGES.keys() if k != "🏠 Dashboard"])
@@ -5005,7 +5007,22 @@ If a natural expiry date falls on a holiday → expiry is moved to the **previou
 # ROUTER
 # ═══════════════════════════════════════════════════════════════
 
+# ── Populate PAGES with actual functions now that all are defined ─────────
+PAGES["🏠 Dashboard"] = page_dashboard
+PAGES["⛓️ Option Chain"] = page_option_chain
+PAGES["💸 Sell Options"] = page_sell_options
+PAGES["❌ Square Off"] = page_square_off
+PAGES["📋 Orders & Trades"] = page_orders_trades
+PAGES["💼 Positions"] = page_positions
+PAGES["📊 Historical Data"] = page_historical_data
+PAGES["📈 Futures Trading"] = page_futures_trading
+PAGES["⏰ GTT Orders"] = page_gtt_orders
+PAGES["🧠 Strategy Builder"] = page_strategy_builder
+PAGES["🔬 Analytics"] = page_analytics
+PAGES["🚨 Risk Monitor"] = page_risk_monitor
+PAGES["👁️ Watchlist"] = page_watchlist
 PAGES["📄 Paper Trading"] = page_paper_trading
+PAGES["⚙️ Settings"] = page_settings
 
 PAGE_FN = {
     "🏠 Dashboard": page_dashboard,

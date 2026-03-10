@@ -28,3 +28,23 @@ exclude = [
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["E402"]
 "tests/conftest.py" = ["E402"]
+
+[tool.ruff.format]
+# Ruff format also respects the top-level exclude list above.
+# Legacy root files are excluded from format checks too.
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+strict_optional = true
+warn_return_any = false
+warn_unused_ignores = false
+# Only type-check the production app package
+files = ["app/lib/"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -q"
