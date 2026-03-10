@@ -80,3 +80,87 @@ def test_webhook_payload_contains_all_event_fields():
     assert set(["alert_type", "level", "title", "body", "metadata", "timestamp"]).issubset(payload.keys())
     assert payload["alert_type"] == "MARGIN_CALL"
     assert payload["level"] == "CRITICAL"
+
+
+class _SequencedDispatcher:
+    def __init__(self, results):
+        self.results = list(results)
+        self.calls = 0
+
+    def send(self, *_args, **_kwargs):
+        self.calls += 1
+        idx = self.calls - 1
+        return self.results[idx] if idx < len(self.results) else self.results[-1]
+
+
+def _base_event(title="Test Alert"):
+    return AlertEvent(alert_type="TRADE_FILLED", level=AlertLevel.INFO, title=title, body="Body")
+
+
+def test_send_with_retry_success_on_first_attempt(monkeypatch):
+    d = AlertDispatcher(AlertConfig())
+    monkeypatch.setattr("alerting.time.sleep", lambda *_args, **_kwargs: None)
+    tg = _SequencedDispatcher([True])
+    d._telegram = tg
+    d._email = None
+    d._webhook = None
+    d._discord = None
+    d._whatsapp = None
+
+    d._send_all(_base_event("First attempt"))
+
+    assert tg.calls == 1
+    assert d.get_history(limit=1)[0]["channels"] == "telegram"
+
+
+def test_send_with_retry_fails_then_succeeds(monkeypatch):
+    d = AlertDispatcher(AlertConfig())
+    monkeypatch.setattr("alerting.time.sleep", lambda *_args, **_kwargs: None)
+    tg = _SequencedDispatcher([False, True])
+    d._telegram = tg
+    d._email = None
+    d._webhook = None
+    d._discord = None
+    d._whatsapp = None
+
+    d._send_all(_base_event("Retry success"))
+
+    assert tg.calls == 2
+    assert d.get_history(limit=1)[0]["channels"] == "telegram"
+
+
+def test_send_with_retry_fails_both_attempts(monkeypatch, caplog):
+    d = AlertDispatcher(AlertConfig())
+    monkeypatch.setattr("alerting.time.sleep", lambda *_args, **_kwargs: None)
+    tg = _SequencedDispatcher([False, False])
+    d._telegram = tg
+    d._email = None
+    d._webhook = None
+    d._discord = None
+    d._whatsapp = None
+
+    d._send_all(_base_event("Retry fail"))
+
+    assert tg.calls == 2
+    assert d.get_history(limit=1)[0]["channels"] == "none"
+    assert "channel=telegram title=Retry fail" in caplog.text
+
+
+def test_history_is_capped_and_pruned(monkeypatch):
+    d = AlertDispatcher(AlertConfig())
+    monkeypatch.setattr("alerting.time.sleep", lambda *_args, **_kwargs: None)
+    tg = _SequencedDispatcher([True])
+    d._telegram = tg
+    d._email = None
+    d._webhook = None
+    d._discord = None
+    d._whatsapp = None
+
+    total_events = d.MAX_HISTORY + 5
+    for i in range(total_events):
+        d._send_all(_base_event(f"Event {i}"))
+
+    history = d.get_history(limit=total_events)
+    assert len(history) == d.MAX_HISTORY
+    assert history[0]["title"] == f"Event {total_events - 1}"
+    assert history[-1]["title"] == "Event 5"
