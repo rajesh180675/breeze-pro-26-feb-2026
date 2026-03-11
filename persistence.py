@@ -20,7 +20,7 @@ import pandas as pd
 log = logging.getLogger(__name__)
 
 DB_PATH = Path("data/breeze_trader.db")
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS trades (
@@ -133,12 +133,40 @@ CREATE TABLE IF NOT EXISTS option_chain_history (
     volume REAL DEFAULT 0,
     UNIQUE(trade_date, instrument, expiry, strike, option_type)
 );
+CREATE TABLE IF NOT EXISTS option_chain_intraday_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    snapshot_ts TEXT NOT NULL,
+    trade_date TEXT NOT NULL,
+    instrument TEXT NOT NULL,
+    expiry TEXT NOT NULL,
+    strike INTEGER NOT NULL,
+    option_type TEXT NOT NULL,
+    ltp REAL DEFAULT 0,
+    bid REAL DEFAULT 0,
+    ask REAL DEFAULT 0,
+    bid_qty REAL DEFAULT 0,
+    ask_qty REAL DEFAULT 0,
+    volume REAL DEFAULT 0,
+    open_interest REAL DEFAULT 0,
+    oi_change REAL DEFAULT 0,
+    iv REAL DEFAULT 0,
+    delta REAL DEFAULT 0,
+    gamma REAL DEFAULT 0,
+    theta REAL DEFAULT 0,
+    vega REAL DEFAULT 0,
+    spot REAL DEFAULT 0,
+    source TEXT NOT NULL DEFAULT 'snapshot',
+    UNIQUE(snapshot_ts, instrument, expiry, strike, option_type)
+);
 CREATE INDEX IF NOT EXISTS idx_trades_ts ON trades(timestamp);
 CREATE INDEX IF NOT EXISTS idx_trades_date ON trades(date);
 CREATE INDEX IF NOT EXISTS idx_activity_ts ON activity_log(timestamp);
 CREATE INDEX IF NOT EXISTS idx_pnl_date ON pnl_history(date);
 CREATE INDEX IF NOT EXISTS idx_alerts_ts ON alerts_log(timestamp);
 CREATE INDEX IF NOT EXISTS idx_chain_hist_lookup ON option_chain_history(instrument, option_type, strike, trade_date);
+CREATE INDEX IF NOT EXISTS idx_chain_intraday_expiry_ts ON option_chain_intraday_snapshots(instrument, expiry, snapshot_ts);
+CREATE INDEX IF NOT EXISTS idx_chain_intraday_trade_date_ts ON option_chain_intraday_snapshots(instrument, trade_date, snapshot_ts);
+CREATE INDEX IF NOT EXISTS idx_chain_intraday_lookup ON option_chain_intraday_snapshots(instrument, expiry, strike, option_type, snapshot_ts);
 """
 
 
@@ -162,6 +190,38 @@ class DBMigrator:
             ],
             4: ["ALTER TABLE alerts_log ADD COLUMN dispatched_channels TEXT"],
             5: ["CREATE INDEX IF NOT EXISTS idx_watchlist_symbol ON watchlist(symbol)"],
+            6: [
+                """
+                CREATE TABLE IF NOT EXISTS option_chain_intraday_snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    snapshot_ts TEXT NOT NULL,
+                    trade_date TEXT NOT NULL,
+                    instrument TEXT NOT NULL,
+                    expiry TEXT NOT NULL,
+                    strike INTEGER NOT NULL,
+                    option_type TEXT NOT NULL,
+                    ltp REAL DEFAULT 0,
+                    bid REAL DEFAULT 0,
+                    ask REAL DEFAULT 0,
+                    bid_qty REAL DEFAULT 0,
+                    ask_qty REAL DEFAULT 0,
+                    volume REAL DEFAULT 0,
+                    open_interest REAL DEFAULT 0,
+                    oi_change REAL DEFAULT 0,
+                    iv REAL DEFAULT 0,
+                    delta REAL DEFAULT 0,
+                    gamma REAL DEFAULT 0,
+                    theta REAL DEFAULT 0,
+                    vega REAL DEFAULT 0,
+                    spot REAL DEFAULT 0,
+                    source TEXT NOT NULL DEFAULT 'snapshot',
+                    UNIQUE(snapshot_ts, instrument, expiry, strike, option_type)
+                )
+                """,
+                "CREATE INDEX IF NOT EXISTS idx_chain_intraday_expiry_ts ON option_chain_intraday_snapshots(instrument, expiry, snapshot_ts)",
+                "CREATE INDEX IF NOT EXISTS idx_chain_intraday_trade_date_ts ON option_chain_intraday_snapshots(instrument, trade_date, snapshot_ts)",
+                "CREATE INDEX IF NOT EXISTS idx_chain_intraday_lookup ON option_chain_intraday_snapshots(instrument, expiry, strike, option_type, snapshot_ts)",
+            ],
         }
 
     def _ensure_version_table(self, conn: sqlite3.Connection) -> None:
@@ -653,6 +713,180 @@ class TradeDB:
                 except (TypeError, ValueError, KeyError) as exc:
                     log.warning("Skipping invalid option-chain row for %s/%s: %s", instrument, expiry, exc)
                     continue
+
+    def record_option_chain_intraday_snapshot(
+        self,
+        instrument: str,
+        expiry: str,
+        rows: List[Dict[str, Any]],
+        snapshot_ts: str = "",
+        trade_date: str = "",
+        source: str = "snapshot",
+    ) -> None:
+        if not rows:
+            return
+        snapshot_ts = snapshot_ts or datetime.utcnow().replace(microsecond=0).isoformat()
+        trade_date = trade_date or snapshot_ts[:10]
+        with self._tx() as conn:
+            for row in rows:
+                try:
+                    strike = int(float(row.get("strike_price", row.get("strike", 0)) or 0))
+                    if strike <= 0:
+                        continue
+                    right = str(row.get("right", row.get("option_type", ""))).lower()
+                    option_type = "CE" if ("call" in right or right == "ce") else "PE"
+                    iv = float(row.get("iv_numeric", row.get("iv", 0)) or 0)
+                    if iv > 1:
+                        iv = iv / 100.0
+                    conn.execute(
+                        """
+                        INSERT OR REPLACE INTO option_chain_intraday_snapshots
+                        (
+                            snapshot_ts, trade_date, instrument, expiry, strike, option_type,
+                            ltp, bid, ask, bid_qty, ask_qty, volume, open_interest, oi_change,
+                            iv, delta, gamma, theta, vega, spot, source
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            snapshot_ts,
+                            trade_date,
+                            instrument,
+                            expiry,
+                            strike,
+                            option_type,
+                            float(row.get("ltp", 0) or 0),
+                            float(row.get("best_bid_price", row.get("bid", 0)) or 0),
+                            float(row.get("best_offer_price", row.get("ask", 0)) or 0),
+                            float(row.get("bid_qty", 0) or 0),
+                            float(row.get("offer_qty", row.get("ask_qty", 0)) or 0),
+                            float(row.get("volume", 0) or 0),
+                            float(row.get("open_interest", 0) or 0),
+                            float(row.get("oi_change", 0) or 0),
+                            iv,
+                            float(row.get("delta", 0) or 0),
+                            float(row.get("gamma", 0) or 0),
+                            float(row.get("theta", 0) or 0),
+                            float(row.get("vega", 0) or 0),
+                            float(row.get("spot", 0) or 0),
+                            source,
+                        ),
+                    )
+                except (TypeError, ValueError, KeyError) as exc:
+                    log.warning("Skipping invalid intraday option-chain row for %s/%s: %s", instrument, expiry, exc)
+                    continue
+
+    def get_option_chain_intraday_snapshots(
+        self,
+        instrument: str,
+        expiry: str = "",
+        trade_date: str = "",
+        start_ts: str = "",
+        end_ts: str = "",
+        limit: int = 5000,
+    ) -> List[Dict[str, Any]]:
+        conn = self._get_conn()
+        q = "SELECT * FROM option_chain_intraday_snapshots WHERE instrument=?"
+        params: List[Any] = [instrument]
+        if expiry:
+            q += " AND expiry=?"
+            params.append(expiry)
+        if trade_date:
+            q += " AND trade_date=?"
+            params.append(trade_date)
+        if start_ts:
+            q += " AND snapshot_ts>=?"
+            params.append(start_ts)
+        if end_ts:
+            q += " AND snapshot_ts<=?"
+            params.append(end_ts)
+        q += " ORDER BY snapshot_ts, strike, option_type LIMIT ?"
+        params.append(int(limit))
+        return [dict(row) for row in conn.execute(q, params).fetchall()]
+
+    def get_option_chain_replay_timestamps(
+        self,
+        instrument: str,
+        expiry: str,
+        trade_date: str = "",
+        limit: int = 240,
+    ) -> List[str]:
+        conn = self._get_conn()
+        q = """
+            SELECT DISTINCT snapshot_ts
+            FROM option_chain_intraday_snapshots
+            WHERE instrument=? AND expiry=?
+        """
+        params: List[Any] = [instrument, expiry]
+        if trade_date:
+            q += " AND trade_date=?"
+            params.append(trade_date)
+        q += " ORDER BY snapshot_ts DESC LIMIT ?"
+        params.append(int(limit))
+        rows = conn.execute(q, params).fetchall()
+        return [str(row["snapshot_ts"]) for row in rows][::-1]
+
+    def get_option_chain_snapshot_at_or_before(
+        self,
+        instrument: str,
+        expiry: str,
+        replay_ts: str,
+    ) -> List[Dict[str, Any]]:
+        conn = self._get_conn()
+        row = conn.execute(
+            """
+            SELECT snapshot_ts
+            FROM option_chain_intraday_snapshots
+            WHERE instrument=? AND expiry=? AND snapshot_ts<=?
+            ORDER BY snapshot_ts DESC
+            LIMIT 1
+            """,
+            (instrument, expiry, replay_ts),
+        ).fetchone()
+        if not row:
+            return []
+        snapshot_ts = str(row["snapshot_ts"])
+        rows = conn.execute(
+            """
+            SELECT snapshot_ts, trade_date, instrument, expiry, strike AS strike_price,
+                   option_type, ltp, bid AS best_bid_price, ask AS best_offer_price,
+                   bid_qty, ask_qty AS offer_qty, volume, open_interest, oi_change,
+                   iv, delta, gamma, theta, vega, spot,
+                   CASE option_type WHEN 'CE' THEN 'Call' ELSE 'Put' END AS right
+            FROM option_chain_intraday_snapshots
+            WHERE instrument=? AND expiry=? AND snapshot_ts=?
+            ORDER BY strike, option_type
+            """,
+            (instrument, expiry, snapshot_ts),
+        ).fetchall()
+        return [dict(item) for item in rows]
+
+    def cleanup_option_chain_intraday_snapshots(
+        self,
+        retain_full_days: int = 7,
+        retain_downsampled_days: int = 30,
+    ) -> int:
+        deleted = 0
+        with self._tx() as conn:
+            cur = conn.execute(
+                """
+                DELETE FROM option_chain_intraday_snapshots
+                WHERE trade_date < date('now', ?)
+                """,
+                (f"-{int(retain_downsampled_days)} day",),
+            )
+            deleted += cur.rowcount or 0
+            cur = conn.execute(
+                """
+                DELETE FROM option_chain_intraday_snapshots
+                WHERE trade_date < date('now', ?)
+                  AND trade_date >= date('now', ?)
+                  AND CAST(strftime('%M', snapshot_ts) AS INTEGER) % 5 != 0
+                """,
+                (f"-{int(retain_full_days)} day", f"-{int(retain_downsampled_days)} day"),
+            )
+            deleted += cur.rowcount or 0
+        return deleted
 
     def get_volume_baseline_map(self, instrument: str, lookback_days: int = 5) -> Dict[tuple, float]:
         conn = self._get_conn()

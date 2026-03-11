@@ -1,629 +1,402 @@
-# Option Chain Enhancement Spec
+# Option Chain Enhancement Build Plan
 
-## Purpose
+## Goal
 
-Design the next-generation option-chain workspace for Breeze PRO so it moves from a useful table view to a best-in-class analysis surface for discretionary traders, premium sellers, strategy builders, and intraday options flow analysis.
+Convert the current option-chain page into a modular workspace that supports:
 
-This spec is grounded in the current implementation:
+- a proper call/strike/put ladder
+- richer Plotly-based analytics
+- multi-expiry comparison
+- intraday snapshot replay
+- deterministic alerts and commentary
 
-- `app.py` `page_option_chain()`
-- `helpers.py` option-chain transforms and analytics
-- `breeze_api.py` chain fetch wrappers
-- `live_feed.py` token resolution and tick ingestion
-- `persistence.py` option-chain history persistence
+This plan is intentionally implementation-first. It is organized by delivery phase, with exact file-level tasks and phase acceptance tests.
 
-## Current State Assessment
+## Current Baseline
 
-### What already works well
+The current option-chain feature already provides:
 
-- Snapshot chain fetch is correct and explicit for both calls and puts.
-- Spot-based ATM estimation is present and better than a naive midpoint.
-- The page supports:
-  - ATM strike filtering
-  - live WebSocket LTP overlay
-  - Greeks enrichment
-  - PCR and Max Pain summary metrics
-  - OI heatmap
-  - volume spike badge
-  - IV percentile toggle
-  - IV smile
-  - OI / change-in-OI bar charts
-  - CSV export
-- Daily option-chain snapshots are already persisted for:
-  - IV history
-  - volume baseline history
+- snapshot chain fetch for calls and puts
+- ATM strike filtering
+- live LTP overlay
+- Greeks enrichment
+- PCR and Max Pain
+- OI heatmap
+- IV smile
+- OI/change-in-OI charts
+- CSV export
+- daily persistence for IV history and volume baseline history
 
-### Structural limitations in the current code
+The main constraints are:
 
-1. The page is monolithic.
-   `page_option_chain()` in `app.py` owns fetch, cache, transform, enrichment, live overlay, metrics, and rendering. That blocks deeper feature growth and makes testing expensive.
+- `app.py` owns too much of the option-chain flow
+- live updates do not fully model liquidity and positioning state
+- persistence is daily, not intraday
+- charting is still basic
+- testing is thin around a dedicated option-chain service layer
 
-2. Live mode is only partially live.
-   WebSocket overlay currently updates LTP for visible strikes, but not the full market microstructure. OI, OI change, bid/ask, spread, volume acceleration, and liquidity state are not streamed into the working table.
+## Delivery Rules
 
-3. Historical option-chain persistence is too coarse for top-end analytics.
-   `option_chain_history` stores one row per day per strike/side. That is enough for crude IV percentile and average volume, but not for:
-   - intraday skew shifts
-   - OI build-up trajectories
-   - gamma wall movement
-   - session replay
-   - time-sliced liquidity analytics
+- Keep the current option-chain page functional throughout the refactor.
+- Preserve `option_chain_history` for lightweight daily baselines.
+- Add new modules instead of expanding `page_option_chain()` further.
+- Prefer deterministic analytics over heuristic or LLM-style interpretation.
+- Each phase must end with runnable acceptance tests before starting the next phase.
 
-4. Charting is still basic.
-   Current charts are mostly `st.bar_chart()` and `st.line_chart()`. They are useful, but not enough for:
-   - linked crosshair analysis
-   - multi-axis chain studies
-   - expiry comparison
-   - surface/heatmap analysis
-   - dealer positioning charts
+## Target Files
 
-5. The page is table-first, not workflow-first.
-   The user can inspect the chain, but the UI does not yet optimize for common trading questions:
-   - Where are the call and put walls?
-   - Which strikes are building fresh OI vs short covering?
-   - How is skew changing intraday?
-   - Is premium rich or cheap vs realized and vs nearby expiries?
-   - Which strikes are liquid enough to trade now?
-
-6. Current analytics are mostly per-expiry.
-   Serious options analysis needs multi-expiry context, especially:
-   - front vs next expiry skew
-   - term structure
-   - event premium
-   - expected move by expiry
-
-### Root constraints discovered from the codebase
-
-- Chain fetch is driven by Breeze snapshot API plus a separate WebSocket subsystem.
-- Existing persistence is SQLite-backed and suitable for extension.
-- Existing tests cover helpers and persistence, but not a deep option-chain UI/service layer.
-- Existing daily snapshot schema uses a uniqueness key of:
-  - `trade_date`
-  - `instrument`
-  - `expiry`
-  - `strike`
-  - `option_type`
-
-That daily granularity must remain for lightweight baselines, but a new intraday snapshot layer is required for advanced analytics.
-
-## Product Goal
-
-Create an option-chain workspace that answers, in one screen:
-
-- Where is the market positioned now?
-- How is positioning changing during the session?
-- Which strikes/expiries are attractive for premium selling or buying?
-- Where is liquidity usable or dangerous?
-- What does volatility structure imply across strikes and expiries?
-
-## Non-Goals
-
-- Full execution-terminal replacement for all pages.
-- Tick-by-tick institutional order-flow reconstruction from exchange-level trade prints.
-- Level-2 depth charting beyond what Breeze feed fields can reliably support.
-
-## Target User Workflows
-
-### 1. Premium seller
-
-Needs:
-
-- ATM and OTM liquidity
-- IV percentile / IV rank
-- skew shape
-- OI build-up and unwinding
-- nearest support/resistance walls
-- expected move band
-
-### 2. Directional options trader
-
-Needs:
-
-- call/put momentum by strike cluster
-- volume bursts
-- OI confirmation vs price action
-- skew steepening/flattening
-- expiry comparison
-
-### 3. Strategy builder
-
-Needs:
-
-- strike selection recommendations
-- payoff context tied to live IV and liquidity
-- spread quality and slippage risk
-- nearby expiry comparison
-
-### 4. Intraday analyst
-
-Needs:
-
-- replay of chain changes
-- change-since-open
-- time-window heatmaps
-- fast anomaly detection
-
-## UX Vision
-
-### Desktop layout
-
-Three-zone workspace:
-
-1. Top Market Structure Rail
-   - spot
-   - futures basis if available
-   - ATM strike
-   - PCR
-   - Max Pain
-   - IV rank
-   - expected move
-   - DTE
-   - regime tag
-
-2. Center Chain Ladder
-   - calls on left
-   - strike in center
-   - puts on right
-   - sortable, color-coded, sticky ATM row
-   - row pinning for user-marked strikes
-
-3. Right Analysis Panel
-   - chart tabs
-   - regime summary
-   - alerts
-   - tradeability / liquidity diagnostics
-
-### Mobile / narrow layout
-
-- collapsible control drawer
-- chain table first
-- chart tabs below
-- reduced chart count
-- only core metrics visible above fold
-
-## Feature Pillars
-
-## 1. Chain Ladder Redesign
-
-Replace the current table presentation with a proper ladder model.
-
-### Requirements
-
-- Single centered strike column.
-- Calls and puts aligned on the same strike row.
-- Sticky ATM row and optional sticky spot marker.
-- Pinned rows for:
-  - ATM
-  - Max Pain
-  - highest call OI
-  - highest put OI
-  - user favorites
-- Column groups:
-  - price
-  - OI
-  - change in OI
-  - volume
-  - IV
-  - Greeks
-  - liquidity
-  - flow state
-
-### Derived columns
-
-- spread
-- spread %
-- mid price
-- bid/ask imbalance
-- OI build-up classification:
-  - long build-up
-  - short build-up
-  - short covering
-  - long unwinding
-- distance from spot
-- notional OI
-- IV z-score
-- IV percentile
-- liquidity score
-
-## 2. Charting Suite
-
-All serious visuals should move to Plotly figures with linked cursor behavior, unified hover, export support, and synchronized strike/expiry selection.
-
-### Core chart modules
-
-| Chart | Purpose | Minimum interaction |
-| --- | --- | --- |
-| OI Profile | Call/put OI by strike | hover, ATM marker, max-pain marker |
-| Delta OI Profile | fresh positioning by strike | hover, time-window toggle |
-| Volume Burst Profile | unusual participation | threshold slider |
-| IV Smile | strike-wise skew for selected expiry | call/put overlay, ATM marker |
-| IV Term Structure | ATM IV across expiries | expiry hover, event markers |
-| IV Surface | strike × expiry structure | rotate, slice by expiry or strike |
-| Expected Move Cone | implied move by expiry | compare vs realized move |
-| Gamma Exposure Profile | estimated dealer gamma by strike | wall markers, spot marker |
-| Vanna / Charm Profile | second-order positioning pressure | expiry filter |
-| Liquidity Scatter | spread vs volume vs OI | bubble size by notional |
-| OI Heatmap | strike × time heatmap | replay slider, session anchor |
-| Skew Shift Replay | intraday smile changes | play/pause and snapshot compare |
-
-### Best-in-class chart behavior
-
-- linked hover across all strike-based charts
-- synced vertical strike marker
-- synced spot/ATM marker
-- click chart point to jump to table row
-- click table row to highlight chart traces
-- export current chart as PNG and CSV
-- theme-consistent annotations and wall markers
-
-## 3. Multi-Expiry Analysis
-
-Current page is single-expiry centric. The enhanced workspace must add controlled multi-expiry analysis without overwhelming the main ladder.
-
-### Required capabilities
-
-- expiry strip with side-by-side metrics:
-  - DTE
-  - ATM IV
-  - IV rank
-  - total call OI
-  - total put OI
-  - PCR
-  - expected move
-- compare up to 3 expiries in charts
-- expiry overlay in:
-  - IV smile
-  - OI profile
-  - ATM IV term structure
-- event premium detector:
-  - flag front expiry vs next expiry distortion
-
-## 4. Intraday Change Analytics
-
-This is the biggest missing capability today.
-
-### New analysis views
-
-- change since open
-- change over last 5 / 15 / 30 / 60 minutes
-- replay slider for stored intraday snapshots
-- session high / low IV by strike
-- moving gamma walls
-- top 10 strikes by:
-  - OI addition
-  - OI reduction
-  - volume burst
-  - spread widening
-
-### Required alerts
-
-- call wall shift
-- put wall shift
-- skew steepening beyond threshold
-- ATM IV jump
-- spread blowout at monitored strikes
-- unusual volume at pinned strikes
-
-## 5. Decision Support Layer
-
-Add a small opinionated analysis summary generated deterministically from chain state.
-
-### Examples
-
-- "Put writing strongest at 22,300 and 22,400; support zone strengthening."
-- "Call OI concentrated at 22,700 but change-in-OI is fading."
-- "Front expiry IV elevated vs next expiry by 3.8 vol points."
-- "Liquidity poor beyond 2.5% OTM; avoid wide-leg execution there."
-
-This should be rule-based first, not LLM-based.
-
-## Data and Storage Spec
-
-## Existing table to retain
-
-Keep `option_chain_history` as the lightweight daily aggregate store for:
-
-- IV percentile
-- average volume baselines
-- historical strike activity summaries
-
-## New table required
-
-Add `option_chain_intraday_snapshots`.
-
-### Proposed schema
-
-```sql
-CREATE TABLE option_chain_intraday_snapshots (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    snapshot_ts TEXT NOT NULL,
-    trade_date TEXT NOT NULL,
-    instrument TEXT NOT NULL,
-    expiry TEXT NOT NULL,
-    strike INTEGER NOT NULL,
-    option_type TEXT NOT NULL,
-    ltp REAL DEFAULT 0,
-    bid REAL DEFAULT 0,
-    ask REAL DEFAULT 0,
-    bid_qty REAL DEFAULT 0,
-    ask_qty REAL DEFAULT 0,
-    volume REAL DEFAULT 0,
-    open_interest REAL DEFAULT 0,
-    oi_change REAL DEFAULT 0,
-    iv REAL DEFAULT 0,
-    delta REAL DEFAULT 0,
-    gamma REAL DEFAULT 0,
-    theta REAL DEFAULT 0,
-    vega REAL DEFAULT 0,
-    spot REAL DEFAULT 0,
-    source TEXT NOT NULL DEFAULT 'snapshot',
-    UNIQUE(snapshot_ts, instrument, expiry, strike, option_type)
-);
-```
-
-### Indexes
-
-- `(instrument, expiry, snapshot_ts)`
-- `(instrument, trade_date, snapshot_ts)`
-- `(instrument, expiry, strike, option_type, snapshot_ts)`
-
-### Snapshot policy
-
-- snapshot mode:
-  - persist every manual refresh
-  - optional scheduled snapshot every 5 minutes while page active
-- live mode:
-  - aggregate WebSocket updates into 1-minute bars per strike/side
-  - persist only finalized intervals
-
-## Service / Module Refactor
-
-The page should be split before major enhancements continue.
-
-### New modules
-
-- `option_chain_service.py`
-  - fetch snapshot chain
-  - merge live overlay
-  - cache orchestration
-  - view-model assembly
-
-- `option_chain_metrics.py`
-  - PCR
-  - Max Pain
-  - expected move
-  - liquidity score
-  - OI build-up classification
-  - IV rank / percentile / z-score
-  - gamma / vanna / charm profiles
-
-- `option_chain_charts.py`
-  - all Plotly builders for the chain workspace
-
-- `option_chain_state.py`
-  - UI state serialization
-  - pinned strikes
-  - selected expiry set
-  - selected chart
-  - replay timestamp
-
-- `option_chain_alerts.py`
-  - deterministic alert rules on chain movement
-
-### Existing files to slim down
+### Existing files expected to change
 
 - `app.py`
-  - keep layout composition only
 - `helpers.py`
-  - keep generic transforms only
+- `persistence.py`
+- `live_feed.py`
+- `charts.py`
+- `tests/integration/test_option_chain.py`
+- `tests/integration/test_persistence.py`
+- `tests/unit/test_helpers.py`
+- `tests/unit/test_persistence_unit.py`
+- `tests/unit/test_charts.py`
 
-## Analytics Definitions
-
-### OI build-up classification
-
-By strike and side, classify with price and OI direction:
-
-- price up + OI up = long build-up
-- price down + OI up = short build-up
-- price up + OI down = short covering
-- price down + OI down = long unwinding
-
-### Liquidity score
-
-Weighted score using:
-
-- bid/ask spread %
-- bid + ask quantity
-- traded volume
-- OI
-- quote freshness
-
-### Expected move
-
-For each expiry:
-
-- use ATM straddle
-- or ATM IV-derived move as fallback
-- show both when possible
-
-### Gamma / Vanna / Charm
-
-Use existing Greek machinery where possible, but aggregate by strike and expiry:
-
-- net gamma by strike
-- gamma wall candidates
-- vanna pressure zones
-- charm decay zones near expiry
-
-### IV rank and percentile
-
-For each expiry and for selected strike groups:
-
-- ATM IV rank over 30/60/90 sessions
-- strike-level IV percentile using historical snapshots
-
-## UI Controls Spec
-
-### Primary controls
-
-- instrument
-- expiry
-- compare expiries
-- quote mode
-- replay mode
-- strike range / show all
-- strike distance bucket
-- chart tab
-
-### Advanced controls
-
-- Greeks on/off
-- normalize by notional / lots / absolute values
-- smooth curves on/off
-- pin ATM / max pain / walls
-- show only liquid strikes
-- show only unusual activity
-- show only monitored strikes
-
-## Performance Requirements
-
-### Snapshot performance
-
-- manual refresh to render complete in under 2.5 seconds for NIFTY-class chains on warm cache
-- chart rebuild under 400 ms for filtered views
-
-### Live performance
-
-- visible chain updates under 500 ms from tick ingestion
-- no full-table rerender on every tick
-- debounce chart redraws to 750 ms
-
-### Memory / storage
-
-- intraday snapshot retention:
-  - full resolution for 7 trading days
-  - downsampled retention for 30 trading days
-- daily aggregate retention:
-  - 180 trading days minimum
-
-## Testing Spec
-
-### Unit tests
-
-- `option_chain_metrics.py`
-  - PCR
-  - Max Pain
-  - expected move
-  - liquidity score
-  - OI build-up state
-  - gamma wall detection
+### New files expected to be added
 
 - `option_chain_service.py`
-  - cache hit path
-  - cache invalidation path
-  - snapshot + live merge
-  - strike filtering and pinning
+- `option_chain_metrics.py`
+- `option_chain_charts.py`
+- `option_chain_state.py`
+- `option_chain_alerts.py`
+- `tests/unit/test_option_chain_metrics.py`
+- `tests/unit/test_option_chain_service.py`
+- `tests/unit/test_option_chain_charts.py`
+- `tests/unit/test_option_chain_alerts.py`
+- `tests/fixtures/option_chain_balanced.json`
+- `tests/fixtures/option_chain_put_heavy.json`
+- `tests/fixtures/option_chain_call_wall_trend.json`
+- `tests/fixtures/option_chain_expiry_day.json`
+- `tests/fixtures/option_chain_illiquid_otm.json`
+
+## Phase 0: Baseline Capture
+
+### Objective
+
+Freeze current behavior and create a safe starting point for refactor work.
+
+### File-level tasks
+
+- `app.py`
+  - identify and isolate the full `page_option_chain()` flow into documented sections using minimal comments only where flow boundaries are unclear
+  - note current inputs, outputs, and session-state dependencies
+- `tests/integration/test_option_chain.py`
+  - add or tighten baseline tests for snapshot-only rendering and current summary metrics
+- `tests/unit/test_helpers.py`
+  - add coverage for currently used option-chain helper transforms that will later move into dedicated modules
+- `tests/fixtures/option_chain_balanced.json`
+  - add a representative chain fixture that mirrors current expected data shape
+
+### Deliverables
+
+- stable fixture for current option-chain behavior
+- baseline tests that fail on regressions during refactor
+
+### Acceptance tests
+
+- `pytest tests/integration/test_option_chain.py -q`
+- `pytest tests/unit/test_helpers.py -q`
+- existing option-chain page still renders snapshot mode without feature loss
+
+## Phase 1: Service and Persistence Foundation
+
+### Objective
+
+Extract option-chain orchestration out of `app.py` and add intraday persistence support without changing the visible UX.
+
+### File-level tasks
+
+- `option_chain_service.py`
+  - create snapshot fetch orchestration
+  - create chain normalization entrypoint
+  - create snapshot-plus-live merge entrypoint
+  - create filtered ladder view-model builder
+  - centralize cache read/write behavior currently embedded in `app.py`
+- `option_chain_metrics.py`
+  - move PCR, Max Pain, expected move, IV percentile, IV z-score, liquidity score, and OI build-up classification into pure functions
+- `persistence.py`
+  - add `option_chain_intraday_snapshots` schema creation
+  - add indexes for instrument/expiry/timestamp queries
+  - add insert-or-ignore upsert path for intraday snapshots
+  - add read APIs for replay windows and recent strike history
+  - add retention cleanup for high-resolution intraday rows
+- `app.py`
+  - replace direct fetch/transform logic in `page_option_chain()` with calls into `option_chain_service.py`
+  - keep the existing layout and visible controls unchanged in this phase
+- `helpers.py`
+  - remove moved option-chain-specific business logic
+  - keep only generic transforms that are reused outside the option-chain feature
+- `tests/unit/test_option_chain_metrics.py`
+  - add pure function tests for PCR, Max Pain, expected move, liquidity score, IV percentile, IV z-score, and OI build-up state
+- `tests/unit/test_option_chain_service.py`
+  - add tests for cache-hit path, cache-miss path, snapshot normalization, live overlay merge, and strike filtering
+- `tests/unit/test_persistence_unit.py`
+  - add schema migration and insert/read tests for intraday snapshots
+- `tests/integration/test_persistence.py`
+  - add end-to-end persistence checks for intraday snapshot writes and replay reads
+
+### Deliverables
+
+- dedicated service and metrics modules
+- intraday snapshot schema and persistence APIs
+- no visible regression in current page behavior
+
+### Acceptance tests
+
+- `pytest tests/unit/test_option_chain_metrics.py -q`
+- `pytest tests/unit/test_option_chain_service.py -q`
+- `pytest tests/unit/test_persistence_unit.py -q`
+- `pytest tests/integration/test_persistence.py -q`
+- `pytest tests/integration/test_option_chain.py -q`
+- current option-chain page still supports:
+  - snapshot-only render
+  - live LTP overlay
+  - PCR and Max Pain display
+  - CSV export
+
+## Phase 2: Ladder Redesign and Core Plotly Charts
+
+### Objective
+
+Replace the current table-first rendering with a proper ladder model and move core analytics charts to dedicated Plotly builders.
+
+### File-level tasks
 
 - `option_chain_charts.py`
-  - figure construction
-  - annotations
-  - wall markers
-  - multi-expiry traces
+  - add Plotly OI profile builder
+  - add Plotly delta-OI profile builder
+  - add Plotly IV smile builder
+  - add chart annotations for ATM, Max Pain, highest call OI, and highest put OI
+  - add consistent hover and export config
+- `option_chain_state.py`
+  - store selected strike, pinned strikes, selected chart tab, chart filters, and visible strike window
+- `option_chain_service.py`
+  - produce ladder rows with centered strike and aligned call/put cells
+  - add derived columns for spread, spread percent, mid price, bid/ask imbalance, distance from spot, notional OI, IV percentile, IV z-score, and liquidity score
+  - support row pinning for ATM, Max Pain, OI walls, and user favorites
+- `app.py`
+  - replace current option-chain table rendering with ladder rendering driven by service output
+  - wire table-row selection into chart highlight state
+  - wire chart click selection back into ladder state if the existing UI stack permits it cleanly
+- `charts.py`
+  - remove or deprecate option-chain-specific chart code that is replaced by `option_chain_charts.py`
+- `tests/unit/test_option_chain_charts.py`
+  - add tests for figure construction, trace counts, annotations, and strike markers
+- `tests/unit/test_charts.py`
+  - trim or update overlapping legacy chart tests if ownership moves fully to `option_chain_charts.py`
+- `tests/integration/test_option_chain.py`
+  - add ladder render tests and selected-strike highlight tests
 
-### Persistence tests
+### Deliverables
 
-- schema migration for intraday snapshots
-- 1-minute aggregation correctness
-- retention cleanup correctness
+- centered ladder UI
+- Plotly core charts for OI and IV
+- stateful strike selection and pinning
 
-### Integration tests
+### Acceptance tests
 
-- page renders with:
-  - snapshot only
-  - live overlay
-  - no spot available
-  - missing one side of chain
-  - illiquid strikes
+- `pytest tests/unit/test_option_chain_charts.py -q`
+- `pytest tests/integration/test_option_chain.py -q`
+- user can verify in the page that:
+  - calls and puts align on the same strike row
+  - ATM row remains visible and clearly marked
+  - Max Pain and top OI walls render as markers in both ladder and charts
+  - liquidity and spread columns render for visible strikes
 
-### Deterministic golden-data tests
+## Phase 3: Multi-Expiry Comparison
 
-Add fixture-driven option-chain datasets for:
+### Objective
 
-- balanced market
-- put-heavy defensive market
-- call-wall heavy trending-up market
-- expiry-day distorted market
-- illiquid far OTM market
+Add controlled multi-expiry analysis without making the main ladder unusable.
 
-These fixtures should drive both metrics tests and chart snapshot tests.
+### File-level tasks
 
-## Phased Delivery Plan
+- `option_chain_service.py`
+  - add expiry-strip summary model for up to three expiries
+  - add compare-expiry datasets for ATM IV, OI profile, expected move, and PCR
+- `option_chain_metrics.py`
+  - add expiry-level ATM IV rank and term-structure calculations
+  - add front-vs-next event premium distortion detection
+- `option_chain_charts.py`
+  - add ATM IV term structure figure
+  - add multi-expiry OI overlay figure
+  - add multi-expiry IV smile overlay figure
+  - add expected move cone figure
+- `option_chain_state.py`
+  - add selected compare-expiry set and normalization mode
+- `app.py`
+  - add expiry strip UI
+  - add compare-expiry selector capped at three expiries
+  - add chart-tab routing for term structure and expected move views
+- `tests/unit/test_option_chain_metrics.py`
+  - add tests for term structure, expected move by expiry, and event premium distortion
+- `tests/unit/test_option_chain_charts.py`
+  - add tests for multi-expiry trace construction
+- `tests/integration/test_option_chain.py`
+  - add multi-expiry render and selector tests
 
-## Phase 1: Foundation and Refactor
-
-- split service, metrics, and charts out of `app.py`
-- add intraday snapshot table and migration
-- persist intraday snapshots
-- create deterministic fixtures and service tests
-
-### Acceptance
-
-- no behavior regression in current option-chain page
-- existing helper tests still pass
-- new service tests cover cache/fetch paths
-
-## Phase 2: Chain Ladder and Core Charts
-
-- build proper ladder view
-- replace basic OI and IV smile charts with Plotly modules
-- add linked hover and strike selection
-- add liquidity columns and spread analytics
-
-### Acceptance
-
-- user can move between ladder row and chart highlights
-- ATM, max pain, highest OI walls render clearly
-
-## Phase 3: Multi-Expiry and Intraday Replay
+### Deliverables
 
 - expiry comparison strip
-- term structure and IV surface
-- intraday replay slider
-- OI heatmap over time
+- multi-expiry overlays
+- term structure and expected move views
 
-### Acceptance
+### Acceptance tests
 
-- replay works off stored intraday snapshots
-- compare-expiry charts stay responsive
+- `pytest tests/unit/test_option_chain_metrics.py -q`
+- `pytest tests/unit/test_option_chain_charts.py -q`
+- `pytest tests/integration/test_option_chain.py -q`
+- user can verify in the page that:
+  - up to three expiries can be compared
+  - ATM IV term structure renders with sensible ordering by expiry
+  - front expiry distortion is flagged when fixture data indicates event premium
 
-## Phase 4: Dealer Positioning and Alerts
+## Phase 4: Intraday Snapshots and Replay
 
-- gamma, vanna, charm views
-- wall shift alerts
-- rule-based chain commentary
-- strike monitor watchlist
+### Objective
 
-### Acceptance
+Turn intraday option-chain history into a usable analysis feature with replay and change-over-time views.
 
-- alerts are deterministic
-- summary commentary matches fixture expectations
+### File-level tasks
 
-## Design Principles
+- `live_feed.py`
+  - add aggregation path to roll live updates into 1-minute strike/side intervals
+  - expose quote freshness metadata needed for liquidity scoring
+- `persistence.py`
+  - add finalized 1-minute intraday snapshot writes
+  - add query APIs for change-since-open and rolling 5/15/30/60-minute windows
+  - add retention logic for full-resolution and downsampled history
+- `option_chain_service.py`
+  - add replay-time slice loading
+  - add change-since-open and rolling-window comparison datasets
+  - add session high/low IV by strike view-model fields
+- `option_chain_charts.py`
+  - add OI heatmap by strike/time
+  - add skew shift replay figure
+  - add replay-aware delta-OI figure
+- `option_chain_state.py`
+  - add replay timestamp and replay mode
+- `app.py`
+  - add replay slider
+  - add change-window controls for 5/15/30/60 minutes and since-open
+  - add session replay views in chart panel
+- `tests/unit/test_persistence_unit.py`
+  - add 1-minute aggregation correctness tests
+  - add replay query tests
+  - add retention cleanup tests
+- `tests/unit/test_option_chain_service.py`
+  - add replay slice assembly and rolling-window comparison tests
+- `tests/integration/test_option_chain.py`
+  - add replay and intraday delta rendering tests
 
-- keep raw numbers inspectable; never hide the table under charts
-- every advanced chart must map back to a strike and expiry the user can trade
-- default view should stay usable for retail traders, with advanced views opt-in
-- all premium/flow interpretations must be deterministic and explainable
-- avoid adding charts that cannot be trusted from available data quality
+### Deliverables
 
-## Immediate Recommendations
+- intraday time-sliced persistence
+- replay slider
+- change-over-time analytics
 
-If implementation starts now, the highest-value first slice is:
+### Acceptance tests
 
-1. refactor `page_option_chain()` into service + charts modules
-2. add intraday snapshot persistence
-3. replace current OI and IV smile visuals with proper Plotly charts
-4. add liquidity score and build-up classification
-5. add multi-expiry term structure and expected move analysis
+- `pytest tests/unit/test_persistence_unit.py -q`
+- `pytest tests/unit/test_option_chain_service.py -q`
+- `pytest tests/integration/test_option_chain.py -q`
+- user can verify in the page that:
+  - replay slider changes ladder and charts consistently
+  - since-open and rolling-window analytics change when replay timestamp changes
+  - OI heatmap uses stored intraday snapshots rather than only current session memory
 
-This sequence delivers meaningful improvement quickly without overcommitting to speculative analytics before the data foundation exists.
+## Phase 5: Alerts, Commentary, and Advanced Positioning
+
+### Objective
+
+Add deterministic decision-support output and advanced positioning analytics on top of the stable data foundation.
+
+### File-level tasks
+
+- `option_chain_alerts.py`
+  - add deterministic rules for call wall shift, put wall shift, skew steepening, ATM IV jump, spread blowout, and unusual pinned-strike volume
+  - expose alert objects with severity, cause, strike/expiry context, and timestamp
+- `option_chain_metrics.py`
+  - add net gamma by strike
+  - add gamma wall candidate detection
+  - add vanna and charm aggregate profiles using available Greeks inputs
+- `option_chain_charts.py`
+  - add gamma exposure profile
+  - add vanna/charm profile
+  - add liquidity scatter
+- `option_chain_service.py`
+  - build deterministic commentary strings from metrics and alerts
+  - expose top movers for OI addition, OI reduction, spread widening, and volume burst
+- `option_chain_state.py`
+  - add monitored-strike watchlist state
+- `app.py`
+  - add alerts panel
+  - add commentary panel
+  - add monitored-strike filter/watchlist controls
+- `tests/unit/test_option_chain_alerts.py`
+  - add fixture-driven deterministic alert tests
+- `tests/unit/test_option_chain_metrics.py`
+  - add gamma wall, vanna, and charm tests
+- `tests/integration/test_option_chain.py`
+  - add alert/commentary render tests
+
+### Deliverables
+
+- deterministic alert engine
+- rule-based summary commentary
+- advanced dealer-positioning charts
+
+### Acceptance tests
+
+- `pytest tests/unit/test_option_chain_alerts.py -q`
+- `pytest tests/unit/test_option_chain_metrics.py -q`
+- `pytest tests/integration/test_option_chain.py -q`
+- user can verify in the page that:
+  - alerts are stable for the same fixture input
+  - commentary references real strikes and expiries from the current dataset
+  - gamma wall markers align with charted strike positioning
+
+## Fixture Matrix
+
+The following fixtures should be used across unit and integration tests:
+
+- `tests/fixtures/option_chain_balanced.json`
+  - neutral baseline with healthy liquidity and centered OI
+- `tests/fixtures/option_chain_put_heavy.json`
+  - defensive positioning with strong put OI concentration
+- `tests/fixtures/option_chain_call_wall_trend.json`
+  - trending-up market with strong call wall and rising call-side participation
+- `tests/fixtures/option_chain_expiry_day.json`
+  - distorted front-expiry pricing and unstable skew
+- `tests/fixtures/option_chain_illiquid_otm.json`
+  - far OTM strikes with poor spread, low quote size, and weak liquidity
+
+## Cross-Phase Exit Criteria
+
+The project is complete only when all of the following are true:
+
+- `app.py` is reduced to page composition and UI wiring rather than core option-chain analytics
+- option-chain business logic is covered by dedicated unit tests
+- intraday persistence supports replay and rolling-window analytics
+- core charts are built in `option_chain_charts.py`
+- multi-expiry comparison is supported without breaking the single-expiry default workflow
+- deterministic alerts and commentary are backed by fixtures and tests
+
+## Recommended Build Order
+
+Implement phases in this order without overlap:
+
+1. Phase 0
+2. Phase 1
+3. Phase 2
+4. Phase 3
+5. Phase 4
+6. Phase 5
+
+Do not start Phase 3 before Phase 2 acceptance passes. Do not start Phase 5 before replay and intraday persistence are stable in Phase 4.

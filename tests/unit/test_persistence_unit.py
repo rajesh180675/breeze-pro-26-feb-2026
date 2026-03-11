@@ -20,7 +20,7 @@ def test_db_migrator_runs_idempotently(tmp_path, monkeypatch):
     migrator.run(conn)
     row = conn.execute("SELECT MAX(version) AS version FROM schema_version").fetchone()
     assert row is not None
-    assert int(row["version"]) == 5
+    assert int(row["version"]) == 6
 
 
 def test_log_trade_returns_true_on_success(tmp_path, monkeypatch):
@@ -107,6 +107,59 @@ def test_get_volume_baseline_map_returns_dict(tmp_path, monkeypatch):
     out = db.get_volume_baseline_map("NIFTY", lookback_days=10)
     assert isinstance(out, dict)
     assert (22000, "CE") in out
+
+
+def test_option_chain_intraday_snapshot_roundtrip(tmp_path, monkeypatch):
+    db = _fresh_db(tmp_path, monkeypatch)
+    db.record_option_chain_intraday_snapshot(
+        instrument="NIFTY",
+        expiry="2026-03-26",
+        snapshot_ts="2026-03-11T09:15:00",
+        rows=[
+            {
+                "strike_price": 22000,
+                "right": "Call",
+                "ltp": 120,
+                "best_bid_price": 119,
+                "best_offer_price": 121,
+                "bid_qty": 10,
+                "offer_qty": 12,
+                "volume": 1000,
+                "open_interest": 20000,
+                "oi_change": 500,
+                "iv": 0.2,
+            }
+        ],
+    )
+    rows = db.get_option_chain_intraday_snapshots("NIFTY", expiry="2026-03-26")
+    assert len(rows) == 1
+    replay_rows = db.get_option_chain_snapshot_at_or_before("NIFTY", "2026-03-26", "2026-03-11T09:16:00")
+    assert len(replay_rows) == 1
+    assert replay_rows[0]["right"] == "Call"
+
+
+def test_option_chain_intraday_cleanup_downsamples_old_rows(tmp_path, monkeypatch):
+    db = _fresh_db(tmp_path, monkeypatch)
+    stale_trade_date = (date.today() - timedelta(days=10)).isoformat()
+    keep_trade_date = (date.today() - timedelta(days=10)).isoformat()
+    db.record_option_chain_intraday_snapshot(
+        instrument="NIFTY",
+        expiry="2026-03-26",
+        trade_date=stale_trade_date,
+        snapshot_ts=f"{stale_trade_date}T09:16:00",
+        rows=[{"strike_price": 22000, "right": "Call", "ltp": 120}],
+    )
+    db.record_option_chain_intraday_snapshot(
+        instrument="NIFTY",
+        expiry="2026-03-26",
+        trade_date=keep_trade_date,
+        snapshot_ts=f"{keep_trade_date}T09:15:00",
+        rows=[{"strike_price": 22000, "right": "Put", "ltp": 122}],
+    )
+    deleted = db.cleanup_option_chain_intraday_snapshots(retain_full_days=7, retain_downsampled_days=30)
+    assert deleted == 1
+    rows = db.get_option_chain_intraday_snapshots("NIFTY", expiry="2026-03-26")
+    assert len(rows) == 1
 
 
 def test_basket_template_crud_roundtrip(tmp_path, monkeypatch):

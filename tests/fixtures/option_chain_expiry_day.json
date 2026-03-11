@@ -1,0 +1,6 @@
+[
+  {"strike_price": 22000, "right": "Call", "ltp": 102, "best_bid_price": 99, "best_offer_price": 105, "bid_qty": 85, "offer_qty": 82, "volume": 4200, "open_interest": 18000, "oi_change": 1300, "iv": 28.0, "close": 88, "delta": 0.50, "gamma": 0.018, "theta": -22, "vega": 5},
+  {"strike_price": 22000, "right": "Put", "ltp": 104, "best_bid_price": 101, "best_offer_price": 107, "bid_qty": 87, "offer_qty": 85, "volume": 4150, "open_interest": 17500, "oi_change": 1250, "iv": 28.4, "close": 90, "delta": -0.50, "gamma": 0.018, "theta": -22, "vega": 5},
+  {"strike_price": 22100, "right": "Call", "ltp": 70, "best_bid_price": 66, "best_offer_price": 74, "bid_qty": 78, "offer_qty": 76, "volume": 3500, "open_interest": 14500, "oi_change": 1100, "iv": 29.2, "close": 58, "delta": 0.42, "gamma": 0.017, "theta": -19, "vega": 4},
+  {"strike_price": 22100, "right": "Put", "ltp": 135, "best_bid_price": 131, "best_offer_price": 139, "bid_qty": 74, "offer_qty": 72, "volume": 3300, "open_interest": 15000, "oi_change": 900, "iv": 30.0, "close": 122, "delta": -0.58, "gamma": 0.016, "theta": -18, "vega": 4}
+]

@@ -65,6 +65,30 @@ from alerting import (
 from paper_trading import PaperTradingEngine
 import live_feed as lf
 import holiday_calendar as _hc   # dynamic NSE holiday calendar
+from option_chain_alerts import build_commentary as build_option_chain_commentary, evaluate_alerts
+from option_chain_charts import (
+    build_delta_oi_profile_figure,
+    build_expected_move_figure,
+    build_gamma_exposure_figure,
+    build_iv_smile_figure,
+    build_liquidity_scatter_figure,
+    build_oi_heatmap_figure,
+    build_oi_profile_figure,
+    build_term_structure_figure,
+)
+from option_chain_metrics import detect_event_premium
+from option_chain_service import (
+    build_expiry_strip,
+    build_gamma_profile,
+    build_option_chain_ladder,
+    enrich_option_chain,
+    fetch_option_chain_snapshot,
+    filter_option_chain,
+    load_replay_frame,
+    merge_live_overlay,
+    summarize_chain,
+)
+from option_chain_state import ensure_option_chain_state, update_option_chain_state
 
 # ─── Logging ──────────────────────────────────────────────────
 # Ensure logs directory exists before FileHandler is created.
@@ -1502,8 +1526,9 @@ def page_option_chain():
         return
 
     render_auto_refresh("option_chain")
+    state = ensure_option_chain_state(st.session_state)
 
-    c1, c2, c3, c4 = st.columns([2, 2, 1, 1])
+    c1, c2, c3, c4, c5 = st.columns([2, 2, 2, 1, 1])
     with c1:
         inst = st.selectbox("Instrument", list(C.INSTRUMENTS.keys()), key="oc_inst")
     cfg = C.get_instrument(inst)
@@ -1513,6 +1538,15 @@ def page_option_chain():
             st.error("No expiries available")
             return
         expiry = st.selectbox("Expiry", expiries, format_func=format_expiry, key="oc_exp")
+    with c3:
+        compare_default = [exp for exp in state.get("compare_expiries", []) if exp in expiries and exp != expiry]
+        compare_expiries = st.multiselect(
+            "Compare Expiries",
+            options=[exp for exp in expiries if exp != expiry],
+            default=compare_default[:2],
+            format_func=format_expiry,
+            key="oc_compare_expiries",
+        )[:2]
     # Holiday advisory: show if this expiry was moved from its natural date
     _natural_expiry = C.get_natural_expiry_for(inst, expiry)
     if _natural_expiry and _natural_expiry != expiry:
@@ -1521,20 +1555,19 @@ def page_option_chain():
             f"({format_expiry_short(_natural_expiry)}) falls on a market holiday. "
             f"NSE moved it to **{format_expiry_short(expiry)}**."
         )
-    with c3:
+    with c4:
         show_all = st.checkbox("Show All Strikes", value=False, key="oc_all")
         n_strikes = st.slider("Strikes ±", 5, 100, 40, key="oc_n",
                               disabled=show_all,
                               help="Number of strikes to show above and below ATM. Ignored when 'Show All Strikes' is checked.")
-    with c4:
+    with c5:
         st.markdown("<br>", unsafe_allow_html=True)
         col1, col2 = st.columns(2)
         refresh = col1.button("🔄", key="oc_ref", help="Refresh chain")
         show_greeks = col2.checkbox("Greeks", True, key="oc_g")
 
-    view = st.radio("View", ["Traditional", "Flat", "Calls Only", "Puts Only", "IV Smile"],
-                    horizontal=True, key="oc_v")
-    quote_mode = st.radio("Quote Mode", ["🔴 Live WS", "📦 Snapshot"], horizontal=True, key="oc_quote_mode")
+    view = st.radio("View", ["Ladder", "Flat", "Calls Only", "Puts Only"], horizontal=True, key="oc_v")
+    quote_mode = st.radio("Quote Mode", ["🔴 Live WS", "📦 Snapshot", "⏪ Replay"], horizontal=True, key="oc_quote_mode")
     with st.sidebar.expander("⛓️ Chain Options"):
         chain_opt_oi_heatmap = st.checkbox("OI Change % Heatmap", value=True, key="oc_opt_oi_heatmap")
         chain_opt_volume_spike = st.checkbox("Volume Spike Alert", value=True, key="oc_opt_vol_spike")
@@ -1542,49 +1575,63 @@ def page_option_chain():
         chain_opt_max_pain_marker = st.checkbox("Max Pain Marker", value=True, key="oc_opt_mp_marker")
         chain_opt_iv_percentile = st.checkbox("IV Percentile", value=False, key="oc_opt_iv_percentile")
         chain_opt_export = st.checkbox("Export Button", value=True, key="oc_opt_export")
+        show_only_liquid = st.checkbox("Show Only Liquid", value=bool(state.get("show_only_liquid")), key="oc_only_liquid")
+        show_only_unusual = st.checkbox("Show Only Unusual Activity", value=bool(state.get("show_only_unusual")), key="oc_only_unusual")
+        chart_tab = st.selectbox(
+            "Chart Tab",
+            ["OI Profile", "Delta OI", "IV Smile", "Term Structure", "Expected Move", "OI Heatmap", "Gamma", "Liquidity"],
+            key="oc_chart_tab",
+        )
+
+    state = update_option_chain_state(
+        st.session_state,
+        compare_expiries=compare_expiries,
+        selected_chart=chart_tab,
+        show_only_liquid=show_only_liquid,
+        show_only_unusual=show_only_unusual,
+        replay_mode=quote_mode == "⏪ Replay",
+    )
 
     ck = f"oc_{cfg.api_code}_{expiry}"
     if refresh:
         CacheManager.invalidate(ck, "option_chain")
+        for cmp_expiry in compare_expiries:
+            CacheManager.invalidate(f"oc_{cfg.api_code}_{cmp_expiry}", "option_chain")
         st.rerun()
 
-    df = CacheManager.get(ck, "option_chain")
-    if df is not None:
-        st.caption("📦 From cache — press 🔄 to refresh")
-    else:
+    def _load_chain(expiry_value: str) -> pd.DataFrame:
+        cache_key = f"oc_{cfg.api_code}_{expiry_value}"
+        cached = CacheManager.get(cache_key, "option_chain")
+        if cached is not None:
+            return cached
         with st.spinner(f"Loading {inst} option chain..."):
-            resp = client.get_option_chain(cfg.api_code, cfg.exchange, expiry)
-        if not resp["success"]:
-            st.error(f"❌ Breeze API error: {resp.get('message')}")
-            raw = resp.get("data", {})
-            if isinstance(raw, dict) and raw.get("Error"):
-                st.error(f"Breeze error detail: {raw['Error']} (Status {raw.get('Status')})")
-            st.info(f"📋 Debug: stock_code={cfg.api_code}, exchange={cfg.exchange}, expiry={expiry}")
-            return
-        raw_data = resp.get("data", {})
-        # Surface Breeze-level errors even when success=True (in case _ok wrapping is bypassed)
-        if isinstance(raw_data, dict) and raw_data.get("Error"):
-            st.error(f"❌ Breeze API returned error: {raw_data['Error']}")
-            st.info(f"📋 Debug: stock_code={cfg.api_code}, exchange={cfg.exchange}, expiry={expiry}")
-            return
-        df = process_option_chain(raw_data)
-        if df.empty:
-            from breeze_api import convert_to_breeze_datetime
-            st.warning("⚠️ No option chain data returned from Breeze.")
-            st.info(
-                f"📋 Debug info — stock_code: {cfg.api_code} | "
-                f"exchange: {cfg.exchange} | "
-                f"expiry: {expiry} → ISO: {convert_to_breeze_datetime(expiry)} | "
-                f"product_type: options | "
-                f"Raw response: {raw_data}"
-            )
-            return
+            frame = fetch_option_chain_snapshot(client, cfg.api_code, cfg.exchange, expiry_value)
+        if frame.empty:
+            return frame
         try:
-            _db.record_option_chain_snapshot(inst, expiry, df.to_dict("records"))
+            _db.record_option_chain_snapshot(inst, expiry_value, frame.to_dict("records"))
+            _db.record_option_chain_intraday_snapshot(inst, expiry_value, frame.to_dict("records"))
         except Exception as exc:
             log.debug(f"Could not persist option-chain snapshot: {exc}")
-        CacheManager.set(ck, df, "option_chain", C.OC_CACHE_TTL_SECONDS)
-        SessionState.log_activity("Chain", f"{inst} {format_expiry_short(expiry)}")
+        CacheManager.set(cache_key, frame, "option_chain", C.OC_CACHE_TTL_SECONDS)
+        return frame
+
+    try:
+        base_df = _load_chain(expiry)
+    except Exception as exc:
+        st.error(f"❌ Option-chain fetch failed: {exc}")
+        return
+    if base_df is None or base_df.empty:
+        st.warning("⚠️ No option chain data returned from Breeze.")
+        return
+    SessionState.log_activity("Chain", f"{inst} {format_expiry_short(expiry)}")
+
+    compare_frames: Dict[str, pd.DataFrame] = {expiry: base_df}
+    for cmp_expiry in compare_expiries:
+        try:
+            compare_frames[cmp_expiry] = _load_chain(cmp_expiry)
+        except Exception as exc:
+            log.debug(f"Compare-expiry load failed for {cmp_expiry}: {exc}")
 
     # ── Live spot price → accurate ATM ──────────────────────
     # Fetch once per chain load; cached for SPOT_CACHE_TTL_SECONDS.
@@ -1606,51 +1653,73 @@ def page_option_chain():
     if _spot > 0:
         st.session_state["last_spot"] = _spot
 
-    # ── Metrics bar ───────────────────────────────────────────
-    atm = estimate_atm_strike(df, spot=_spot)
-    pcr = calculate_pcr(df)
-    mp = calculate_max_pain(df)
-    dte = calculate_days_to_expiry(expiry)
-    total_call_oi = df[df["right"] == "Call"]["open_interest"].sum() if "right" in df.columns else 0
-    total_put_oi = df[df["right"] == "Put"]["open_interest"].sum() if "right" in df.columns else 0
+    replay_timestamps = _db.get_option_chain_replay_timestamps(inst, expiry, limit=120)
+    replay_ts = None
+    if quote_mode == "⏪ Replay":
+        if not replay_timestamps:
+            st.info("No stored intraday snapshots yet for replay. Switch to snapshot/live and refresh first.")
+        else:
+            replay_index = st.slider("Replay Snapshot", 0, len(replay_timestamps) - 1, len(replay_timestamps) - 1, key="oc_replay_index")
+            replay_ts = replay_timestamps[replay_index]
+            state = update_option_chain_state(st.session_state, replay_timestamp=replay_ts)
+            replay_df = load_replay_frame(_db, inst, expiry, replay_ts)
+            if not replay_df.empty:
+                base_df = replay_df
+                compare_frames[expiry] = base_df
+                st.caption(f"Replay snapshot: {replay_ts}")
 
-    mc = st.columns(7)
+    dte = calculate_days_to_expiry(expiry)
+    summary = summarize_chain(base_df, _spot, dte)
+    atm = summary["atm"]
+    pcr = summary["pcr"]
+    mp = summary["max_pain"]
+    total_call_oi = base_df[base_df["right"] == "Call"]["open_interest"].sum() if "right" in base_df.columns else 0
+    total_put_oi = base_df[base_df["right"] == "Put"]["open_interest"].sum() if "right" in base_df.columns else 0
+    expected_move = summary["expected_move"]["expected_move"]
+
+    expiry_strip = build_expiry_strip(compare_frames, _spot, calculate_days_to_expiry)
+    mc = st.columns(8)
     mc[0].metric("Spot", f"{_spot:,.0f}" if _spot > 0 else "—")
     mc[1].metric("ATM", f"{atm:,.0f}")
     mc[2].metric("PCR", f"{pcr:.2f}", "Bullish" if pcr > 1 else "Bearish")
     mc[3].metric("Max Pain", f"{mp:,.0f}")
     mc[4].metric("DTE", str(dte), "⚠️ Expiry Soon!" if dte <= 2 else None,
                  delta_color="inverse" if dte <= 2 else "normal")
-    mc[5].metric("Call OI", format_number(total_call_oi))
-    mc[6].metric("Put OI", format_number(total_put_oi))
+    mc[5].metric("Expected Move", f"±{expected_move:,.0f}" if expected_move else "—")
+    mc[6].metric("Call OI", format_number(total_call_oi))
+    mc[7].metric("Put OI", format_number(total_put_oi))
     if chain_opt_pcr_gauge:
         st.progress(max(0.0, min(pcr / 2.0, 1.0)), text=f"PCR Gauge: {pcr:.2f}")
 
     if dte <= 0:
         warn_box("⚠️ <b>Expiry Day!</b> Options expire today. Consider squaring off short positions.")
 
+    if expiry_strip:
+        strip_cols = st.columns(min(len(expiry_strip), 3))
+        for idx, expiry_summary in enumerate(expiry_strip[:3]):
+            strip_cols[idx].metric(
+                f"{format_expiry_short(expiry_summary['expiry'])} ATM IV",
+                f"{expiry_summary['atm_iv'] * 100:.1f}%",
+                f"EM ±{expiry_summary['expected_move']:.0f}",
+            )
+        if len(expiry_strip) >= 2:
+            premium_check = detect_event_premium(expiry_strip[0]["atm_iv"], expiry_strip[1]["atm_iv"])
+            if premium_check["is_elevated"]:
+                st.info(
+                    f"Front expiry IV is elevated vs next expiry by {premium_check['distortion'] * 100:.1f} vol points."
+                )
+
     st.markdown("---")
 
-    # Filter around ATM (or show entire chain when "Show All" is checked)
-    if show_all or "strike_price" not in df.columns or atm <= 0:
-        ddf = df.copy()
-    else:
-        strikes = sorted(df["strike_price"].unique())
-        if strikes:
-            ai   = min(range(len(strikes)), key=lambda i: abs(strikes[i] - atm))
-            filt = strikes[max(0, ai - n_strikes): min(len(strikes), ai + n_strikes + 1)]
-            ddf  = df[df["strike_price"].isin(filt)].copy()
-            # Caption so users know the chain is filtered
-            _total = len(strikes)
-            _shown = len(filt)
-            if _shown < _total:
-                st.caption(
-                    f"Showing **{_shown}** of **{_total}** strikes "
-                    f"({n_strikes} above & below ATM {atm:,.0f}). "
-                    "Tick **Show All Strikes** to see the full chain."
-                )
-        else:
-            ddf = df.copy()
+    ddf = filter_option_chain(base_df, atm=atm, strikes_per_side=n_strikes, show_all=show_all)
+    all_strikes = sorted(ddf["strike_price"].dropna().astype(int).unique().tolist()) if "strike_price" in ddf.columns else []
+    monitor_strikes = st.sidebar.multiselect(
+        "Monitor Strikes",
+        options=all_strikes,
+        default=[strike for strike in state.get("monitored_strikes", []) if strike in all_strikes],
+        key="oc_monitored_strikes",
+    )
+    state = update_option_chain_state(st.session_state, monitored_strikes=monitor_strikes)
 
     visible_strikes = []
     if "strike_price" in ddf.columns:
@@ -1670,157 +1739,125 @@ def page_option_chain():
             tick_store.clear_tokens(to_remove)
         st.session_state[ws_key] = sorted(cur_tokens)
 
-    spot_for_greeks = atm if atm > 0 else (ddf["strike_price"].median() if "strike_price" in ddf.columns else 0)
-
     if quote_mode == "🔴 Live WS" and not ddf.empty and token_map:
-        def _apply_live_prices(frame: pd.DataFrame) -> pd.DataFrame:
-            out = frame.copy()
-            resolver = lf.get_token_resolver(client.breeze)
-            tick_store = lf.get_tick_store()
-            cfg_obj = C.get_instrument(inst)
-            live_prices = []
-            for _, row in out.iterrows():
-                strike = safe_float(row.get("strike_price", 0))
-                right = str(row.get("right", "")).lower()
-                right_key = "call" if "call" in right or "ce" in right else "put"
-                key = resolver._make_key(cfg_obj.exchange, cfg_obj.api_code, "options", expiry, strike, right_key)
-                token = token_map.get(key)
-                live_ltp = tick_store.get_latest_ltp(token) if token else None
-                live_prices.append(live_ltp)
-            if live_prices and "ltp" in out.columns:
-                out["ltp"] = [lp if lp is not None and lp > 0 else old for lp, old in zip(live_prices, out["ltp"])]
-            return out
-
         try:
-            ddf = _apply_live_prices(ddf)
+            ddf = merge_live_overlay(ddf, inst, expiry, token_map)
         except Exception as exc:
             log.debug(f"Live WS quote overlay failed: {exc}")
 
-    if show_greeks and not ddf.empty and spot_for_greeks > 0:
-        try:
-            ddf = add_greeks_to_chain(ddf, spot_for_greeks, expiry)
-        except Exception as e:
-            log.debug(f"Greeks calc failed: {e}")
+    baseline_map = _db.get_volume_baseline_map(inst, lookback_days=5) if chain_opt_volume_spike else {}
+    ddf = enrich_option_chain(
+        ddf,
+        instrument=inst,
+        expiry=expiry,
+        spot=_spot,
+        history_provider=_db.get_iv_history,
+        volume_baseline_map=baseline_map,
+        include_greeks=show_greeks,
+    )
+    if chain_opt_oi_heatmap and {"open_interest", "oi_change"}.issubset(ddf.columns):
+        oi_base = ddf["open_interest"].replace(0, np.nan)
+        ddf["OI Change %"] = ((ddf["oi_change"] / oi_base) * 100.0).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    if show_only_liquid and "liquidity_score" in ddf.columns:
+        ddf = ddf[ddf["liquidity_score"] >= 50]
+    if show_only_unusual and "volume_spike" in ddf.columns:
+        ddf = ddf[ddf["volume_spike"]]
+    if chain_opt_iv_percentile and "iv_percentile" in ddf.columns:
+        ddf["IV Percentile"] = ddf["iv_percentile"]
+    if chain_opt_max_pain_marker and "strike_price" in ddf.columns:
+        ddf["Strike"] = ddf["strike_price"].apply(
+            lambda s: f"MP {int(s)}" if safe_float(s) == safe_float(mp) else str(int(s))
+        )
 
-    if not ddf.empty:
-        if chain_opt_oi_heatmap and {"open_interest", "oi_change"}.issubset(ddf.columns):
-            oi_base = ddf["open_interest"].replace(0, np.nan)
-            ddf["OI Change %"] = ((ddf["oi_change"] / oi_base) * 100.0).replace([np.inf, -np.inf], np.nan).fillna(0.0)
-        if chain_opt_volume_spike and "volume" in ddf.columns:
-            baseline_map = _db.get_volume_baseline_map(inst, lookback_days=5)
-            def _avg5(row):
-                strike = int(safe_float(row.get("strike_price", 0), 0))
-                right = str(row.get("right", "")).lower()
-                ot = "CE" if ("call" in right or "ce" in right) else "PE"
-                return baseline_map.get((strike, ot), 0.0)
-            ddf["Avg 5D Vol"] = ddf.apply(_avg5, axis=1)
-            avg_base = pd.to_numeric(ddf["Avg 5D Vol"], errors="coerce").replace(0, np.nan)
-            ddf["Volume Spike"] = np.where(ddf["volume"] > (avg_base * 3), "⚡", "")
-        if chain_opt_max_pain_marker and "strike_price" in ddf.columns:
-            ddf["Strike"] = ddf["strike_price"].apply(
-                lambda s: f"🎯 {int(s)}" if safe_float(s) == safe_float(mp) else str(int(s))
-            )
-        if chain_opt_iv_percentile and "iv" in ddf.columns:
-            iv_num = pd.to_numeric(ddf["iv"], errors="coerce")
-            if iv_num.max(skipna=True) and iv_num.max(skipna=True) > 1:
-                iv_num = iv_num / 100.0
-            iv_pct = []
-            for _, row in ddf.iterrows():
-                strike = int(safe_float(row.get("strike_price", 0), 0))
-                right = str(row.get("right", "")).lower()
-                ot = "CE" if ("call" in right or "ce" in right) else "PE"
-                cur_iv = safe_float(row.get("iv", 0), 0.0)
-                cur_iv = cur_iv / 100.0 if cur_iv > 1 else cur_iv
-                hist = _db.get_iv_history(inst, strike, ot, lookback_days=30)
-                if not hist or cur_iv <= 0:
-                    iv_pct.append(np.nan)
-                    continue
-                less_eq = sum(1 for v in hist if v <= cur_iv)
-                iv_pct.append(round((less_eq / len(hist)) * 100.0, 1))
-            ddf["IV Percentile"] = iv_pct
+    previous_df = pd.DataFrame()
+    if replay_timestamps:
+        reference_ts = replay_ts or replay_timestamps[-1]
+        previous_ts = next((ts for ts in reversed(replay_timestamps) if ts < reference_ts), None)
+        if previous_ts:
+            previous_df = load_replay_frame(_db, inst, expiry, previous_ts)
+            if not previous_df.empty:
+                previous_df = enrich_option_chain(
+                    previous_df,
+                    instrument=inst,
+                    expiry=expiry,
+                    spot=_spot,
+                    history_provider=_db.get_iv_history,
+                    volume_baseline_map=baseline_map,
+                    include_greeks=False,
+                )
 
-    # ── Display ───────────────────────────────────────────────
-    ddf_display = ddf.copy()
-    if "iv" in ddf_display.columns:
-        ddf_display["iv"] = ddf_display["iv"].apply(lambda v: "—" if pd.isna(v) else v)
-    if quote_mode == "🔴 Live WS" and token_map and view != "IV Smile":
-        stream_live = st.toggle("In-place Live Stream", value=False, key="oc_live_stream")
-        if stream_live:
-            cycles = st.slider("Stream Cycles", 5, 40, 10, key="oc_live_cycles")
-            placeholder = st.empty()
-            for _ in range(cycles):
-                try:
-                    stream_df = _apply_live_prices(ddf)
-                    with placeholder.container():
-                        st.dataframe(stream_df, height=400, hide_index=True, width="stretch")
-                    time.sleep(0.7)
-                except Exception as exc:
-                    log.debug(f"Live stream frame failed: {exc}")
-                    break
+    call_wall = int(ddf[ddf["right"] == "Call"]["open_interest"].astype(float).idxmax()) if not ddf.empty and not ddf[ddf["right"] == "Call"].empty else None
+    put_wall = int(ddf[ddf["right"] == "Put"]["open_interest"].astype(float).idxmax()) if not ddf.empty and not ddf[ddf["right"] == "Put"].empty else None
+    pinned_strikes = [int(atm), int(mp)] if atm and mp else [int(atm)] if atm else []
+    if call_wall is not None and "strike_price" in ddf.columns:
+        pinned_strikes.append(int(float(ddf.loc[call_wall, "strike_price"])))
+    if put_wall is not None and "strike_price" in ddf.columns:
+        pinned_strikes.append(int(float(ddf.loc[put_wall, "strike_price"])))
+    pinned_strikes.extend(monitor_strikes)
+    pinned_strikes = list(dict.fromkeys([strike for strike in pinned_strikes if strike > 0]))
 
-    if view == "Traditional":
-        pv = create_pivot_table(ddf_display)
-        tgt = pv if not pv.empty else ddf_display
-        st.dataframe(tgt, height=600, hide_index=True, width="stretch")
-    elif view == "Calls Only":
-        cd = ddf_display[ddf_display["right"] == "Call"] if "right" in ddf_display.columns else ddf_display
-        st.dataframe(cd, height=600, hide_index=True, width="stretch")
-    elif view == "Puts Only":
-        pd_ = ddf_display[ddf_display["right"] == "Put"] if "right" in ddf_display.columns else ddf_display
-        st.dataframe(pd_, height=600, hide_index=True, width="stretch")
-    elif view == "IV Smile":
-        # Compute and plot IV smile
-        if spot_for_greeks > 0:
-            smile = calculate_iv_smile(ddf, spot_for_greeks, expiry)
-            all_strikes = sorted(set(list(smile["calls"].keys()) + list(smile["puts"].keys())))
-            if all_strikes:
-                smile_df = pd.DataFrame({
-                    "Strike": all_strikes,
-                    "Call IV%": [smile["calls"].get(s, np.nan) for s in all_strikes],
-                    "Put IV%": [smile["puts"].get(s, np.nan) for s in all_strikes],
-                }).set_index("Strike")
-                st.line_chart(smile_df)
-                st.caption("IV Smile: higher IV for OTM options indicates demand for protection (skew)")
+    ladder = build_option_chain_ladder(ddf, _spot, pinned_strikes=pinned_strikes)
+    alerts = evaluate_alerts(ddf, previous_df=previous_df, spot=_spot, expiry=expiry)
+    commentary = build_option_chain_commentary(ddf, alerts, spot=_spot, expiry=expiry)
+    gamma_profile = build_gamma_profile(ddf)
+
+    display_col, analysis_col = st.columns([3, 2])
+    with display_col:
+        section("⛓️ Chain Ladder")
+        if view == "Ladder":
+            if ladder.empty:
+                st.info("No ladder rows to display.")
             else:
-                st.info("Not enough data for IV smile")
+                st.dataframe(ladder, height=640, hide_index=True, width="stretch")
+        elif view == "Calls Only":
+            st.dataframe(ddf[ddf["right"] == "Call"], height=640, hide_index=True, width="stretch")
+        elif view == "Puts Only":
+            st.dataframe(ddf[ddf["right"] == "Put"], height=640, hide_index=True, width="stretch")
         else:
-            st.info("Cannot compute IV smile without spot price")
-    else:  # Flat
-        if chain_opt_oi_heatmap and "OI Change %" in ddf_display.columns:
-            st.dataframe(
-                safe_background_gradient(ddf_display, subset=["OI Change %"], cmap="RdYlGn"),
-                height=600,
-                hide_index=True,
-                width="stretch",
-            )
+            if chain_opt_oi_heatmap and "OI Change %" in ddf.columns:
+                st.dataframe(
+                    safe_background_gradient(ddf, subset=["OI Change %"], cmap="RdYlGn"),
+                    height=640,
+                    hide_index=True,
+                    width="stretch",
+                )
+            else:
+                st.dataframe(ddf, height=640, hide_index=True, width="stretch")
+
+    with analysis_col:
+        section("🧠 Commentary")
+        for line in commentary[:4]:
+            st.write(f"- {line}")
+        section("🚨 Alerts")
+        if alerts:
+            for alert in alerts[:5]:
+                st.write(f"- [{alert['severity'].upper()}] {alert['message']}")
         else:
-            st.dataframe(ddf_display, height=600, hide_index=True, width="stretch")
+            st.caption("No deterministic alerts triggered.")
 
-    # ── OI Chart ──────────────────────────────────────────────
-    if "right" in ddf.columns and "open_interest" in ddf.columns and view != "IV Smile":
-        st.markdown("---")
-        section("📊 Open Interest Distribution")
-        try:
-            co = ddf[ddf["right"] == "Call"][["strike_price", "open_interest"]].rename(
-                columns={"open_interest": "Call OI"})
-            po = ddf[ddf["right"] == "Put"][["strike_price", "open_interest"]].rename(
-                columns={"open_interest": "Put OI"})
-            oi = (pd.merge(co, po, on="strike_price", how="outer")
-                  .fillna(0).sort_values("strike_price").set_index("strike_price"))
-            st.bar_chart(oi, width="stretch")
+    st.markdown("---")
+    section(f"📈 {chart_tab}")
 
-            # OI change if available
-            if "oi_change" in ddf.columns:
-                coc = ddf[ddf["right"] == "Call"][["strike_price", "oi_change"]].rename(
-                    columns={"oi_change": "Call ΔOI"})
-                poc = ddf[ddf["right"] == "Put"][["strike_price", "oi_change"]].rename(
-                    columns={"oi_change": "Put ΔOI"})
-                oic = (pd.merge(coc, poc, on="strike_price", how="outer")
-                       .fillna(0).sort_values("strike_price").set_index("strike_price"))
-                st.caption("OI Change (today)")
-                st.bar_chart(oic, width="stretch")
-        except Exception as e:
-            log.debug(f"OI chart error: {e}")
+    fig = None
+    if chart_tab == "OI Profile":
+        fig = build_oi_profile_figure(ddf, atm=atm, max_pain=mp)
+    elif chart_tab == "Delta OI":
+        fig = build_delta_oi_profile_figure(ddf, atm=atm)
+    elif chart_tab == "IV Smile":
+        fig = build_iv_smile_figure(ddf, atm=atm, selected_expiry=format_expiry_short(expiry))
+    elif chart_tab == "Term Structure":
+        fig = build_term_structure_figure(expiry_strip)
+    elif chart_tab == "Expected Move":
+        fig = build_expected_move_figure(expiry_strip, _spot)
+    elif chart_tab == "OI Heatmap":
+        heatmap_df = pd.DataFrame(_db.get_option_chain_intraday_snapshots(inst, expiry=expiry, trade_date=date.today().isoformat(), limit=5000))
+        fig = build_oi_heatmap_figure(heatmap_df)
+    elif chart_tab == "Gamma":
+        fig = build_gamma_exposure_figure(gamma_profile, walls=summary["gamma_walls"])
+    elif chart_tab == "Liquidity":
+        fig = build_liquidity_scatter_figure(ddf)
+    if fig is not None:
+        st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
 
     # ── Export ────────────────────────────────────────────────
     if not ddf.empty and chain_opt_export:
