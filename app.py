@@ -63,6 +63,17 @@ from alerting import (
 from paper_trading import PaperTradingEngine
 import live_feed as lf
 import holiday_calendar as _hc   # dynamic NSE holiday calendar
+from option_chain_controller import (
+    apply_option_chain_live_overlay,
+    invalidate_option_chain_cache,
+    load_cached_option_chain,
+    load_compare_option_frames,
+    load_option_chain_spot,
+    render_option_chain_controls,
+    resolve_replay_chain_selection,
+    sync_option_chain_live_feed,
+    sync_option_chain_watchlist,
+)
 from option_chain_metrics import calculate_max_pain, calculate_pcr, detect_event_premium
 from option_chain_page import (
     build_option_chain_chart,
@@ -1524,113 +1535,32 @@ def page_option_chain():
 
     render_auto_refresh("option_chain")
     state = ensure_option_chain_state(st.session_state)
-
-    c1, c2, c3, c4, c5 = st.columns([2, 2, 2, 1, 1])
-    with c1:
-        inst = st.selectbox("Instrument", list(C.INSTRUMENTS.keys()), key="oc_inst")
-    cfg = C.get_instrument(inst)
-    with c2:
-        expiries = C.get_next_expiries(inst, 6)
-        if not expiries:
-            st.error("No expiries available")
-            return
-        expiry = st.selectbox("Expiry", expiries, format_func=format_expiry, key="oc_exp")
-    with c3:
-        compare_default = [exp for exp in state.get("compare_expiries", []) if exp in expiries and exp != expiry]
-        compare_expiries = st.multiselect(
-            "Compare Expiries",
-            options=[exp for exp in expiries if exp != expiry],
-            default=compare_default[:2],
-            format_func=format_expiry,
-            key="oc_compare_expiries",
-        )[:2]
-    # Holiday advisory: show if this expiry was moved from its natural date
-    _natural_expiry = C.get_natural_expiry_for(inst, expiry)
-    if _natural_expiry and _natural_expiry != expiry:
-        st.info(
-            f"📅 **Holiday-adjusted expiry** — {inst} natural expiry "
-            f"({format_expiry_short(_natural_expiry)}) falls on a market holiday. "
-            f"NSE moved it to **{format_expiry_short(expiry)}**."
-        )
-    with c4:
-        show_all = st.checkbox("Show All Strikes", value=False, key="oc_all")
-        n_strikes = st.slider("Strikes ±", 5, 100, 40, key="oc_n",
-                              disabled=show_all,
-                              help="Number of strikes to show above and below ATM. Ignored when 'Show All Strikes' is checked.")
-    with c5:
-        st.markdown("<br>", unsafe_allow_html=True)
-        col1, col2 = st.columns(2)
-        refresh = col1.button("🔄", key="oc_ref", help="Refresh chain")
-        show_greeks = col2.checkbox("Greeks", True, key="oc_g")
-
-    view = st.radio("View", ["Ladder", "Flat", "Calls Only", "Puts Only"], horizontal=True, key="oc_v")
-    quote_mode = st.radio("Quote Mode", ["🔴 Live WS", "📦 Snapshot", "⏪ Replay"], horizontal=True, key="oc_quote_mode")
-    with st.sidebar.expander("⛓️ Chain Options"):
-        chain_opt_oi_heatmap = st.checkbox("OI Change % Heatmap", value=True, key="oc_opt_oi_heatmap")
-        chain_opt_volume_spike = st.checkbox("Volume Spike Alert", value=True, key="oc_opt_vol_spike")
-        chain_opt_pcr_gauge = st.checkbox("PCR Gauge", value=True, key="oc_opt_pcr_gauge")
-        chain_opt_max_pain_marker = st.checkbox("Max Pain Marker", value=True, key="oc_opt_mp_marker")
-        chain_opt_iv_percentile = st.checkbox("IV Percentile", value=False, key="oc_opt_iv_percentile")
-        chain_opt_export = st.checkbox("Export Button", value=True, key="oc_opt_export")
-        sticky_atm = st.checkbox("Sticky ATM Row", value=bool(state.get("sticky_atm", True)), key="oc_sticky_atm")
-        show_only_liquid = st.checkbox("Show Only Liquid", value=bool(state.get("show_only_liquid")), key="oc_only_liquid")
-        show_only_unusual = st.checkbox("Show Only Unusual Activity", value=bool(state.get("show_only_unusual")), key="oc_only_unusual")
-        change_window = st.selectbox(
-            "Change Window",
-            ["Since Open", "5m", "15m", "30m", "60m"],
-            index=["Since Open", "5m", "15m", "30m", "60m"].index(state.get("change_window", "Since Open")),
-            key="oc_change_window",
-        )
-        normalization_mode = st.selectbox(
-            "Compare Normalization",
-            ["Absolute", "ATM Offset", "ATM %"],
-            index=["Absolute", "ATM Offset", "ATM %"].index(str(state.get("normalization_mode", "Absolute")).title() if str(state.get("normalization_mode", "Absolute")).lower() != "atm %" else "ATM %"),
-            key="oc_normalization_mode",
-        )
-        chart_tab = st.selectbox(
-            "Chart Tab",
-            ["OI Profile", "Delta OI", "IV Smile", "Compare OI", "Compare IV Smile", "Term Structure", "Expected Move", "OI Heatmap", "Skew Replay", "Gamma", "Vanna", "Charm", "Liquidity"],
-            key="oc_chart_tab",
-        )
+    controls = render_option_chain_controls(state, format_expiry, format_expiry_short)
+    if controls is None:
+        return
+    inst = controls.inst
+    cfg = controls.cfg
+    expiry = controls.expiry
+    compare_expiries = controls.compare_expiries
 
     state = update_option_chain_state(
         st.session_state,
         compare_expiries=compare_expiries,
-        selected_chart=chart_tab,
-        normalization_mode=normalization_mode,
-        show_only_liquid=show_only_liquid,
-        show_only_unusual=show_only_unusual,
-        change_window=change_window,
-        replay_mode=quote_mode == "⏪ Replay",
-        sticky_atm=sticky_atm,
+        selected_chart=controls.chart_tab,
+        normalization_mode=controls.normalization_mode,
+        show_only_liquid=controls.show_only_liquid,
+        show_only_unusual=controls.show_only_unusual,
+        change_window=controls.change_window,
+        replay_mode=controls.quote_mode == "⏪ Replay",
+        sticky_atm=controls.sticky_atm,
     )
 
-    ck = f"oc_{cfg.api_code}_{expiry}"
-    if refresh:
-        CacheManager.invalidate(ck, "option_chain")
-        for cmp_expiry in compare_expiries:
-            CacheManager.invalidate(f"oc_{cfg.api_code}_{cmp_expiry}", "option_chain")
+    if controls.refresh:
+        invalidate_option_chain_cache(CacheManager, cfg.api_code, expiry, compare_expiries)
         st.rerun()
 
-    def _load_chain(expiry_value: str) -> pd.DataFrame:
-        cache_key = f"oc_{cfg.api_code}_{expiry_value}"
-        cached = CacheManager.get(cache_key, "option_chain")
-        if cached is not None:
-            return cached
-        with st.spinner(f"Loading {inst} option chain..."):
-            frame = fetch_option_chain_snapshot(client, cfg.api_code, cfg.exchange, expiry_value)
-        if frame.empty:
-            return frame
-        try:
-            _db.record_option_chain_snapshot(inst, expiry_value, frame.to_dict("records"))
-            _db.record_option_chain_intraday_snapshot(inst, expiry_value, frame.to_dict("records"))
-        except Exception as exc:
-            log.debug(f"Could not persist option-chain snapshot: {exc}")
-        CacheManager.set(cache_key, frame, "option_chain", C.OC_CACHE_TTL_SECONDS)
-        return frame
-
     try:
-        base_df = _load_chain(expiry)
+        base_df = load_cached_option_chain(CacheManager, client, _db, inst, cfg, expiry, st.spinner)
     except Exception as exc:
         st.error(f"❌ Option-chain fetch failed: {exc}")
         return
@@ -1639,94 +1569,43 @@ def page_option_chain():
         return
     SessionState.log_activity("Chain", f"{inst} {format_expiry_short(expiry)}")
 
-    compare_frames: Dict[str, pd.DataFrame] = {expiry: base_df}
-    for cmp_expiry in compare_expiries:
-        try:
-            compare_frames[cmp_expiry] = _load_chain(cmp_expiry)
-        except Exception as exc:
-            log.debug(f"Compare-expiry load failed for {cmp_expiry}: {exc}")
-
-    # ── Live spot price → accurate ATM ──────────────────────
-    # Fetch once per chain load; cached for SPOT_CACHE_TTL_SECONDS.
-    _spot_ck = f"spot_{cfg.api_code}"
-    _spot = CacheManager.get(_spot_ck, "spot") or 0.0
-    if _spot <= 0:
-        try:
-            _spot_resp = client.get_spot_price(cfg.api_code, cfg.exchange)
-            if _spot_resp.get("success"):
-                _spot_items = APIResponse(_spot_resp).items
-                if _spot_items:
-                    _spot = safe_float(_spot_items[0].get("ltp", 0))
-                    if _spot > 0:
-                        CacheManager.set(_spot_ck, _spot, "spot", C.SPOT_CACHE_TTL_SECONDS)
-                        st.session_state["last_spot"] = _spot
-        except Exception as _e:
-            log.debug(f"Spot fetch failed for {cfg.api_code}: {_e}")
-
-    if _spot > 0:
-        st.session_state["last_spot"] = _spot
-
-    replay_timestamps = _db.get_option_chain_replay_timestamps(inst, expiry, limit=120)
-    replay_ts = None
-    if quote_mode == "⏪ Replay":
-        if not replay_timestamps:
-            st.info("No stored intraday snapshots yet for replay. Switch to snapshot/live and refresh first.")
-        else:
-            replay_index = st.slider("Replay Snapshot", 0, len(replay_timestamps) - 1, len(replay_timestamps) - 1, key="oc_replay_index")
-            replay_ts = replay_timestamps[replay_index]
-            state = update_option_chain_state(st.session_state, replay_timestamp=replay_ts)
-            replay_df = load_replay_frame(_db, inst, expiry, replay_ts)
-            if not replay_df.empty:
-                base_df = replay_df
-                compare_frames[expiry] = base_df
-                st.caption(f"Replay snapshot: {replay_ts}")
+    compare_frames = load_compare_option_frames(
+        lambda expiry_value: base_df if expiry_value == expiry else load_cached_option_chain(CacheManager, client, _db, inst, cfg, expiry_value, st.spinner),
+        expiry,
+        compare_expiries,
+    )
+    _spot = load_option_chain_spot(CacheManager, client, cfg, st.session_state)
+    replay_timestamps, replay_ts, replay_df = resolve_replay_chain_selection(
+        _db,
+        st.session_state,
+        inst,
+        expiry,
+        controls.quote_mode,
+        update_option_chain_state,
+        st.caption,
+        st.info,
+    )
+    if not replay_df.empty:
+        base_df = replay_df
+        compare_frames[expiry] = base_df
 
     dte = calculate_days_to_expiry(expiry)
     provisional_atm = estimate_atm_strike(base_df, spot=_spot)
-    ddf = filter_option_chain(base_df, atm=provisional_atm, strikes_per_side=n_strikes, show_all=show_all)
+    ddf = filter_option_chain(base_df, atm=provisional_atm, strikes_per_side=controls.n_strikes, show_all=controls.show_all)
     all_strikes = sorted(ddf["strike_price"].dropna().astype(int).unique().tolist()) if "strike_price" in ddf.columns else []
-    persisted_monitored = _db.get_option_chain_watchlist(inst, expiry)
-    default_monitored = resolve_monitored_strike_defaults(state.get("monitored_strikes", []), persisted_monitored, all_strikes)
-    monitor_strikes = st.sidebar.multiselect(
-        "Monitor Strikes",
-        options=all_strikes,
-        default=default_monitored,
-        key="oc_monitored_strikes",
-    )
-    monitor_strikes = sorted({int(strike) for strike in monitor_strikes})
-    if monitor_strikes != persisted_monitored:
-        _db.sync_option_chain_watchlist(inst, expiry, monitor_strikes)
+    monitor_strikes = sync_option_chain_watchlist(_db, st.session_state, state, inst, expiry, all_strikes)
     state = update_option_chain_state(st.session_state, monitored_strikes=monitor_strikes)
 
     visible_strikes = []
     if "strike_price" in ddf.columns:
         visible_strikes = sorted({int(x) for x in ddf["strike_price"].dropna().tolist()})
-    token_map = {}
-    if visible_strikes:
-        token_map = auto_subscribe_option_chain(inst, expiry, visible_strikes, client)
-        mgr = lf.get_live_feed_manager()
-        tick_store = lf.get_tick_store()
-        ws_key = f"oc_ws_tokens_{cfg.api_code}_{expiry}"
-        prev_tokens = set(st.session_state.get(ws_key, []))
-        cur_tokens = {tok for tok in token_map.values() if tok}
-        to_remove = sorted(prev_tokens - cur_tokens)
-        if mgr and to_remove:
-            for tok in to_remove:
-                mgr.unsubscribe_quote(tok)
-            tick_store.clear_tokens(to_remove)
-        if to_remove:
-            lf.unregister_option_chain_tracking(to_remove)
-        if cur_tokens:
-            lf.register_option_chain_tracking(inst, token_map)
-        st.session_state[ws_key] = sorted(cur_tokens)
+    token_map = sync_option_chain_live_feed(lf, auto_subscribe_option_chain, st.session_state, inst, expiry, cfg.api_code, visible_strikes, client) if visible_strikes else {}
+    try:
+        ddf = apply_option_chain_live_overlay(controls.quote_mode, ddf, token_map, inst, expiry)
+    except Exception as exc:
+        log.debug(f"Live WS quote overlay failed: {exc}")
 
-    if quote_mode == "🔴 Live WS" and not ddf.empty and token_map:
-        try:
-            ddf = merge_live_overlay(ddf, inst, expiry, token_map)
-        except Exception as exc:
-            log.debug(f"Live WS quote overlay failed: {exc}")
-
-    baseline_map = _db.get_volume_baseline_map(inst, lookback_days=5) if chain_opt_volume_spike else {}
+    baseline_map = _db.get_volume_baseline_map(inst, lookback_days=5) if controls.chain_opt_volume_spike else {}
     selected_strike = resolve_selected_strike(state.get("selected_strike"), all_strikes, provisional_atm)
     workspace = compose_option_chain_workspace(
         _db,
@@ -1738,19 +1617,19 @@ def page_option_chain():
         compare_frames=compare_frames,
         replay_timestamps=replay_timestamps,
         replay_ts=replay_ts or "",
-        change_window=change_window,
+        change_window=controls.change_window,
         spot=_spot,
         baseline_map=baseline_map,
         history_provider=_db.get_iv_history,
         monitored_strikes=monitor_strikes,
         selected_strike=selected_strike,
-        sticky_atm=sticky_atm,
-        show_only_liquid=show_only_liquid,
-        show_only_unusual=show_only_unusual,
-        include_greeks=show_greeks,
-        include_oi_change_pct=chain_opt_oi_heatmap,
-        include_iv_percentile=chain_opt_iv_percentile,
-        include_max_pain_marker=chain_opt_max_pain_marker,
+        sticky_atm=controls.sticky_atm,
+        show_only_liquid=controls.show_only_liquid,
+        show_only_unusual=controls.show_only_unusual,
+        include_greeks=controls.show_greeks,
+        include_oi_change_pct=controls.chain_opt_oi_heatmap,
+        include_iv_percentile=controls.chain_opt_iv_percentile,
+        include_max_pain_marker=controls.chain_opt_max_pain_marker,
         dte_provider=calculate_days_to_expiry,
     )
     ddf = workspace["display_df"]
@@ -1785,7 +1664,7 @@ def page_option_chain():
     mc[5].metric("Expected Move", f"±{expected_move:,.0f}" if expected_move else "—")
     mc[6].metric("Call OI", format_number(total_call_oi))
     mc[7].metric("Put OI", format_number(total_put_oi))
-    if chain_opt_pcr_gauge:
+    if controls.chain_opt_pcr_gauge:
         st.progress(max(0.0, min(pcr / 2.0, 1.0)), text=f"PCR Gauge: {pcr:.2f}")
 
     if dte <= 0:
@@ -1812,7 +1691,7 @@ def page_option_chain():
     with display_col:
         section("⛓️ Chain Ladder")
         selected_strike = render_option_chain_display(
-            view,
+            controls.view,
             ddf,
             ladder,
             selected_strike,
@@ -1829,19 +1708,19 @@ def page_option_chain():
             change_df,
             top_movers,
             session_iv_extremes,
-            change_window,
+            controls.change_window,
             section,
         )
 
     st.markdown("---")
-    section(f"📈 {chart_tab}")
+    section(f"📈 {controls.chart_tab}")
 
     fig = build_option_chain_chart(
-        chart_tab,
+        controls.chart_tab,
         ddf,
         change_df,
         compare_frames,
-        normalization_mode,
+        controls.normalization_mode,
         _spot,
         atm,
         mp,
@@ -1850,21 +1729,21 @@ def page_option_chain():
         expiry_strip,
         replay_chart_df,
         as_of_ts,
-        change_window,
+        controls.change_window,
         gamma_profile,
         vanna_profile,
         charm_profile,
         summary["gamma_walls"],
     )
-    selected_strike = render_option_chain_chart(fig, chart_tab, selected_strike, all_strikes, atm)
+    selected_strike = render_option_chain_chart(fig, controls.chart_tab, selected_strike, all_strikes, atm)
     state = update_option_chain_state(st.session_state, selected_strike=selected_strike)
 
-    compare_dataset = build_multi_expiry_dataset(compare_frames, "open_interest", normalization_mode=normalization_mode, spot=_spot)
-    if not compare_dataset.empty and chart_tab in {"Compare OI", "Compare IV Smile"}:
-        st.caption(f"Comparison mode: {normalization_mode}")
+    compare_dataset = build_multi_expiry_dataset(compare_frames, "open_interest", normalization_mode=controls.normalization_mode, spot=_spot)
+    if not compare_dataset.empty and controls.chart_tab in {"Compare OI", "Compare IV Smile"}:
+        st.caption(f"Comparison mode: {controls.normalization_mode}")
 
     # ── Export ────────────────────────────────────────────────
-    if not ddf.empty and chain_opt_export:
+    if not ddf.empty and controls.chain_opt_export:
         export_to_csv(ddf, f"option_chain_{inst}_{expiry}.csv", label="📥 Export Chain CSV")
 
 
