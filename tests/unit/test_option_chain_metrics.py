@@ -64,3 +64,30 @@ def test_vanna_and_charm_are_non_zero_for_active_contracts():
     charm = calculate_charm(spot=22020, strike=22000, expiry=expiry, option_type="CE", iv=0.2)
     assert abs(vanna) > 0
     assert abs(charm) > 0
+
+
+def test_placeholder_numeric_values_do_not_break_liquidity_or_iv_normalization():
+    score = calculate_liquidity_score(
+        {
+            "best_bid_price": "—",
+            "best_offer_price": "—",
+            "bid_qty": "—",
+            "offer_qty": "—",
+            "volume": "—",
+            "open_interest": "—",
+            "ltp": "—",
+        }
+    )
+    move = calculate_expected_move(
+        pd.DataFrame(
+            [
+                {"strike_price": 22000, "right": "Call", "ltp": 121, "iv": "—"},
+                {"strike_price": 22000, "right": "Put", "ltp": 115, "iv": "—"},
+            ]
+        ),
+        spot=22020,
+        atm_strike=22000,
+        days_to_expiry=7,
+    )
+    assert score == 0.0
+    assert move["expected_move"] == 236.0

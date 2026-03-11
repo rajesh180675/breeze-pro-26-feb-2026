@@ -63,54 +63,27 @@ from alerting import (
 from paper_trading import PaperTradingEngine
 import live_feed as lf
 import holiday_calendar as _hc   # dynamic NSE holiday calendar
-from option_chain_alerts import build_commentary as build_option_chain_commentary, evaluate_alerts
-from option_chain_charts import (
-    build_charm_exposure_figure,
-    build_delta_oi_profile_figure,
-    build_expected_move_figure,
-    build_gamma_exposure_figure,
-    build_iv_smile_figure,
-    build_liquidity_scatter_figure,
-    build_multi_expiry_iv_smile_figure,
-    build_multi_expiry_oi_figure,
-    build_oi_heatmap_figure,
-    build_oi_profile_figure,
-    build_replay_delta_oi_figure,
-    build_skew_shift_replay_figure,
-    build_term_structure_figure,
-    build_vanna_exposure_figure,
-)
 from option_chain_metrics import calculate_max_pain, calculate_pcr, detect_event_premium
+from option_chain_page import (
+    build_option_chain_chart,
+    render_option_chain_analysis,
+    render_option_chain_chart,
+    render_option_chain_display,
+)
 from option_chain_service import (
-    build_charm_profile,
-    build_session_iv_extremes,
-    build_top_movers,
     build_multi_expiry_dataset,
-    build_expiry_strip,
-    build_gamma_profile,
-    build_option_chain_ladder,
     compose_option_chain_workspace,
-    summarize_alert_commentary_payload,
-    build_vanna_profile,
-    build_window_change_dataset,
-    enrich_option_chain,
     estimate_atm_strike,
     fetch_option_chain_snapshot,
     filter_option_chain,
     load_replay_frame,
     merge_live_overlay,
-    summarize_chain,
 )
 from option_chain_state import ensure_option_chain_state, update_option_chain_state
 from option_chain_utils import process_option_chain
 from option_chain_workspace import (
-    apply_selected_strike,
-    extract_dataframe_selection_rows,
-    extract_plotly_selected_strike,
-    option_chain_chart_supports_selection,
     resolve_monitored_strike_defaults,
     resolve_selected_strike,
-    style_option_chain_rows,
 )
 
 # ─── Logging ──────────────────────────────────────────────────
@@ -1838,122 +1811,53 @@ def page_option_chain():
     display_col, analysis_col = st.columns([3, 2])
     with display_col:
         section("⛓️ Chain Ladder")
-        if view == "Ladder":
-            if ladder.empty:
-                st.info("No ladder rows to display.")
-            else:
-                st.caption(f"Selected strike: {selected_strike}" if selected_strike else "Selected strike: none")
-                ladder_selection = st.dataframe(
-                    style_option_chain_rows(ladder, selected_strike, pinned_strikes=pinned_strikes, atm=atm, max_pain=mp),
-                    height=640,
-                    hide_index=True,
-                    width="stretch",
-                    key="oc_ladder_table",
-                    on_select="rerun",
-                    selection_mode="single-row",
-                )
-                selected_rows = extract_dataframe_selection_rows(ladder_selection)
-                if selected_rows:
-                    selected_idx = selected_rows[0]
-                    if 0 <= selected_idx < len(ladder):
-                        selected_strike = apply_selected_strike(
-                            selected_strike,
-                            int(ladder.iloc[selected_idx]["strike"]),
-                            all_strikes,
-                            atm,
-                        )
-                        state = update_option_chain_state(st.session_state, selected_strike=selected_strike)
-        elif view == "Calls Only":
-            calls_df = ddf[ddf["right"] == "Call"].copy()
-            st.caption(f"Selected strike: {selected_strike}" if selected_strike else "Selected strike: none")
-            st.dataframe(style_option_chain_rows(calls_df, selected_strike, pinned_strikes=pinned_strikes, atm=atm, max_pain=mp), height=640, hide_index=True, width="stretch")
-        elif view == "Puts Only":
-            puts_df = ddf[ddf["right"] == "Put"].copy()
-            st.caption(f"Selected strike: {selected_strike}" if selected_strike else "Selected strike: none")
-            st.dataframe(style_option_chain_rows(puts_df, selected_strike, pinned_strikes=pinned_strikes, atm=atm, max_pain=mp), height=640, hide_index=True, width="stretch")
-        else:
-            st.caption(f"Selected strike: {selected_strike}" if selected_strike else "Selected strike: none")
-            if chain_opt_oi_heatmap and "OI Change %" in ddf.columns:
-                st.dataframe(
-                    style_option_chain_rows(ddf, selected_strike, pinned_strikes=pinned_strikes, atm=atm, max_pain=mp),
-                    height=640,
-                    hide_index=True,
-                    width="stretch",
-                )
-            else:
-                st.dataframe(style_option_chain_rows(ddf, selected_strike, pinned_strikes=pinned_strikes, atm=atm, max_pain=mp), height=640, hide_index=True, width="stretch")
+        selected_strike = render_option_chain_display(
+            view,
+            ddf,
+            ladder,
+            selected_strike,
+            pinned_strikes,
+            atm,
+            mp,
+            all_strikes,
+        )
+        state = update_option_chain_state(st.session_state, selected_strike=selected_strike)
 
     with analysis_col:
-        section("🧠 Commentary")
-        for line in panel_payload["commentary"]:
-            st.write(f"- {line}")
-        section("🚨 Alerts")
-        if panel_payload["alerts"]:
-            for alert in panel_payload["alerts"]:
-                st.write(f"- [{alert['severity'].upper()}] {alert['message']}")
-        else:
-            st.caption("No deterministic alerts triggered.")
-        if not change_df.empty:
-            section(f"⏱ {change_window} Movers")
-            for mover_label, mover_key in (
-                ("OI Addition", "oi_addition"),
-                ("OI Reduction", "oi_reduction"),
-                ("Volume Burst", "volume_burst"),
-                ("Spread Widening", "spread_widening"),
-            ):
-                movers = top_movers.get(mover_key)
-                if movers is not None and not movers.empty:
-                    st.caption(mover_label)
-                    display_cols = [col for col in ["strike", "option_type", "open_interest_change", "volume_change", "iv_change", "spread_change"] if col in movers.columns]
-                    st.dataframe(movers[display_cols].head(3), hide_index=True, width="stretch")
-        if not session_iv_extremes.empty:
-            section("📉 Session IV Range")
-            st.dataframe(session_iv_extremes.head(6), hide_index=True, width="stretch")
+        render_option_chain_analysis(
+            panel_payload,
+            change_df,
+            top_movers,
+            session_iv_extremes,
+            change_window,
+            section,
+        )
 
     st.markdown("---")
     section(f"📈 {chart_tab}")
 
-    fig = None
-    if chart_tab == "OI Profile":
-        fig = build_oi_profile_figure(ddf, atm=atm, max_pain=mp, selected_strike=float(selected_strike or 0))
-    elif chart_tab == "Delta OI":
-        fig = build_replay_delta_oi_figure(
-            change_df,
-            atm=atm,
-            selected_strike=float(selected_strike or 0),
-            replay_timestamp=as_of_ts,
-            change_window=change_window,
-        )
-    elif chart_tab == "IV Smile":
-        fig = build_iv_smile_figure(ddf, atm=atm, selected_expiry=format_expiry_short(expiry), selected_strike=float(selected_strike or 0))
-    elif chart_tab == "Compare OI":
-        fig = build_multi_expiry_oi_figure(compare_frames, normalization_mode=normalization_mode, spot=_spot, selected_strike=float(selected_strike or 0))
-    elif chart_tab == "Compare IV Smile":
-        fig = build_multi_expiry_iv_smile_figure(compare_frames, normalization_mode=normalization_mode, spot=_spot, selected_strike=float(selected_strike or 0))
-    elif chart_tab == "Term Structure":
-        fig = build_term_structure_figure(expiry_strip)
-    elif chart_tab == "Expected Move":
-        fig = build_expected_move_figure(expiry_strip, _spot)
-    elif chart_tab == "OI Heatmap":
-        fig = build_oi_heatmap_figure(replay_chart_df, replay_timestamp=as_of_ts)
-    elif chart_tab == "Skew Replay":
-        fig = build_skew_shift_replay_figure(replay_chart_df, replay_timestamp=as_of_ts)
-    elif chart_tab == "Gamma":
-        fig = build_gamma_exposure_figure(gamma_profile, walls=summary["gamma_walls"], selected_strike=float(selected_strike or 0))
-    elif chart_tab == "Vanna":
-        fig = build_vanna_exposure_figure(vanna_profile, selected_strike=float(selected_strike or 0))
-    elif chart_tab == "Charm":
-        fig = build_charm_exposure_figure(charm_profile, selected_strike=float(selected_strike or 0))
-    elif chart_tab == "Liquidity":
-        fig = build_liquidity_scatter_figure(ddf)
-    if fig is not None:
-        selection_mode = "points"
-        on_select = "rerun" if option_chain_chart_supports_selection(chart_tab) else "ignore"
-        plotly_selection = st.plotly_chart(fig, use_container_width=True, key="oc_chain_chart", on_select=on_select, selection_mode=selection_mode, config={"displaylogo": False})
-        if option_chain_chart_supports_selection(chart_tab):
-            plotted_strike = extract_plotly_selected_strike(plotly_selection)
-            selected_strike = apply_selected_strike(selected_strike, plotted_strike, all_strikes, atm)
-            state = update_option_chain_state(st.session_state, selected_strike=selected_strike)
+    fig = build_option_chain_chart(
+        chart_tab,
+        ddf,
+        change_df,
+        compare_frames,
+        normalization_mode,
+        _spot,
+        atm,
+        mp,
+        selected_strike,
+        format_expiry_short(expiry),
+        expiry_strip,
+        replay_chart_df,
+        as_of_ts,
+        change_window,
+        gamma_profile,
+        vanna_profile,
+        charm_profile,
+        summary["gamma_walls"],
+    )
+    selected_strike = render_option_chain_chart(fig, chart_tab, selected_strike, all_strikes, atm)
+    state = update_option_chain_state(st.session_state, selected_strike=selected_strike)
 
     compare_dataset = build_multi_expiry_dataset(compare_frames, "open_interest", normalization_mode=normalization_mode, spot=_spot)
     if not compare_dataset.empty and chart_tab in {"Compare OI", "Compare IV Smile"}:

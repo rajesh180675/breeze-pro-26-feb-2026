@@ -12,12 +12,21 @@ import pandas as pd
 import app_config as C
 from analytics import calculate_greeks
 
+
 def _as_numeric_series(series: pd.Series) -> pd.Series:
     return pd.to_numeric(series, errors="coerce")
 
 
+def _as_float(value: Any, default: float = 0.0) -> float:
+    try:
+        numeric = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+    except Exception:
+        return default
+    return float(numeric) if pd.notna(numeric) else default
+
+
 def normalize_iv(value: Any) -> float:
-    iv = float(value or 0)
+    iv = _as_float(value, 0.0)
     return iv / 100.0 if iv > 1 else iv
 
 
@@ -91,13 +100,13 @@ def classify_oi_buildup(ltp_change: float, oi_change: float) -> str:
 
 
 def calculate_liquidity_score(row: Dict[str, Any], freshness_seconds: Optional[float] = None) -> float:
-    bid = float(row.get("best_bid_price", row.get("bid", 0)) or 0)
-    ask = float(row.get("best_offer_price", row.get("ask", 0)) or 0)
-    bid_qty = float(row.get("bid_qty", 0) or 0)
-    ask_qty = float(row.get("offer_qty", row.get("ask_qty", 0)) or 0)
-    volume = float(row.get("volume", 0) or 0)
-    oi = float(row.get("open_interest", 0) or 0)
-    mid = ((bid + ask) / 2.0) if bid > 0 and ask > 0 else max(float(row.get("ltp", 0) or 0), 0.0)
+    bid = _as_float(row.get("best_bid_price", row.get("bid", 0)), 0.0)
+    ask = _as_float(row.get("best_offer_price", row.get("ask", 0)), 0.0)
+    bid_qty = _as_float(row.get("bid_qty", 0), 0.0)
+    ask_qty = _as_float(row.get("offer_qty", row.get("ask_qty", 0)), 0.0)
+    volume = _as_float(row.get("volume", 0), 0.0)
+    oi = _as_float(row.get("open_interest", 0), 0.0)
+    mid = ((bid + ask) / 2.0) if bid > 0 and ask > 0 else max(_as_float(row.get("ltp", 0), 0.0), 0.0)
     spread_pct = ((ask - bid) / mid * 100.0) if mid > 0 and ask >= bid and bid > 0 else 100.0
     qty_score = min((bid_qty + ask_qty) / 1000.0, 1.0)
     volume_score = min(volume / 5000.0, 1.0)
