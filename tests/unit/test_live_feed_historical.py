@@ -35,11 +35,15 @@ class DummyClient:
 class DummyBreeze:
     def __init__(self):
         self.subscribed = []
+        self.unsubscribed = []
         self.connected = False
         self.on_ticks = None
 
     def subscribe_feeds(self, **kwargs):
         self.subscribed.append(kwargs)
+
+    def unsubscribe_feeds(self, **kwargs):
+        self.unsubscribed.append(kwargs)
 
     def ws_connect(self):
         self.connected = True
@@ -136,3 +140,19 @@ def test_manual_disconnect_allows_reconnect(monkeypatch):
 
     assert mgr._state == FeedState.CONNECTING
     assert starts == ["LiveFeedWorker", "worker_ran", "LiveFeedConnector", "connector_ran"]
+
+
+def test_unsubscribe_quote_uses_matching_market_depth():
+    breeze = DummyBreeze()
+    mgr = LiveFeedManager(
+        breeze=breeze,
+        tick_store=TickStore(),
+        bar_store=BarStore(),
+        order_bus=OrderNotificationBus(),
+    )
+
+    assert mgr.subscribe_quote("4.1!2885", get_market_depth=True) is True
+    assert mgr.unsubscribe_quote("4.1!2885") is True
+
+    assert breeze.subscribed[-1]["stock_token"] == "4.4!2885"
+    assert breeze.unsubscribed[-1]["stock_token"] == "4.4!2885"

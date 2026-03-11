@@ -581,10 +581,12 @@ class LiveFeedManager:
 
     def unsubscribe_quote(self, stock_token: str) -> bool:
         with self._lock:
-            if stock_token not in self._subscriptions:
+            record = self._subscriptions.get(stock_token)
+            if record is None:
                 return False
             try:
-                token = self._adjust_depth(stock_token, DEPTH_L1)
+                depth = DEPTH_L2 if record.get_market_depth else DEPTH_L1
+                token = self._adjust_depth(stock_token, depth)
                 if hasattr(self._breeze, "unsubscribe_feeds"):
                     self._breeze.unsubscribe_feeds(stock_token=token)
             except Exception:
