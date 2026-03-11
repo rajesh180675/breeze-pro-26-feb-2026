@@ -718,7 +718,7 @@ def render_iv_surface(df_chain_dict: Dict[str, Any], spot: float) -> None:
         ),
         height=500,
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
     selected_dte = st.selectbox("IV Smile Slice DTE", y_vals.tolist(), key="iv_surface_slice_dte")
     slice_df = data_df[data_df["dte"] == selected_dte].sort_values("strike")
@@ -738,7 +738,7 @@ def render_iv_surface(df_chain_dict: Dict[str, Any], spot: float) -> None:
             yaxis_title="IV (%)",
             height=320,
         )
-        st.plotly_chart(smile_fig, use_container_width=True)
+        st.plotly_chart(smile_fig, width="stretch")
 
 
 def render_portfolio_greeks_heatmap(rows_df: pd.DataFrame) -> None:
@@ -778,7 +778,7 @@ def render_portfolio_greeks_heatmap(rows_df: pd.DataFrame) -> None:
         )
     )
     fig.update_layout(height=380, title="Portfolio Greeks Heatmap")
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 
 def build_iv_rv_spread_monitor(client, instruments: List[str]) -> pd.DataFrame:
@@ -947,13 +947,23 @@ def export_to_excel(dfs: dict, filename: str):
     with pd.ExcelWriter(buf, engine='openpyxl') as writer:
         for sheet, df in dfs.items():
             if not df.empty:
-                df.to_excel(writer, sheet_name=sheet[:31], index=False)
+                excel_safe_dataframe(df).to_excel(writer, sheet_name=sheet[:31], index=False)
     st.download_button(
         label="📥 Export Excel",
         data=buf.getvalue(),
         file_name=filename,
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
+
+
+def excel_safe_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a copy with timezone-aware datetimes converted to timezone-naive values for Excel."""
+    safe_df = df.copy()
+    for col in safe_df.columns:
+        series = safe_df[col]
+        if getattr(series.dtype, "tz", None) is not None:
+            safe_df[col] = series.dt.tz_localize(None)
+    return safe_df
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1106,7 +1116,7 @@ def render_sidebar():
                 st.caption(status)
 
             st.markdown("---")
-            if st.button("🔓 Disconnect", use_container_width=True):
+            if st.button("🔓 Disconnect", width="stretch"):
                 _cleanup_session()
                 st.rerun()
 
@@ -1148,7 +1158,7 @@ def _render_login_form(has_secrets: bool):
         with st.form("quick_login"):
             tok = st.text_input("Session Token", type="password",
                                 placeholder="8-digit token from ICICI")
-            if st.form_submit_button("🔑 Connect", type="primary", use_container_width=True):
+            if st.form_submit_button("🔑 Connect", type="primary", width="stretch"):
                 if tok and len(tok.strip()) >= 4:
                     k, s, _ = Credentials.get_all_credentials()
                     do_login(k, s, tok.strip(), st.session_state.get("totp_secret", ""))
@@ -1169,7 +1179,7 @@ def _render_login_form(has_secrets: bool):
             nk = st.text_input("API Key", value=k, type="password")
             ns = st.text_input("API Secret", value=s, type="password")
             tok = st.text_input("Session Token (optional if TOTP secret set)", type="password")
-            if st.form_submit_button("🔑 Connect", type="primary", use_container_width=True):
+            if st.form_submit_button("🔑 Connect", type="primary", width="stretch"):
                 if nk and ns and (tok or st.session_state.get("totp_secret")):
                     do_login(nk.strip(), ns.strip(), tok.strip(), st.session_state.get("totp_secret", ""))
                 else:
@@ -1286,7 +1296,7 @@ def page_dashboard():
                  "Strike Gap": c.strike_gap, "Expiry": c.expiry_day,
                  "Description": c.description}
                 for n, c in C.INSTRUMENTS.items()]
-        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
         info_box("👈 <b>Login from the sidebar</b> to start trading.")
         return
 
@@ -1361,7 +1371,7 @@ def page_dashboard():
             _cb_line("NIFTY", safe_float(dashboard_metrics.get("NIFTY SPOT", {}).get("value", 0), 0.0)),
             _cb_line("BANKNIFTY", safe_float(dashboard_metrics.get("BANKNIFTY SPOT", {}).get("value", 0), 0.0)),
         ]
-        st.dataframe(pd.DataFrame(cb_rows), hide_index=True, use_container_width=True)
+        st.dataframe(pd.DataFrame(cb_rows), hide_index=True, width="stretch")
         st.caption("Market-wide circuit breakers: 10% / 15% / 20%")
 
     st.markdown("---")
@@ -1423,7 +1433,7 @@ def page_dashboard():
                 })
             c1, c2 = st.columns([4, 1])
             with c1:
-                st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+                st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
             with c2:
                 pnl_metric("Total Options P&L", total_pnl)
                 monitor = st.session_state.get("risk_monitor")
@@ -1442,7 +1452,7 @@ def page_dashboard():
                         "Type": p.get("product_type")} for p in eq_pos]
             total_eq = sum(safe_float(p.get("pnl", 0)) for p in eq_pos)
             st.metric("Equity P&L", format_currency(total_eq))
-            st.dataframe(pd.DataFrame(eq_rows), hide_index=True, use_container_width=True)
+            st.dataframe(pd.DataFrame(eq_rows), hide_index=True, width="stretch")
 
     # ── Quick Actions ─────────────────────────────────────────
     st.markdown("---")
@@ -1453,7 +1463,7 @@ def page_dashboard():
                ("🛡️ Risk", "🚨 Risk Monitor"), ("👁️ Watchlist", "👁️ Watchlist")]
     for col, (label, page) in zip([c1, c2, c3, c4, c5, c6], actions):
         with col:
-            if st.button(label, use_container_width=True):
+            if st.button(label, width="stretch"):
                 SessionState.navigate_to(page)
                 st.rerun()
 
@@ -1742,7 +1752,7 @@ def page_option_chain():
                 try:
                     stream_df = _apply_live_prices(ddf)
                     with placeholder.container():
-                        st.dataframe(stream_df, height=400, hide_index=True, use_container_width=True)
+                        st.dataframe(stream_df, height=400, hide_index=True, width="stretch")
                     time.sleep(0.7)
                 except Exception as exc:
                     log.debug(f"Live stream frame failed: {exc}")
@@ -1751,13 +1761,13 @@ def page_option_chain():
     if view == "Traditional":
         pv = create_pivot_table(ddf_display)
         tgt = pv if not pv.empty else ddf_display
-        st.dataframe(tgt, height=600, hide_index=True, use_container_width=True)
+        st.dataframe(tgt, height=600, hide_index=True, width="stretch")
     elif view == "Calls Only":
         cd = ddf_display[ddf_display["right"] == "Call"] if "right" in ddf_display.columns else ddf_display
-        st.dataframe(cd, height=600, hide_index=True, use_container_width=True)
+        st.dataframe(cd, height=600, hide_index=True, width="stretch")
     elif view == "Puts Only":
         pd_ = ddf_display[ddf_display["right"] == "Put"] if "right" in ddf_display.columns else ddf_display
-        st.dataframe(pd_, height=600, hide_index=True, use_container_width=True)
+        st.dataframe(pd_, height=600, hide_index=True, width="stretch")
     elif view == "IV Smile":
         # Compute and plot IV smile
         if spot_for_greeks > 0:
@@ -1781,10 +1791,10 @@ def page_option_chain():
                 safe_background_gradient(ddf_display, subset=["OI Change %"], cmap="RdYlGn"),
                 height=600,
                 hide_index=True,
-                use_container_width=True,
+                width="stretch",
             )
         else:
-            st.dataframe(ddf_display, height=600, hide_index=True, use_container_width=True)
+            st.dataframe(ddf_display, height=600, hide_index=True, width="stretch")
 
     # ── OI Chart ──────────────────────────────────────────────
     if "right" in ddf.columns and "open_interest" in ddf.columns and view != "IV Smile":
@@ -1797,7 +1807,7 @@ def page_option_chain():
                 columns={"open_interest": "Put OI"})
             oi = (pd.merge(co, po, on="strike_price", how="outer")
                   .fillna(0).sort_values("strike_price").set_index("strike_price"))
-            st.bar_chart(oi, use_container_width=True)
+            st.bar_chart(oi, width="stretch")
 
             # OI change if available
             if "oi_change" in ddf.columns:
@@ -1808,7 +1818,7 @@ def page_option_chain():
                 oic = (pd.merge(coc, poc, on="strike_price", how="outer")
                        .fillna(0).sort_values("strike_price").set_index("strike_price"))
                 st.caption("OI Change (today)")
-                st.bar_chart(oic, use_container_width=True)
+                st.bar_chart(oic, width="stretch")
         except Exception as e:
             log.debug(f"OI chart error: {e}")
 
@@ -1891,7 +1901,7 @@ def page_sell_options():
     with c2:
         section("📊 Market Info")
         quote_ltp = 0.0
-        if st.button("📊 Get Quote", disabled=not valid, use_container_width=True):
+        if st.button("📊 Get Quote", disabled=not valid, width="stretch"):
             with st.spinner("Fetching quote..."):
                 r = client.get_option_quote(cfg.api_code, cfg.exchange, expiry, int(strike), oc)
                 if r["success"]:
@@ -1907,7 +1917,7 @@ def page_sell_options():
                 else:
                     st.error(f"❌ {r.get('message')}")
 
-        if st.button("💰 Check Margin", disabled=not valid, use_container_width=True):
+        if st.button("💰 Check Margin", disabled=not valid, width="stretch"):
             with st.spinner("Calculating margin..."):
                 r = client.get_margin(cfg.api_code, cfg.exchange, expiry,
                                       int(strike), oc, "sell", qty)
@@ -1984,7 +1994,7 @@ def page_sell_options():
     col1, col2 = st.columns([2, 1])
     with col1:
         if st.button(f"🔴 SELL {qty:,} {inst} {int(strike)} {oc}",
-                     type="primary", disabled=not can_place, use_container_width=True):
+                     type="primary", disabled=not can_place, width="stretch"):
             st.session_state._order_busy = True
             try:
                 with st.spinner("Placing order..."):
@@ -2053,11 +2063,11 @@ def page_square_off():
 
     col_r, col_bulk = st.columns([1, 1])
     with col_r:
-        if st.button("🔄 Refresh Positions", use_container_width=True):
+        if st.button("🔄 Refresh Positions", width="stretch"):
             invalidate_trading_caches()
             st.rerun()
     with col_bulk:
-        if st.button("⚠️ Square Off ALL", type="secondary", use_container_width=True,
+        if st.button("⚠️ Square Off ALL", type="secondary", width="stretch",
                      help="Square off all open option positions at market price"):
             st.session_state["confirm_bulk_sqoff"] = True
 
@@ -2084,7 +2094,7 @@ def page_square_off():
                     "Lot Size": _ls,
                     "P&L ₹": f"{_pe['_pnl']:+,.2f}"
                 })
-            st.dataframe(pd.DataFrame(preview_rows), hide_index=True, use_container_width=True)
+            st.dataframe(pd.DataFrame(preview_rows), hide_index=True, width="stretch")
         cc1, cc2 = st.columns(2)
         if cc1.button("✅ Yes, Square Off All", type="primary"):
             all_pos = get_cached_positions(client)
@@ -2175,7 +2185,7 @@ def page_square_off():
             "Action": e["_close"].upper(),
             "Expiry": format_expiry_short(e.get("expiry_date", ""))
         })
-    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
 
     st.markdown("---")
     section("🎯 Select Position to Square Off")
@@ -2251,7 +2261,7 @@ def page_square_off():
         f"🔄 {sel['_close'].upper()} {sq_lots} lot{'s' if sq_lots > 1 else ''} "        f"({sq} qty) — {C.api_code_to_display(sel.get('stock_code', ''))} "        f"{sel.get('strike_price')} {C.normalize_option_type(sel.get('right', ''))}"
     )
     can_square = (not order_busy) and (sq % sel_lot_size == 0) and (sq <= sel["_qty"]) and (sq >= sel_lot_size)
-    if st.button(btn_label, type="primary", disabled=not can_square, use_container_width=True):
+    if st.button(btn_label, type="primary", disabled=not can_square, width="stretch"):
         st.session_state._order_busy = True
         try:
             with st.spinner("Squaring off..."):
@@ -2313,7 +2323,7 @@ def page_orders_trades():
         td = st.date_input("To", value=date.today(), key="o_t")
     with c4:
         st.markdown("<br>", unsafe_allow_html=True)
-        refresh_ord = st.button("🔄 Fetch", use_container_width=True)
+        refresh_ord = st.button("🔄 Fetch", width="stretch")
 
     try:
         validate_date_range(fd, td)
@@ -2335,7 +2345,7 @@ def page_orders_trades():
                 items = APIResponse(r).items
                 if items:
                     df = pd.DataFrame(items)
-                    st.dataframe(df, height=400, hide_index=True, use_container_width=True)
+                    st.dataframe(df, height=400, hide_index=True, width="stretch")
                     export_to_csv(df, f"orders_{fd}_{td}.csv")
                 else:
                     empty_state("📭", "No orders found", f"{fd} to {td}")
@@ -2353,7 +2363,7 @@ def page_orders_trades():
                 items = APIResponse(r).items
                 if items:
                     df = pd.DataFrame(items)
-                    st.dataframe(df, height=400, hide_index=True, use_container_width=True)
+                    st.dataframe(df, height=400, hide_index=True, width="stretch")
                     export_to_csv(df, f"trades_{fd}_{td}.csv")
                 else:
                     empty_state("📭", "No trades found")
@@ -2370,7 +2380,7 @@ def page_orders_trades():
                                       date_to=td.strftime("%Y-%m-%d"))
         if local_trades:
             df = pd.DataFrame(local_trades)
-            st.dataframe(df, height=400, hide_index=True, use_container_width=True)
+            st.dataframe(df, height=400, hide_index=True, width="stretch")
             export_to_excel({"Trades": df}, f"trade_history_{fd}_{td}.xlsx")
         else:
             empty_state("💾", "No trades recorded", "Trades auto-save when orders are placed")
@@ -2378,7 +2388,7 @@ def page_orders_trades():
     with t4:
         db_log = _db.get_activities(limit=100)
         if db_log:
-            st.dataframe(pd.DataFrame(db_log), hide_index=True, use_container_width=True)
+            st.dataframe(pd.DataFrame(db_log), hide_index=True, width="stretch")
             export_to_csv(pd.DataFrame(db_log), "activity_log.csv")
         else:
             empty_state("📝", "No activity yet")
@@ -2419,7 +2429,7 @@ def page_positions():
 
     render_auto_refresh("positions")
 
-    if st.button("🔄 Refresh", use_container_width=False):
+    if st.button("🔄 Refresh", width="content"):
         invalidate_trading_caches()
         st.rerun()
 
@@ -2462,7 +2472,7 @@ def page_positions():
                 "Expiry": format_expiry_short(e.get("expiry_date", "")),
                 "DTE": calculate_days_to_expiry(e.get("expiry_date", ""))
             } for e in ep]
-            st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+            st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
 
             export_to_csv(pd.DataFrame(rows), "positions.csv")
 
@@ -2478,7 +2488,7 @@ def page_positions():
                         "Type": p.get("product_type")} for p in eq_pos]
             total_eq = sum(safe_float(p.get("pnl", 0)) for p in eq_pos)
             st.metric("Equity P&L", format_currency(total_eq))
-            st.dataframe(pd.DataFrame(eq_rows), hide_index=True, use_container_width=True)
+            st.dataframe(pd.DataFrame(eq_rows), hide_index=True, width="stretch")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -2567,7 +2577,7 @@ def page_strategy_builder():
                         st.success(f"Loaded template: {selected_template}")
                         st.rerun()
 
-            if st.button("🔧 Build Strategy", type="primary", use_container_width=True):
+            if st.button("🔧 Build Strategy", type="primary", width="stretch"):
                 try:
                     legs = generate_strategy_legs(
                         sname, int(atm), cfg.strike_gap, cfg.lot_size, lots,
@@ -2657,7 +2667,7 @@ def page_strategy_builder():
                              "Qty": l.quantity, "Label": l.label,
                              "Premium ₹": f"{l.premium:.2f}" if l.premium > 0 else "—"}
                             for i, l in enumerate(legs)]
-                st.dataframe(pd.DataFrame(leg_rows), hide_index=True, use_container_width=True)
+                st.dataframe(pd.DataFrame(leg_rows), hide_index=True, width="stretch")
                 if st.session_state.get("strat_multi_expiry"):
                     section("🗓️ Per-Leg Expiry")
                     expiry_choices = C.get_next_expiries(inst, 6)
@@ -2672,7 +2682,7 @@ def page_strategy_builder():
                     st.session_state.strat_legs = legs
 
                 col_fetch, col_analyze = st.columns(2)
-                if col_fetch.button("📊 Fetch Quotes", use_container_width=True):
+                if col_fetch.button("📊 Fetch Quotes", width="stretch"):
                     with st.spinner("Fetching quotes for all legs..."):
                         for leg in legs:
                             try:
@@ -2687,7 +2697,7 @@ def page_strategy_builder():
                         st.session_state.strat_legs = legs
                     st.success("✅ Quotes loaded")
 
-                if col_analyze.button("📈 Analyze", use_container_width=True):
+                if col_analyze.button("📈 Analyze", width="stretch"):
                     metrics = calculate_strategy_metrics(legs)
                     mc = st.columns(4)
                     mc[0].metric("Net Premium", format_currency(metrics["net_premium"]))
@@ -2742,7 +2752,7 @@ def page_strategy_builder():
                             hovermode='x unified',
                             height=400
                         )
-                        st.plotly_chart(fig, use_container_width=True)
+                        st.plotly_chart(fig, width="stretch")
                         scenario_spots = [
                             int(atm * 0.90),
                             int(atm * 0.95),
@@ -2766,7 +2776,7 @@ def page_strategy_builder():
                                 pnl_value += leg_pnl
                             scenario_pnl.append({"Spot At Expiry": sp, "P&L (₹)": round(pnl_value, 2)})
                         section("📋 P&L At Expiry Table")
-                        st.dataframe(pd.DataFrame(scenario_pnl), hide_index=True, use_container_width=True)
+                        st.dataframe(pd.DataFrame(scenario_pnl), hide_index=True, width="stretch")
 
     with t_custom:
         section("✏️ Build Custom Strategy")
@@ -2790,7 +2800,7 @@ def page_strategy_builder():
             cl_lots = st.number_input("Lots", min_value=1, value=1, key="cl_lots")
         with c6:
             st.markdown("<br>", unsafe_allow_html=True)
-            if st.button("➕ Add Leg", use_container_width=True):
+            if st.button("➕ Add Leg", width="stretch"):
                 st.session_state.custom_legs.append(StrategyLeg(
                     strike=int(cl_strike), option_type=cl_type,
                     action=cl_action, quantity=cl_lots * cfg2.lot_size
@@ -2801,7 +2811,7 @@ def page_strategy_builder():
                           "Type": l.option_type, "Qty": l.quantity,
                           "Premium": l.premium if l.premium > 0 else "—"}
                          for i, l in enumerate(st.session_state.custom_legs)]
-            st.dataframe(pd.DataFrame(cleg_rows), hide_index=True, use_container_width=True)
+            st.dataframe(pd.DataFrame(cleg_rows), hide_index=True, width="stretch")
             if st.button("🗑️ Clear All Legs"):
                 st.session_state.custom_legs = []
                 st.rerun()
@@ -2860,7 +2870,7 @@ def page_strategy_builder():
         st.info(f"Estimated total premium {premium_type}: ₹{abs(total_premium):,.2f}")
 
         ack = st.checkbox("I confirm all legs and want to execute", key="se_ack")
-        if ack and st.button("⚡ PLACE ALL LEGS", type="primary", use_container_width=True):
+        if ack and st.button("⚡ PLACE ALL LEGS", type="primary", width="stretch"):
             ok, fail = 0, 0
             for leg in legs:
                 with st.spinner(f"Placing {leg.action.upper()} {leg.strike} {leg.option_type}..."):
@@ -2958,7 +2968,7 @@ def page_analytics():
 
             if rows:
                 rows_df = pd.DataFrame(rows)
-                st.dataframe(rows_df, hide_index=True, use_container_width=True)
+                st.dataframe(rows_df, hide_index=True, width="stretch")
                 # Portfolio aggregate
                 port_g = calculate_portfolio_greeks(opt_pos, spot_prices)
                 st.markdown("---")
@@ -3018,7 +3028,7 @@ def page_analytics():
                            funds["unallocated"], funds["block_fno"]]
             }).query("Amount > 0")
             if not chart_df.empty:
-                st.bar_chart(chart_df.set_index("Category"), use_container_width=True)
+                st.bar_chart(chart_df.set_index("Category"), width="stretch")
 
     with t3:
         section("Performance Analytics")
@@ -3029,10 +3039,10 @@ def page_analytics():
             with c1:
                 if "realized_pnl" in hist_df.columns:
                     hist_df["Cumulative P&L"] = hist_df["realized_pnl"].cumsum()
-                    st.line_chart(hist_df.set_index("date")[["Cumulative P&L"]], use_container_width=True)
+                    st.line_chart(hist_df.set_index("date")[["Cumulative P&L"]], width="stretch")
             with c2:
                 if "num_trades" in hist_df.columns:
-                    st.bar_chart(hist_df.set_index("date")[["num_trades"]], use_container_width=True)
+                    st.bar_chart(hist_df.set_index("date")[["num_trades"]], width="stretch")
 
             daily_pnl = hist_df.get("realized_pnl", pd.Series(dtype=float)).tolist()
             if daily_pnl:
@@ -3049,7 +3059,7 @@ def page_analytics():
                 rv30 = rolling_realized_vol(close_series, window=30)
                 rv_df = pd.DataFrame({"rv_20": rv20, "rv_30": rv30}).dropna()
                 if not rv_df.empty:
-                    st.line_chart(rv_df, use_container_width=True)
+                    st.line_chart(rv_df, width="stretch")
                     spread = iv_vs_rv_spread(current_iv=15.0, hist_close=close_series, window=20)
                     st.caption(f"IV-RV Spread: IV {spread['iv']:.2f}% | RV {spread['rv']:.2f}% | Spread {spread['spread']:+.2f}% ({spread['spread_interpretation']})")
 
@@ -3062,7 +3072,7 @@ def page_analytics():
             corr = portfolio_correlation_matrix(corr_input)
             if not corr.empty:
                 st.markdown("**Symbol Correlation Matrix**")
-                st.dataframe(safe_background_gradient(corr, cmap='RdYlGn', axis=None), use_container_width=True)
+                st.dataframe(safe_background_gradient(corr, cmap='RdYlGn', axis=None), width="stretch")
         else:
             empty_state("📈", "No P&L history yet", "Trade to build history")
 
@@ -3123,27 +3133,27 @@ def page_analytics():
                 daily_df["date"] = pd.to_datetime(daily_df["date"], errors="coerce")
                 daily_plot = daily_df.dropna(subset=["date"]).sort_values("date").tail(30)
                 if not daily_plot.empty:
-                    st.bar_chart(daily_plot.set_index("date")["realized_pnl"], use_container_width=True)
+                    st.bar_chart(daily_plot.set_index("date")["realized_pnl"], width="stretch")
 
                 daily_plot["month"] = daily_plot["date"].dt.to_period("M").astype(str)
                 daily_plot["day"] = daily_plot["date"].dt.day
                 month_heat = daily_plot.pivot_table(index="month", columns="day", values="realized_pnl", aggfunc="sum").fillna(0)
                 if not month_heat.empty:
                     st.markdown("**Monthly P&L Heatmap**")
-                    st.dataframe(safe_background_gradient(month_heat, cmap="RdYlGn", axis=None), use_container_width=True)
+                    st.dataframe(safe_background_gradient(month_heat, cmap="RdYlGn", axis=None), width="stretch")
 
             inst_col = "stock_code" if "stock_code" in trades_df.columns else ("symbol" if "symbol" in trades_df.columns else None)
             if inst_col:
                 inst_breakdown = trades_df.groupby(inst_col).size().reset_index(name="Trades")
                 st.markdown("**Instrument Breakdown**")
-                st.dataframe(inst_breakdown, hide_index=True, use_container_width=True)
+                st.dataframe(inst_breakdown, hide_index=True, width="stretch")
 
             if "notes" in trades_df.columns:
                 strat_series = trades_df["notes"].astype(str).str.extract(r"Strategy:\s*(.*)")[0].fillna("Manual")
                 strat_df = pd.DataFrame({"strategy": strat_series, "pnl": pnl_series})
                 strat_breakdown = strat_df.groupby("strategy")["pnl"].sum().reset_index().sort_values("pnl", ascending=False)
                 st.markdown("**Strategy Breakdown (P&L)**")
-                st.dataframe(strat_breakdown, hide_index=True, use_container_width=True)
+                st.dataframe(strat_breakdown, hide_index=True, width="stretch")
             else:
                 strat_breakdown = pd.DataFrame()
 
@@ -3177,7 +3187,7 @@ def page_analytics():
         if ivrv_df.empty:
             st.info("IV/RV monitor data unavailable right now.")
         else:
-            st.dataframe(ivrv_df, hide_index=True, use_container_width=True)
+            st.dataframe(ivrv_df, hide_index=True, width="stretch")
             st.caption("Thresholds: VRP > 30% → strong sell volatility, VRP < -15% → strong buy volatility")
 
     with t4:
@@ -3201,11 +3211,11 @@ def page_analytics():
                 ))
                 fig.update_layout(title=f"P&L under {iv_scenario}", xaxis_title="Spot Move",
                                   yaxis_title="P&L (₹)", height=350)
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
                 # Show table of all scenarios
                 stress_df = pd.DataFrame(results)
                 st.dataframe(safe_background_gradient(stress_df, cmap='RdYlGn', axis=None),
-                             use_container_width=True)
+                             width="stretch")
 
 
     with t5:
@@ -3437,7 +3447,7 @@ def page_futures_trading():
         if basis_data:
             futures_data, spot_ltp = basis_data
             fig = render_basis_chart(futures_data, spot_ltp, instrument)
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
         else:
             st.info("Click **Load Basis Chart** above.")
 
@@ -3564,7 +3574,7 @@ def page_historical_data():
                 support_resistance=show_sr,
                 height=550,
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
             col1, col2, col3, col4, col5 = st.columns(5)
             col1.metric("Period High", f"₹{df['high'].max():,.2f}")
@@ -3601,7 +3611,7 @@ def page_historical_data():
                         paper_bgcolor="#161b22",
                         font=dict(color="#e6edf3"),
                     )
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, width="stretch")
             except Exception as e:
                 st.warning(f"Could not fetch spot data: {e}")
         else:
@@ -3613,7 +3623,7 @@ def page_historical_data():
         else:
             indicators = st.multiselect("Indicators to Display", ["RSI", "MACD", "Stochastic", "ATR"], default=["RSI", "MACD"], key="ta_indicators")
             fig_main = render_candlestick(df, show_volume=False, height=350)
-            st.plotly_chart(fig_main, use_container_width=True)
+            st.plotly_chart(fig_main, width="stretch")
 
             for ind in indicators:
                 if ind == "RSI":
@@ -3630,7 +3640,7 @@ def page_historical_data():
                     fig_ind.update_layout(height=180, plot_bgcolor="#0d1117", paper_bgcolor="#161b22", font=dict(color="#e6edf3"), margin=dict(l=10, r=10, t=25, b=10), title=dict(text="ATR(14)", font=dict(size=12)))
                 else:
                     continue
-                st.plotly_chart(fig_ind, use_container_width=True)
+                st.plotly_chart(fig_ind, width="stretch")
 
             with st.expander("📍 Pivot Points (based on last bar)"):
                 last = df.iloc[-1]
@@ -3655,7 +3665,7 @@ def page_historical_data():
 
             excel_buf = io.BytesIO()
             with pd.ExcelWriter(excel_buf, engine="openpyxl") as writer:
-                df.to_excel(writer, sheet_name="OHLCV", index=False)
+                excel_safe_dataframe(df).to_excel(writer, sheet_name="OHLCV", index=False)
                 ta_df = df.copy()
                 ta_df["ema_20"] = ta.ema(df["close"], 20)
                 ta_df["ema_50"] = ta.ema(df["close"], 50)
@@ -3664,7 +3674,7 @@ def page_historical_data():
                 ta_df["macd"] = macd_l
                 ta_df["macd_signal"] = sig_l
                 ta_df["atr_14"] = ta.atr(df["high"], df["low"], df["close"])
-                ta_df.to_excel(writer, sheet_name="Technical Indicators", index=False)
+                excel_safe_dataframe(ta_df).to_excel(writer, sheet_name="Technical Indicators", index=False)
 
             st.download_button(
                 "📥 Download Excel (with indicators)",
@@ -3698,6 +3708,9 @@ def render_order_cost_preview(
 ) -> Optional[Dict]:
     """Render a pre-trade brokerage breakdown widget."""
     price_str = str(price) if order_type == "limit" and price > 0 else ""
+    if exchange_code.strip().upper() == "NFO" and product.strip().lower() == "options" and not expiry_date:
+        st.info("Select an expiry date to fetch the order cost estimate.")
+        return None
 
     _, col_btn = st.columns([3, 1])
     with col_btn:
@@ -4052,7 +4065,7 @@ def page_gtt_orders():
                     "Created": g.created_at[:10],
                     "GTT ID": g.gtt_order_id[:12] + "...",
                 })
-            st.dataframe(pd.DataFrame(history_data), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(history_data), width="stretch", hide_index=True)
 
 # ═══════════════════════════════════════════════════════════════
 # PAGE: RISK MONITOR
@@ -4078,12 +4091,12 @@ def page_risk_monitor():
     with c1:
         if monitor.is_running():
             st.success("🟢 Monitor Running")
-            if st.button("⏹️ Stop", use_container_width=True):
+            if st.button("⏹️ Stop", width="stretch"):
                 monitor.stop()
                 st.rerun()
         else:
             st.warning("🔴 Monitor Stopped")
-            if st.button("▶️ Start", type="primary", use_container_width=True):
+            if st.button("▶️ Start", type="primary", width="stretch"):
                 monitor.start()
                 st.rerun()
     stats = monitor.get_stats()
@@ -4133,7 +4146,7 @@ def page_risk_monitor():
                     st.markdown(f"{'✅' if pid in already else '⭕'} {label}")
                 with c2:
                     if pid not in already:
-                        if st.button("➕ Monitor", key=f"add_{pid}", use_container_width=True):
+                        if st.button("➕ Monitor", key=f"add_{pid}", width="stretch"):
                             monitor.add_position(pid, stock, p.get("exchange_code", ""),
                                                  p.get("expiry_date", ""), strike_val,
                                                  ot, pt, qty, avg)
@@ -4141,7 +4154,7 @@ def page_risk_monitor():
                             st.success(f"✅ Monitoring {label}")
                             st.rerun()
                     else:
-                        if st.button("🗑️ Remove", key=f"rm_{pid}", use_container_width=True):
+                        if st.button("🗑️ Remove", key=f"rm_{pid}", width="stretch"):
                             monitor.remove_position(pid)
                             st.rerun()
 
@@ -4165,14 +4178,14 @@ def page_risk_monitor():
                         default_stop = m.get("stop") or m["avg"] * 1.5
                         stop_px = st.number_input("Stop Price ₹", value=float(default_stop),
                                                   min_value=0.01, step=0.5, key=f"sp_{m['id']}")
-                        if st.button("Set Fixed Stop", key=f"ss_{m['id']}", use_container_width=True):
+                        if st.button("Set Fixed Stop", key=f"ss_{m['id']}", width="stretch"):
                             monitor.set_stop_loss(m["id"], stop_px)
                             _db.log_activity("STOP_SET", f"₹{stop_px:.2f} on {m['id']}")
                             st.success(f"✅ Stop set at ₹{stop_px:.2f}")
                     with sc2:
                         st.markdown("**Trailing Stop**")
                         trail_pct = st.slider("Trail %", 10, 200, 50, 5, key=f"tr_{m['id']}")
-                        if st.button("Set Trailing", key=f"trs_{m['id']}", use_container_width=True):
+                        if st.button("Set Trailing", key=f"trs_{m['id']}", width="stretch"):
                             monitor.set_trailing_stop(m["id"], trail_pct / 100.0)
                             _db.log_activity("TRAIL_SET", f"{trail_pct}% on {m['id']}")
                             st.success(f"✅ Trailing {trail_pct}% set")
@@ -4183,7 +4196,7 @@ def page_risk_monitor():
                         if m.get("trail_pct"):
                             st.caption(f"Trailing: {m['trail_pct']*100:.0f}%")
                         st.caption(f"Avg: ₹{m['avg']:.2f} | DTE: {calculate_days_to_expiry(m.get('expiry',''))}")
-                        if st.button("🗑️ Remove", key=f"rmm_{m['id']}", use_container_width=True):
+                        if st.button("🗑️ Remove", key=f"rmm_{m['id']}", width="stretch"):
                             monitor.remove_position(m["id"])
                             st.rerun()
 
@@ -4201,7 +4214,7 @@ def page_risk_monitor():
                     "Auto Close": "YES" if row["auto_close"] else "NO",
                     "Reason": row["reason"] or "—",
                 })
-            st.dataframe(pd.DataFrame(out), hide_index=True, use_container_width=True)
+            st.dataframe(pd.DataFrame(out), hide_index=True, width="stretch")
         else:
             empty_state("🧠", "No smart-stop data yet", "Add and monitor positions first")
 
@@ -4214,13 +4227,13 @@ def page_risk_monitor():
                           for a in history]
             if all_alerts:
                 df = pd.DataFrame(all_alerts)
-                st.dataframe(df, hide_index=True, use_container_width=True)
+                st.dataframe(df, hide_index=True, width="stretch")
                 if st.button("✅ Acknowledge All"):
                     _db.acknowledge_alerts()
             if db_alerts:
                 st.markdown("---")
                 st.caption("Persistent Alert History")
-                st.dataframe(pd.DataFrame(db_alerts), hide_index=True, use_container_width=True)
+                st.dataframe(pd.DataFrame(db_alerts), hide_index=True, width="stretch")
         else:
             empty_state("🔔", "No alerts", "Alerts appear when stops are triggered")
 
@@ -4246,7 +4259,7 @@ def page_risk_monitor():
             exp_ids = eval_result.get("expiring_positions", [])
             st.write(f"Expiring positions today: **{len(exp_ids)}**")
             if exp_ids:
-                st.dataframe(pd.DataFrame({"Position ID": exp_ids}), hide_index=True, use_container_width=True)
+                st.dataframe(pd.DataFrame({"Position ID": exp_ids}), hide_index=True, width="stretch")
 
             if eval_result.get("should_auto_close") and exp_ids:
                 confirm = st.checkbox("Final confirm: execute expiry auto-close now", key="expiry_autopilot_confirm")
@@ -4305,7 +4318,7 @@ def page_watchlist():
                                     step=wl_cfg.strike_gap, key="wl_strike")
         with c5:
             st.markdown("<br>", unsafe_allow_html=True)
-            if st.button("➕ Add", use_container_width=True):
+            if st.button("➕ Add", width="stretch"):
                 sym = f"{wl_inst} {int(wl_strike)} {wl_ot} {format_expiry_short(wl_exp)}"
                 ok = _db.add_watchlist_item(sym, wl_inst, int(wl_strike), wl_ot, wl_exp)
                 if ok:
@@ -4354,7 +4367,7 @@ def page_watchlist():
 
     df = pd.DataFrame(rows)
     display_cols = [c for c in df.columns if c != "ID"]
-    st.dataframe(df[display_cols], hide_index=True, use_container_width=True)
+    st.dataframe(df[display_cols], hide_index=True, width="stretch")
 
     # Remove button
     rm_id = st.selectbox("Remove item:", [f"{r['ID']}: {r['Symbol']}" for r in rows], key="wl_rm")
@@ -4814,7 +4827,7 @@ def page_settings():
         hist_page_size = st.selectbox("History Size", [20, 50, 100], index=2, key="alert_hist_size")
         hist = dispatcher.get_history(limit=int(hist_page_size))
         if hist:
-            st.dataframe(pd.DataFrame(hist), hide_index=True, use_container_width=True)
+            st.dataframe(pd.DataFrame(hist), hide_index=True, width="stretch")
         else:
             st.caption("No dispatched alerts yet.")
 
@@ -4882,7 +4895,7 @@ def page_settings():
         st.markdown("---")
         c_btn, c_msg = st.columns([1, 3])
         with c_btn:
-            if st.button("🔄 Refresh Now (from NSE)", type="primary", use_container_width=True):
+            if st.button("🔄 Refresh Now (from NSE)", type="primary", width="stretch"):
                 with st.spinner("Fetching holidays from NSE API…"):
                     count, ok = _hc.force_refresh()
                 if ok:
@@ -4934,7 +4947,7 @@ def page_settings():
             st.dataframe(
                 pd.DataFrame(rows),
                 hide_index=True,
-                use_container_width=True,
+                width="stretch",
                 column_config={
                     "Date":    st.column_config.DateColumn("Date", format="DD MMM YYYY"),
                     "Day":     st.column_config.TextColumn("Day of Week"),
