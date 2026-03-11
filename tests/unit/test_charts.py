@@ -48,6 +48,9 @@ def test_render_candlestick_full_options():
     names = [trace.name for trace in fig.data]
     assert "Price" in names
     assert "Volume" in names
+    assert fig.layout.hovermode == "x unified"
+    assert fig.layout.xaxis.showspikes is True
+    assert "Last Close" in fig.layout.title.text
 
 
 def test_render_technical_subplots():

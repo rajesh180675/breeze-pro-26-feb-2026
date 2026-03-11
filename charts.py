@@ -87,7 +87,7 @@ def render_candlestick(
                     name=f"EMA {period}",
                     line=dict(color=ema_colors[idx % len(ema_colors)], width=1.5, dash="solid"),
                     opacity=0.85,
-                    hoverinfo="skip",
+                    hovertemplate=f"EMA {period} ₹%{{y:,.2f}}<extra></extra>",
                 ),
                 row=1,
                 col=1,
@@ -103,7 +103,7 @@ def render_candlestick(
                 y=upper,
                 name="BB Upper",
                 line=dict(color="rgba(100,150,250,0.7)", width=1, dash="dot"),
-                hoverinfo="skip",
+                hovertemplate="BB Upper ₹%{y:,.2f}<extra></extra>",
             ),
             row=1,
             col=1,
@@ -114,7 +114,7 @@ def render_candlestick(
                 y=mid,
                 name="BB Middle",
                 line=dict(color="rgba(100,150,250,0.5)", width=1),
-                hoverinfo="skip",
+                hovertemplate="BB Middle ₹%{y:,.2f}<extra></extra>",
             ),
             row=1,
             col=1,
@@ -127,7 +127,7 @@ def render_candlestick(
                 line=dict(color="rgba(100,150,250,0.7)", width=1, dash="dot"),
                 fill="tonexty",
                 fillcolor="rgba(100,150,250,0.05)",
-                hoverinfo="skip",
+                hovertemplate="BB Lower ₹%{y:,.2f}<extra></extra>",
             ),
             row=1,
             col=1,
@@ -144,7 +144,7 @@ def render_candlestick(
                 name="VWAP",
                 line=dict(color="#FF6F00", width=1.5, dash="dashdot"),
                 opacity=0.9,
-                hoverinfo="skip",
+                hovertemplate="VWAP ₹%{y:,.2f}<extra></extra>",
             ),
             row=1,
             col=1,
@@ -181,27 +181,64 @@ def render_candlestick(
         )
         fig.update_yaxes(title_text="Volume", row=2, col=1, showgrid=False)
 
+    latest_close = float(df["close"].iloc[-1])
+    first_close = float(df["close"].iloc[0])
+    pct_change = ((latest_close / first_close) - 1) * 100 if first_close else 0.0
+    title_suffix = (
+        f"<span style='font-size:12px;color:#8b949e'>"
+        f"Last Close ₹{latest_close:,.2f} | Change {pct_change:+.2f}%"
+        f"</span>"
+    )
+    unified_hover_title = (
+        "<b>%{x|%d %b %Y %H:%M}</b><br>"
+        "Open %{open:,.2f} | High %{high:,.2f} | "
+        "Low %{low:,.2f} | Close %{close:,.2f}"
+    )
+
     fig.update_layout(
-        title=dict(text=title, font=dict(size=16, color="#2c3e50")),
+        title=dict(
+            text=f"{title}<br>{title_suffix}" if title else title_suffix,
+            font=dict(size=16, color="#e6edf3"),
+            x=0.01,
+            xanchor="left",
+        ),
         height=height,
         xaxis_rangeslider_visible=False,
         plot_bgcolor="#0d1117",
         paper_bgcolor="#161b22",
         font=dict(color="#e6edf3", size=11),
+        hovermode="x unified",
+        hoversubplots="axis",
+        hoverdistance=120,
+        spikedistance=1000,
+        hoverlabel=dict(
+            bgcolor="rgba(13,17,23,0.95)",
+            bordercolor="#388bfd",
+            font=dict(color="#e6edf3", size=12),
+            align="left",
+        ),
         legend=dict(
             orientation="h",
             yanchor="bottom",
-            y=1.02,
-            xanchor="right",
-            x=1,
+            y=1.04,
+            xanchor="left",
+            x=0.01,
             bgcolor="rgba(22,27,34,0.8)",
+            bordercolor="rgba(56,139,253,0.25)",
+            borderwidth=1,
         ),
-        margin=dict(l=10, r=10, t=50 if title else 10, b=10),
+        margin=dict(l=12, r=12, t=78, b=10),
         xaxis=dict(
             showgrid=True,
             gridcolor="rgba(48,54,61,0.8)",
             tickformat="%d %b %H:%M",
             rangeslider=dict(visible=True, thickness=0.04),
+            showspikes=True,
+            spikecolor="rgba(56,139,253,0.55)",
+            spikethickness=1,
+            spikemode="across",
+            spikesnap="cursor",
+            unifiedhovertitle=dict(text=unified_hover_title),
             rangeselector=dict(
                 buttons=[
                     dict(count=1, label="1D", step="day", stepmode="backward"),
@@ -217,10 +254,30 @@ def render_candlestick(
                 font=dict(color="#e6edf3"),
             ),
         ),
-        yaxis=dict(showgrid=True, gridcolor="rgba(48,54,61,0.8)", side="right"),
+        yaxis=dict(
+            showgrid=True,
+            gridcolor="rgba(48,54,61,0.8)",
+            zeroline=False,
+            side="right",
+            tickformat=",.2f",
+        ),
     )
-    # Task 1.3: IST-aware tick format for chart x-axis labels
-    fig.update_xaxes(tickformat="%d %b %H:%M", row=1, col=1)
+    fig.update_xaxes(
+        tickformat="%d %b %H:%M",
+        showline=True,
+        linewidth=1,
+        linecolor="rgba(99,110,123,0.55)",
+        showspikes=True,
+        spikecolor="rgba(56,139,253,0.55)",
+        spikesnap="cursor",
+    )
+    fig.update_yaxes(
+        showline=True,
+        linewidth=1,
+        linecolor="rgba(99,110,123,0.55)",
+        ticks="outside",
+        tickcolor="rgba(99,110,123,0.55)",
+    )
     return fig
 
 
