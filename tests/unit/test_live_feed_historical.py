@@ -22,8 +22,11 @@ from live_feed import (
     FeedState,
     LiveFeedManager,
     OrderNotificationBus,
+    StockTokenResolver,
     TickStore,
     BarStore,
+    get_token_resolver,
+    initialize_live_feed,
 )
 
 
@@ -156,3 +159,42 @@ def test_unsubscribe_quote_uses_matching_market_depth():
 
     assert breeze.subscribed[-1]["stock_token"] == "4.4!2885"
     assert breeze.unsubscribed[-1]["stock_token"] == "4.4!2885"
+
+
+def test_get_token_resolver_replaces_cached_resolver_for_new_breeze(monkeypatch):
+    monkeypatch.setattr("live_feed._token_resolver", None)
+    monkeypatch.setattr("live_feed._security_master", object())
+
+    first_breeze = DummyBreeze()
+    second_breeze = DummyBreeze()
+
+    first_resolver = get_token_resolver(first_breeze)
+    second_resolver = get_token_resolver(second_breeze)
+
+    assert isinstance(first_resolver, StockTokenResolver)
+    assert isinstance(second_resolver, StockTokenResolver)
+    assert first_resolver is not second_resolver
+    assert first_resolver._breeze is first_breeze
+    assert second_resolver._breeze is second_breeze
+
+
+def test_initialize_live_feed_followed_by_get_token_resolver_uses_latest_breeze(monkeypatch):
+    monkeypatch.setattr("live_feed._live_feed_manager", None)
+    monkeypatch.setattr("live_feed._tick_store", None)
+    monkeypatch.setattr("live_feed._bar_store", None)
+    monkeypatch.setattr("live_feed._order_bus", None)
+    monkeypatch.setattr("live_feed._token_resolver", None)
+    monkeypatch.setattr("live_feed._security_master", object())
+
+    first_breeze = DummyBreeze()
+    second_breeze = DummyBreeze()
+
+    initialize_live_feed(first_breeze, auto_load_security_master=False)
+    first_resolver = get_token_resolver(first_breeze)
+
+    initialize_live_feed(second_breeze, auto_load_security_master=False)
+    second_resolver = get_token_resolver(second_breeze)
+
+    assert first_resolver._breeze is first_breeze
+    assert second_resolver._breeze is second_breeze
+    assert second_resolver is not first_resolver

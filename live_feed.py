@@ -825,7 +825,7 @@ def get_security_master() -> SecurityMasterCache:
 
 def get_token_resolver(breeze: BreezeConnect) -> StockTokenResolver:
     global _token_resolver
-    if _token_resolver is None:
+    if _token_resolver is None or _token_resolver._breeze is not breeze:
         _token_resolver = StockTokenResolver(get_security_master(), breeze)
     return _token_resolver
 
