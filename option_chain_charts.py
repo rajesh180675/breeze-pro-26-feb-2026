@@ -84,6 +84,40 @@ def build_term_structure_figure(expiry_summaries: Iterable[Dict[str, float]]) ->
     return fig
 
 
+def build_multi_expiry_oi_figure(expiry_frames: Dict[str, pd.DataFrame]) -> go.Figure:
+    if not expiry_frames:
+        return _empty_figure("Multi-Expiry OI", "No expiry data")
+    fig = go.Figure()
+    added = 0
+    for expiry, frame in expiry_frames.items():
+        if frame.empty or not {"strike_price", "open_interest", "right"}.issubset(frame.columns):
+            continue
+        grouped = frame.groupby("strike_price", dropna=True)["open_interest"].sum().reset_index().sort_values("strike_price")
+        fig.add_trace(go.Scatter(x=grouped["strike_price"], y=grouped["open_interest"], mode="lines+markers", name=expiry))
+        added += 1
+    if added == 0:
+        return _empty_figure("Multi-Expiry OI", "No expiry data")
+    fig.update_layout(title="Multi-Expiry OI Overlay", hovermode="x unified", yaxis_title="Open Interest")
+    return fig
+
+
+def build_multi_expiry_iv_smile_figure(expiry_frames: Dict[str, pd.DataFrame]) -> go.Figure:
+    if not expiry_frames:
+        return _empty_figure("Multi-Expiry IV Smile", "No expiry data")
+    fig = go.Figure()
+    added = 0
+    for expiry, frame in expiry_frames.items():
+        if frame.empty or not {"strike_price", "iv"}.issubset(frame.columns):
+            continue
+        grouped = frame.groupby("strike_price", dropna=True)["iv"].mean().reset_index().sort_values("strike_price")
+        fig.add_trace(go.Scatter(x=grouped["strike_price"], y=grouped["iv"], mode="lines+markers", name=expiry))
+        added += 1
+    if added == 0:
+        return _empty_figure("Multi-Expiry IV Smile", "No expiry data")
+    fig.update_layout(title="Multi-Expiry IV Smile", hovermode="x unified", yaxis_title="IV")
+    return fig
+
+
 def build_expected_move_figure(expiry_summaries: Iterable[Dict[str, float]], spot: float) -> go.Figure:
     summaries = list(expiry_summaries)
     if not summaries:
@@ -123,6 +157,29 @@ def build_oi_heatmap_figure(snapshot_df: pd.DataFrame) -> go.Figure:
         )
     )
     fig.update_layout(title="OI Heatmap", hovermode="closest")
+    return fig
+
+
+def build_skew_shift_replay_figure(snapshot_df: pd.DataFrame) -> go.Figure:
+    if snapshot_df.empty or not {"snapshot_ts", "option_type", "iv"}.issubset(snapshot_df.columns):
+        return _empty_figure("Skew Shift Replay", "No replay snapshots")
+    grouped = (
+        snapshot_df.groupby(["snapshot_ts", "option_type"], dropna=True)["iv"]
+        .mean()
+        .unstack(fill_value=0)
+        .reset_index()
+        .sort_values("snapshot_ts")
+    )
+    grouped["skew_shift"] = grouped.get("PE", 0) - grouped.get("CE", 0)
+    fig = go.Figure(
+        go.Scatter(
+            x=grouped["snapshot_ts"],
+            y=grouped["skew_shift"],
+            mode="lines+markers",
+            name="PE-CE Skew",
+        )
+    )
+    fig.update_layout(title="Skew Shift Replay", hovermode="x unified", yaxis_title="IV Skew")
     return fig
 
 

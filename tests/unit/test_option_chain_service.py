@@ -8,6 +8,9 @@ import pandas as pd
 from option_chain_service import (
     build_expiry_strip,
     build_option_chain_ladder,
+    build_session_iv_extremes,
+    build_top_movers,
+    build_window_change_dataset,
     enrich_option_chain,
     filter_option_chain,
     merge_live_overlay,
@@ -70,3 +73,50 @@ def test_expiry_strip_and_summary():
     strip = build_expiry_strip({"2026-03-26": cur, "2026-04-02": nxt}, 22010, lambda expiry: 7 if expiry.endswith("26") else 14)
     assert len(strip) == 2
     assert strip[0]["expiry"] == "2026-03-26"
+
+
+def test_window_change_dataset_top_movers_and_session_iv_extremes():
+    class FakeDB:
+        def get_option_chain_window_comparison(self, *args, **kwargs):
+            return [
+                {
+                    "strike": 22000,
+                    "option_type": "CE",
+                    "current_ltp": 120,
+                    "baseline_ltp": 100,
+                    "current_volume": 2500,
+                    "baseline_volume": 1800,
+                    "current_open_interest": 20000,
+                    "baseline_open_interest": 18000,
+                    "current_iv": 0.2,
+                    "baseline_iv": 0.18,
+                },
+                {
+                    "strike": 22100,
+                    "option_type": "PE",
+                    "current_ltp": 140,
+                    "baseline_ltp": 150,
+                    "current_volume": 3000,
+                    "baseline_volume": 2000,
+                    "current_open_interest": 24000,
+                    "baseline_open_interest": 26000,
+                    "current_iv": 0.22,
+                    "baseline_iv": 0.2,
+                },
+            ]
+
+        def get_option_chain_intraday_snapshots(self, *args, **kwargs):
+            return [
+                {"strike": 22000, "option_type": "CE", "iv": 0.18},
+                {"strike": 22000, "option_type": "CE", "iv": 0.21},
+                {"strike": 22100, "option_type": "PE", "iv": 0.2},
+                {"strike": 22100, "option_type": "PE", "iv": 0.24},
+            ]
+
+    fake_db = FakeDB()
+    change_df = build_window_change_dataset(fake_db, "NIFTY", "2026-03-26", "2026-03-11T09:20:00", "5m")
+    assert list(change_df["open_interest_change"]) == [2000, -2000]
+    movers = build_top_movers(change_df, top_n=1)
+    assert int(movers["oi_addition"].iloc[0]["strike"]) == 22000
+    iv_extremes = build_session_iv_extremes(fake_db, "NIFTY", "2026-03-26", "2026-03-11")
+    assert iv_extremes.loc[iv_extremes["strike"] == 22000, "session_iv_high"].iloc[0] == 0.21

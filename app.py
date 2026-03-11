@@ -72,15 +72,21 @@ from option_chain_charts import (
     build_gamma_exposure_figure,
     build_iv_smile_figure,
     build_liquidity_scatter_figure,
+    build_multi_expiry_iv_smile_figure,
+    build_multi_expiry_oi_figure,
     build_oi_heatmap_figure,
     build_oi_profile_figure,
+    build_skew_shift_replay_figure,
     build_term_structure_figure,
 )
 from option_chain_metrics import detect_event_premium
 from option_chain_service import (
+    build_session_iv_extremes,
+    build_top_movers,
     build_expiry_strip,
     build_gamma_profile,
     build_option_chain_ladder,
+    build_window_change_dataset,
     enrich_option_chain,
     fetch_option_chain_snapshot,
     filter_option_chain,
@@ -1577,9 +1583,15 @@ def page_option_chain():
         chain_opt_export = st.checkbox("Export Button", value=True, key="oc_opt_export")
         show_only_liquid = st.checkbox("Show Only Liquid", value=bool(state.get("show_only_liquid")), key="oc_only_liquid")
         show_only_unusual = st.checkbox("Show Only Unusual Activity", value=bool(state.get("show_only_unusual")), key="oc_only_unusual")
+        change_window = st.selectbox(
+            "Change Window",
+            ["Since Open", "5m", "15m", "30m", "60m"],
+            index=["Since Open", "5m", "15m", "30m", "60m"].index(state.get("change_window", "Since Open")),
+            key="oc_change_window",
+        )
         chart_tab = st.selectbox(
             "Chart Tab",
-            ["OI Profile", "Delta OI", "IV Smile", "Term Structure", "Expected Move", "OI Heatmap", "Gamma", "Liquidity"],
+            ["OI Profile", "Delta OI", "IV Smile", "Compare OI", "Compare IV Smile", "Term Structure", "Expected Move", "OI Heatmap", "Skew Replay", "Gamma", "Liquidity"],
             key="oc_chart_tab",
         )
 
@@ -1589,6 +1601,7 @@ def page_option_chain():
         selected_chart=chart_tab,
         show_only_liquid=show_only_liquid,
         show_only_unusual=show_only_unusual,
+        change_window=change_window,
         replay_mode=quote_mode == "⏪ Replay",
     )
 
@@ -1797,9 +1810,20 @@ def page_option_chain():
     pinned_strikes = list(dict.fromkeys([strike for strike in pinned_strikes if strike > 0]))
 
     ladder = build_option_chain_ladder(ddf, _spot, pinned_strikes=pinned_strikes)
-    alerts = evaluate_alerts(ddf, previous_df=previous_df, spot=_spot, expiry=expiry)
+    as_of_ts = replay_ts or (replay_timestamps[-1] if replay_timestamps else "")
+    alerts = evaluate_alerts(
+        ddf,
+        previous_df=previous_df,
+        spot=_spot,
+        expiry=expiry,
+        monitored_strikes=monitor_strikes,
+        snapshot_ts=as_of_ts,
+    )
     commentary = build_option_chain_commentary(ddf, alerts, spot=_spot, expiry=expiry)
     gamma_profile = build_gamma_profile(ddf)
+    change_df = build_window_change_dataset(_db, inst, expiry, as_of_ts=as_of_ts, change_window=change_window) if as_of_ts else pd.DataFrame()
+    top_movers = build_top_movers(change_df)
+    session_iv_extremes = build_session_iv_extremes(_db, inst, expiry, trade_date=(as_of_ts[:10] if as_of_ts else date.today().isoformat()))
 
     display_col, analysis_col = st.columns([3, 2])
     with display_col:
@@ -1834,6 +1858,18 @@ def page_option_chain():
                 st.write(f"- [{alert['severity'].upper()}] {alert['message']}")
         else:
             st.caption("No deterministic alerts triggered.")
+        if not change_df.empty:
+            section(f"⏱ {change_window} Movers")
+            movers = top_movers.get("oi_addition")
+            if movers is not None and not movers.empty:
+                st.dataframe(
+                    movers[["strike", "option_type", "open_interest_change", "volume_change", "iv_change"]].head(5),
+                    hide_index=True,
+                    width="stretch",
+                )
+        if not session_iv_extremes.empty:
+            section("📉 Session IV Range")
+            st.dataframe(session_iv_extremes.head(6), hide_index=True, width="stretch")
 
     st.markdown("---")
     section(f"📈 {chart_tab}")
@@ -1845,6 +1881,10 @@ def page_option_chain():
         fig = build_delta_oi_profile_figure(ddf, atm=atm)
     elif chart_tab == "IV Smile":
         fig = build_iv_smile_figure(ddf, atm=atm, selected_expiry=format_expiry_short(expiry))
+    elif chart_tab == "Compare OI":
+        fig = build_multi_expiry_oi_figure(compare_frames)
+    elif chart_tab == "Compare IV Smile":
+        fig = build_multi_expiry_iv_smile_figure(compare_frames)
     elif chart_tab == "Term Structure":
         fig = build_term_structure_figure(expiry_strip)
     elif chart_tab == "Expected Move":
@@ -1852,6 +1892,9 @@ def page_option_chain():
     elif chart_tab == "OI Heatmap":
         heatmap_df = pd.DataFrame(_db.get_option_chain_intraday_snapshots(inst, expiry=expiry, trade_date=date.today().isoformat(), limit=5000))
         fig = build_oi_heatmap_figure(heatmap_df)
+    elif chart_tab == "Skew Replay":
+        replay_chart_df = pd.DataFrame(_db.get_option_chain_intraday_snapshots(inst, expiry=expiry, trade_date=(as_of_ts[:10] if as_of_ts else date.today().isoformat()), limit=5000))
+        fig = build_skew_shift_replay_figure(replay_chart_df)
     elif chart_tab == "Gamma":
         fig = build_gamma_exposure_figure(gamma_profile, walls=summary["gamma_walls"])
     elif chart_tab == "Liquidity":

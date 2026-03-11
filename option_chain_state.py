@@ -12,11 +12,14 @@ DEFAULT_STATE = {
     "pinned_strikes": [],
     "selected_chart": "oi_profile",
     "compare_expiries": [],
+    "normalization_mode": "absolute",
     "replay_mode": False,
     "replay_timestamp": None,
+    "change_window": "Since Open",
     "show_only_liquid": False,
     "show_only_unusual": False,
     "monitored_strikes": [],
+    "visible_strike_window": None,
 }
 
 

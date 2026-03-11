@@ -162,6 +162,42 @@ def test_option_chain_intraday_cleanup_downsamples_old_rows(tmp_path, monkeypatc
     assert len(rows) == 1
 
 
+def test_option_chain_window_comparison_and_recent_history(tmp_path, monkeypatch):
+    db = _fresh_db(tmp_path, monkeypatch)
+    for snapshot_ts, ltp, oi in (
+        ("2026-03-11T09:15:00", 100, 1000),
+        ("2026-03-11T09:20:00", 108, 1250),
+    ):
+        db.record_option_chain_intraday_snapshot(
+            instrument="NIFTY",
+            expiry="2026-03-26",
+            trade_date="2026-03-11",
+            snapshot_ts=snapshot_ts,
+            rows=[
+                {
+                    "strike_price": 22000,
+                    "right": "Call",
+                    "ltp": ltp,
+                    "volume": oi // 2,
+                    "open_interest": oi,
+                    "oi_change": oi - 900,
+                    "iv": 0.2,
+                }
+            ],
+        )
+    history = db.get_option_chain_recent_strike_history("NIFTY", "2026-03-26", 22000, "CE")
+    assert len(history) == 2
+    comparison = db.get_option_chain_window_comparison(
+        "NIFTY",
+        "2026-03-26",
+        as_of_ts="2026-03-11T09:20:00",
+        window_minutes=5,
+    )
+    assert len(comparison) == 1
+    assert comparison[0]["current_open_interest"] == 1250
+    assert comparison[0]["baseline_open_interest"] == 1000
+
+
 def test_basket_template_crud_roundtrip(tmp_path, monkeypatch):
     db = _fresh_db(tmp_path, monkeypatch)
     ok = db.save_basket_template(

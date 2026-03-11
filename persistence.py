@@ -861,6 +861,109 @@ class TradeDB:
         ).fetchall()
         return [dict(item) for item in rows]
 
+    def get_option_chain_recent_strike_history(
+        self,
+        instrument: str,
+        expiry: str,
+        strike: int,
+        option_type: str,
+        limit: int = 60,
+    ) -> List[Dict[str, Any]]:
+        conn = self._get_conn()
+        rows = conn.execute(
+            """
+            SELECT snapshot_ts, ltp, volume, open_interest, oi_change, iv, bid, ask
+            FROM option_chain_intraday_snapshots
+            WHERE instrument=? AND expiry=? AND strike=? AND option_type=?
+            ORDER BY snapshot_ts DESC
+            LIMIT ?
+            """,
+            (instrument, expiry, int(strike), option_type, int(limit)),
+        ).fetchall()
+        return [dict(row) for row in rows][::-1]
+
+    def get_option_chain_window_comparison(
+        self,
+        instrument: str,
+        expiry: str,
+        as_of_ts: str,
+        window_minutes: int = 0,
+        since_open: bool = False,
+    ) -> List[Dict[str, Any]]:
+        conn = self._get_conn()
+        current_row = conn.execute(
+            """
+            SELECT snapshot_ts, trade_date
+            FROM option_chain_intraday_snapshots
+            WHERE instrument=? AND expiry=? AND snapshot_ts<=?
+            ORDER BY snapshot_ts DESC
+            LIMIT 1
+            """,
+            (instrument, expiry, as_of_ts),
+        ).fetchone()
+        if not current_row:
+            return []
+        current_ts = str(current_row["snapshot_ts"])
+        trade_date = str(current_row["trade_date"])
+        if since_open:
+            baseline_row = conn.execute(
+                """
+                SELECT snapshot_ts
+                FROM option_chain_intraday_snapshots
+                WHERE instrument=? AND expiry=? AND trade_date=?
+                ORDER BY snapshot_ts ASC
+                LIMIT 1
+                """,
+                (instrument, expiry, trade_date),
+            ).fetchone()
+        else:
+            cutoff = (datetime.fromisoformat(as_of_ts) - pd.Timedelta(minutes=int(window_minutes))).isoformat()
+            baseline_row = conn.execute(
+                """
+                SELECT snapshot_ts
+                FROM option_chain_intraday_snapshots
+                WHERE instrument=? AND expiry=? AND snapshot_ts<=?
+                ORDER BY snapshot_ts DESC
+                LIMIT 1
+                """,
+                (instrument, expiry, cutoff),
+            ).fetchone()
+        if not baseline_row:
+            return []
+        baseline_ts = str(baseline_row["snapshot_ts"])
+        rows = conn.execute(
+            """
+            SELECT
+                cur.snapshot_ts AS current_ts,
+                base.snapshot_ts AS baseline_ts,
+                cur.trade_date,
+                cur.instrument,
+                cur.expiry,
+                cur.strike,
+                cur.option_type,
+                cur.ltp AS current_ltp,
+                base.ltp AS baseline_ltp,
+                cur.volume AS current_volume,
+                base.volume AS baseline_volume,
+                cur.open_interest AS current_open_interest,
+                base.open_interest AS baseline_open_interest,
+                cur.oi_change AS current_oi_change,
+                base.oi_change AS baseline_oi_change,
+                cur.iv AS current_iv,
+                base.iv AS baseline_iv
+            FROM option_chain_intraday_snapshots cur
+            JOIN option_chain_intraday_snapshots base
+              ON cur.instrument=base.instrument
+             AND cur.expiry=base.expiry
+             AND cur.strike=base.strike
+             AND cur.option_type=base.option_type
+            WHERE cur.instrument=? AND cur.expiry=? AND cur.snapshot_ts=? AND base.snapshot_ts=?
+            ORDER BY cur.strike, cur.option_type
+            """,
+            (instrument, expiry, current_ts, baseline_ts),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def cleanup_option_chain_intraday_snapshots(
         self,
         retain_full_days: int = 7,

@@ -34,11 +34,29 @@ def _atm_iv(df: pd.DataFrame, spot: float) -> float:
     return float(sum(normalized) / len(normalized))
 
 
+def _skew_value(df: pd.DataFrame, spot: float) -> float:
+    if df.empty or not {"right", "strike_price", "iv"}.issubset(df.columns):
+        return 0.0
+    strikes = sorted(pd.to_numeric(df["strike_price"], errors="coerce").dropna().unique())
+    if len(strikes) < 3:
+        return 0.0
+    atm = min(strikes, key=lambda strike: abs(strike - spot)) if spot > 0 else strikes[len(strikes) // 2]
+    put_strike = min(strikes, key=lambda strike: abs(strike - (atm - 100)))
+    call_strike = min(strikes, key=lambda strike: abs(strike - (atm + 100)))
+    put_iv = pd.to_numeric(df[(df["right"] == "Put") & (df["strike_price"] == put_strike)]["iv"], errors="coerce").dropna()
+    call_iv = pd.to_numeric(df[(df["right"] == "Call") & (df["strike_price"] == call_strike)]["iv"], errors="coerce").dropna()
+    if put_iv.empty or call_iv.empty:
+        return 0.0
+    return float(normalize_iv(put_iv.iloc[0]) - normalize_iv(call_iv.iloc[0]))
+
+
 def evaluate_alerts(
     current_df: pd.DataFrame,
     previous_df: Optional[pd.DataFrame] = None,
     spot: float = 0.0,
     expiry: str = "",
+    monitored_strikes: Optional[List[int]] = None,
+    snapshot_ts: str = "",
 ) -> List[Dict[str, Any]]:
     alerts: List[Dict[str, Any]] = []
     call_wall = _wall_strike(current_df, "Call")
@@ -53,6 +71,8 @@ def evaluate_alerts(
                     "severity": "medium",
                     "strike": call_wall,
                     "expiry": expiry,
+                    "cause": "open_interest_peak_shift",
+                    "timestamp": snapshot_ts,
                     "message": f"Call wall shifted from {prev_call_wall} to {call_wall}.",
                 }
             )
@@ -63,6 +83,8 @@ def evaluate_alerts(
                     "severity": "medium",
                     "strike": put_wall,
                     "expiry": expiry,
+                    "cause": "open_interest_peak_shift",
+                    "timestamp": snapshot_ts,
                     "message": f"Put wall shifted from {prev_put_wall} to {put_wall}.",
                 }
             )
@@ -74,7 +96,22 @@ def evaluate_alerts(
                     "code": "atm_iv_jump",
                     "severity": "high",
                     "expiry": expiry,
+                    "cause": "atm_iv_change",
+                    "timestamp": snapshot_ts,
                     "message": f"ATM IV jumped by {(current_atm_iv - previous_atm_iv) * 100:.1f} vol points.",
+                }
+            )
+        current_skew = _skew_value(current_df, spot)
+        previous_skew = _skew_value(previous_df, spot)
+        if current_skew - previous_skew >= 0.01:
+            alerts.append(
+                {
+                    "code": "skew_steepening",
+                    "severity": "medium",
+                    "expiry": expiry,
+                    "cause": "put_call_skew_change",
+                    "timestamp": snapshot_ts,
+                    "message": f"Put-call skew steepened by {(current_skew - previous_skew) * 100:.1f} vol points.",
                 }
             )
     if not current_df.empty and "spread_pct" in current_df.columns:
@@ -87,11 +124,15 @@ def evaluate_alerts(
                     "severity": "medium",
                     "strike": int(float(row["strike_price"])),
                     "expiry": expiry,
+                    "cause": "wide_bid_ask_spread",
+                    "timestamp": snapshot_ts,
                     "message": f"Spread blowout at {int(float(row['strike_price']))} with {float(row['spread_pct']):.1f}% spread.",
                 }
             )
     if not current_df.empty and {"volume", "avg_volume"}.issubset(current_df.columns):
         unusual = current_df[pd.to_numeric(current_df["volume"], errors="coerce") > (pd.to_numeric(current_df["avg_volume"], errors="coerce").fillna(0) * 3)]
+        if monitored_strikes:
+            unusual = unusual[unusual["strike_price"].isin(monitored_strikes)]
         if not unusual.empty:
             row = unusual.sort_values("volume", ascending=False).iloc[0]
             alerts.append(
@@ -100,6 +141,8 @@ def evaluate_alerts(
                     "severity": "low",
                     "strike": int(float(row["strike_price"])),
                     "expiry": expiry,
+                    "cause": "volume_vs_baseline",
+                    "timestamp": snapshot_ts,
                     "message": f"Unusual volume at {int(float(row['strike_price']))}.",
                 }
             )

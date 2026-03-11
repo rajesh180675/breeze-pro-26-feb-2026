@@ -12,8 +12,11 @@ from option_chain_charts import (
     build_gamma_exposure_figure,
     build_iv_smile_figure,
     build_liquidity_scatter_figure,
+    build_multi_expiry_iv_smile_figure,
+    build_multi_expiry_oi_figure,
     build_oi_heatmap_figure,
     build_oi_profile_figure,
+    build_skew_shift_replay_figure,
     build_term_structure_figure,
 )
 from option_chain_service import build_gamma_profile, enrich_option_chain
@@ -58,3 +61,22 @@ def test_term_structure_heatmap_and_gamma_figures_render():
     assert len(exp_fig.data) == 1
     assert len(gamma_fig.data) == 1
     assert len(heatmap_fig.data) == 1
+
+
+def test_multi_expiry_and_skew_replay_figures_render():
+    cur = _fixture("option_chain_balanced.json")
+    nxt = _fixture("option_chain_expiry_day.json")
+    oi_fig = build_multi_expiry_oi_figure({"2026-03-26": cur, "2026-04-02": nxt})
+    iv_fig = build_multi_expiry_iv_smile_figure({"2026-03-26": cur, "2026-04-02": nxt})
+    replay_df = pd.DataFrame(
+        [
+            {"snapshot_ts": "2026-03-11T09:15:00", "option_type": "CE", "iv": 0.18},
+            {"snapshot_ts": "2026-03-11T09:15:00", "option_type": "PE", "iv": 0.20},
+            {"snapshot_ts": "2026-03-11T09:20:00", "option_type": "CE", "iv": 0.17},
+            {"snapshot_ts": "2026-03-11T09:20:00", "option_type": "PE", "iv": 0.22},
+        ]
+    )
+    skew_fig = build_skew_shift_replay_figure(replay_df)
+    assert len(oi_fig.data) == 2
+    assert len(iv_fig.data) == 2
+    assert len(skew_fig.data) == 1
