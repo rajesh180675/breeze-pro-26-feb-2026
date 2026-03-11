@@ -282,6 +282,27 @@ RESPONSIVE_CSS = """
 </style>
 """
 
+SIDEBAR_HIDDEN_CSS = """
+<style>
+[data-testid="stSidebar"] {
+  margin-left: calc(-1 * var(--sidebar-width));
+}
+[data-testid="stSidebar"][aria-expanded="true"] {
+  min-width: 0 !important;
+  max-width: 0 !important;
+}
+[data-testid="stSidebar"] > div:first-child {
+  width: 0 !important;
+}
+[data-testid="stSidebarNav"] {
+  display: none !important;
+}
+.block-container {
+  max-width: 100% !important;
+}
+</style>
+"""
+
 st.markdown(THEME_CSS, unsafe_allow_html=True)
 
 # ═══════════════════════════════════════════════════════════════
@@ -356,6 +377,19 @@ def empty_state(icon, msg, sub=""):
 
 def page_header(title: str):
     st.markdown(f'<h1 class="page-header">{title}</h1>', unsafe_allow_html=True)
+
+
+def render_layout_controls() -> None:
+    controls_col, action_col = st.columns([6, 1])
+    with controls_col:
+        if not st.session_state.get("sidebar_visible", True):
+            st.caption("Left menu hidden. Use Show Menu to reopen it.")
+    with action_col:
+        is_visible = st.session_state.get("sidebar_visible", True)
+        button_label = "Hide Menu" if is_visible else "Show Menu"
+        if st.button(button_label, key="toggle_sidebar_visibility", width="stretch"):
+            st.session_state["sidebar_visible"] = not is_visible
+            st.rerun()
 
 
 def section(title: str):
@@ -1326,7 +1360,10 @@ def page_dashboard():
                  "Description": c.description}
                 for n, c in C.INSTRUMENTS.items()]
         st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
-        info_box("👈 <b>Login from the sidebar</b> to start trading.")
+        if st.session_state.get("sidebar_visible", True):
+            info_box("👈 <b>Login from the sidebar</b> to start trading.")
+        else:
+            info_box("Use <b>Show Menu</b> to open the left sidebar and log in.")
         return
 
     client = get_client()
@@ -4929,10 +4966,14 @@ def main():
         SessionState.initialize()
         st.markdown(BREEZE_PRO_CSS, unsafe_allow_html=True)
         st.markdown(RESPONSIVE_CSS, unsafe_allow_html=True)
+        if not st.session_state.get("sidebar_visible", True):
+            st.markdown(SIDEBAR_HIDDEN_CSS, unsafe_allow_html=True)
         components.html(KEYBOARD_SHORTCUTS_JS, height=0)
+        render_layout_controls()
 
         if not SessionState.is_authenticated():
-            render_sidebar()
+            if st.session_state.get("sidebar_visible", True):
+                render_sidebar()
             render_alert_banners()
             st.markdown("---")
             page_dashboard()
@@ -4959,7 +5000,8 @@ def main():
             gtt_mgr.start_sync()
             st.session_state["gtt_manager"] = gtt_mgr
 
-        render_sidebar()
+        if st.session_state.get("sidebar_visible", True):
+            render_sidebar()
         render_alert_banners()
         st.markdown("---")
 

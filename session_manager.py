@@ -155,6 +155,7 @@ class SessionState:
         "activity_log": [],
         "_order_in_progress": False,
         "master_password": os.getenv("BREEZE_MASTER_PASSWORD", ""),
+        "sidebar_visible": True,
     }
 
     @staticmethod

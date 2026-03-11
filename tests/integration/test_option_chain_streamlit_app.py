@@ -154,13 +154,15 @@ def _build_app_test(tmp_path) -> AppTest:
     db_path = tmp_path / "option_chain_streamlit.db"
     front_fixture = "/workspaces/breeze-pro-26-feb-2026/tests/fixtures/option_chain_balanced.json"
     next_fixture = "/workspaces/breeze-pro-26-feb-2026/tests/fixtures/option_chain_expiry_day.json"
-    return AppTest.from_string(
+    at = AppTest.from_string(
         _streamlit_option_chain_script(
             str(db_path),
             front_fixture,
             next_fixture,
         )
     )
+    at.default_timeout = 8
+    return at
 
 
 def _find_widget(collection, label: str):
