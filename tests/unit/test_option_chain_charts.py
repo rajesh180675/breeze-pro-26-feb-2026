@@ -7,6 +7,7 @@ import pytest
 plotly = pytest.importorskip("plotly")
 
 from option_chain_charts import (
+    build_charm_exposure_figure,
     build_delta_oi_profile_figure,
     build_expected_move_figure,
     build_gamma_exposure_figure,
@@ -18,8 +19,9 @@ from option_chain_charts import (
     build_oi_profile_figure,
     build_skew_shift_replay_figure,
     build_term_structure_figure,
+    build_vanna_exposure_figure,
 )
-from option_chain_service import build_gamma_profile, enrich_option_chain
+from option_chain_service import build_charm_profile, build_gamma_profile, build_vanna_profile, enrich_option_chain
 
 
 def _fixture(name: str) -> pd.DataFrame:
@@ -80,3 +82,11 @@ def test_multi_expiry_and_skew_replay_figures_render():
     assert len(oi_fig.data) == 2
     assert len(iv_fig.data) == 2
     assert len(skew_fig.data) == 1
+
+
+def test_vanna_and_charm_figures_render():
+    df = enrich_option_chain(_fixture("option_chain_balanced.json"), "NIFTY", "2099-03-26", 22020, include_greeks=False)
+    vanna_fig = build_vanna_exposure_figure(build_vanna_profile(df))
+    charm_fig = build_charm_exposure_figure(build_charm_profile(df))
+    assert len(vanna_fig.data) == 1
+    assert len(charm_fig.data) == 1

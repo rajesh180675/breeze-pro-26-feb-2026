@@ -193,164 +193,33 @@ NUMERIC_COLS = [
 
 
 def process_option_chain(raw_data: Dict) -> pd.DataFrame:
-    """
-    Parse raw Breeze API option chain response into a clean DataFrame.
+    from option_chain_utils import process_option_chain as _process_option_chain
 
-    Breeze returns: {"Status": 200, "Error": None, "Success": [{...}, ...]}
-    On error:      {"Status": 400, "Error": "some message", "Success": None}
-
-    This function logs detailed diagnostics so errors are never silently swallowed.
-    """
-    if not raw_data:
-        log.warning("process_option_chain: received empty/None response")
-        return pd.DataFrame()
-
-    # Log the Breeze status and error fields for diagnostics
-    breeze_status = raw_data.get("Status")
-    breeze_error = raw_data.get("Error")
-    if breeze_error:
-        log.error(f"process_option_chain: Breeze API error: status={breeze_status}, error={breeze_error}")
-        return pd.DataFrame()
-    if isinstance(breeze_status, int) and breeze_status >= 400:
-        log.error(f"process_option_chain: Breeze API non-200 status: {breeze_status}")
-        return pd.DataFrame()
-
-    if "Success" not in raw_data:
-        log.warning(f"process_option_chain: 'Success' key missing. Keys present: {list(raw_data.keys())}")
-        return pd.DataFrame()
-
-    records = raw_data.get("Success")
-    if not records:
-        log.warning(f"process_option_chain: Success is empty or None. Full response: {raw_data}")
-        return pd.DataFrame()
-
-    if not isinstance(records, list):
-        log.warning(f"process_option_chain: Success is not a list, got {type(records)}: {records}")
-        return pd.DataFrame()
-
-    log.info(f"process_option_chain: received {len(records)} records")
-    if records:
-        log.debug(f"process_option_chain: sample record keys: {list(records[0].keys()) if isinstance(records[0], dict) else records[0]}")
-
-    df = pd.DataFrame(records)
-    if df.empty:
-        log.warning("process_option_chain: DataFrame is empty after construction")
-        return df
-
-    for col in NUMERIC_COLS:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
-
-    if "right" in df.columns:
-        df["right"] = df["right"].str.strip().str.capitalize()
-
-    log.info(f"process_option_chain: returning DataFrame shape {df.shape}, columns: {list(df.columns)}")
-    return df
+    return _process_option_chain(raw_data)
 
 
 def create_pivot_table(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty or "strike_price" not in df.columns or "right" not in df.columns:
-        return pd.DataFrame()
-    pivot_fields = {
-        "open_interest": "OI", "oi_change": "ΔOI",
-        "volume": "Vol", "ltp": "LTP",
-        "best_bid_price": "Bid", "best_offer_price": "Ask",
-        "iv": "IV%"
-    }
-    available = {k: v for k, v in pivot_fields.items() if k in df.columns}
-    if not available:
-        return df
-    calls = df[df["right"] == "Call"].set_index("strike_price")
-    puts = df[df["right"] == "Put"].set_index("strike_price")
-    all_strikes = sorted(df["strike_price"].dropna().unique())
-    result = pd.DataFrame({"Strike": all_strikes}).set_index("Strike")
-    for field, label in available.items():
-        if field in calls.columns:
-            result[f"C_{label}"] = calls[field]
-        if field in puts.columns:
-            result[f"P_{label}"] = puts[field]
-    result = result.fillna(0).reset_index()
-    call_cols = [c for c in result.columns if c.startswith("C_")]
-    put_cols = [c for c in result.columns if c.startswith("P_")]
-    return result[call_cols + ["Strike"] + put_cols]
+    from option_chain_utils import create_pivot_table as _create_pivot_table
+
+    return _create_pivot_table(df)
 
 
 def calculate_pcr(df: pd.DataFrame) -> float:
-    if df.empty or "right" not in df.columns or "open_interest" not in df.columns:
-        return 0.0
-    call_oi = df[df["right"] == "Call"]["open_interest"].sum()
-    put_oi = df[df["right"] == "Put"]["open_interest"].sum()
-    return put_oi / call_oi if call_oi > 0 else 0.0
+    from option_chain_metrics import calculate_pcr as _calculate_pcr
+
+    return _calculate_pcr(df)
 
 
 def calculate_max_pain(df: pd.DataFrame) -> int:
-    if df.empty or "strike_price" not in df.columns or "open_interest" not in df.columns:
-        return 0
-    strikes = df["strike_price"].dropna().unique()
-    if len(strikes) == 0:
-        return 0
-    pain = {}
-    for s in strikes:
-        cp = ((s - df[(df["right"] == "Call") & (df["strike_price"] < s)]["strike_price"]) *
-              df[(df["right"] == "Call") & (df["strike_price"] < s)]["open_interest"]).sum()
-        pp = ((df[(df["right"] == "Put") & (df["strike_price"] > s)]["strike_price"] - s) *
-              df[(df["right"] == "Put") & (df["strike_price"] > s)]["open_interest"]).sum()
-        pain[s] = cp + pp
-    return int(min(pain, key=pain.get)) if pain else 0
+    from option_chain_metrics import calculate_max_pain as _calculate_max_pain
+
+    return _calculate_max_pain(df)
 
 
 def estimate_atm_strike(df: pd.DataFrame, spot: float = 0.0) -> float:
-    """
-    Estimate the At-The-Money strike using a multi-priority approach.
+    from option_chain_utils import estimate_atm_strike as _estimate_atm_strike
 
-    Priority 1 — Live spot price (most accurate, use when available).
-                  Snaps to the nearest valid strike in the chain.
-    Priority 2 — Call-put parity: strike where |call_ltp - put_ltp| is minimum.
-                  Only considers strikes where BOTH call AND put have LTP > 0.
-                  (Filtering zeros is critical — two zero-LTP strikes give diff=0,
-                  which would otherwise win and snap ATM to a random OTM strike.)
-    Priority 3 — OI-weighted centre: among the top-20% highest combined OI strikes,
-                  take the median.  Works well for fresh chains before trading starts.
-    Priority 4 — Median strike by index (last resort).
-    """
-    if df.empty or "strike_price" not in df.columns:
-        return 0.0
-
-    strikes = sorted(df["strike_price"].dropna().unique())
-    if not strikes:
-        return 0.0
-
-    # Priority 1: snap to nearest chain strike using live spot
-    if spot > 0:
-        return float(min(strikes, key=lambda s: abs(s - spot)))
-
-    # Priority 2: call-put parity — exclude zero-LTP rows to avoid false minimum
-    if "right" in df.columns and "ltp" in df.columns:
-        calls = (df[(df["right"] == "Call") & (df["ltp"] > 0)]
-                 [["strike_price", "ltp"]].set_index("strike_price"))
-        puts  = (df[(df["right"] == "Put")  & (df["ltp"] > 0)]
-                 [["strike_price", "ltp"]].set_index("strike_price"))
-        combined = calls.join(puts, lsuffix="_call", rsuffix="_put").dropna()
-        if not combined.empty:
-            combined["diff"] = abs(combined["ltp_call"] - combined["ltp_put"])
-            return float(combined["diff"].idxmin())
-
-    # Priority 3: OI-weighted centre (handles pre-market / illiquid chains)
-    if "open_interest" in df.columns and "right" in df.columns:
-        try:
-            c_oi = df[df["right"] == "Call"].groupby("strike_price")["open_interest"].sum()
-            p_oi = df[df["right"] == "Put"].groupby("strike_price")["open_interest"].sum()
-            tot  = c_oi.add(p_oi, fill_value=0).dropna()
-            tot  = tot[tot > 0]
-            if not tot.empty:
-                threshold = tot.quantile(0.80)
-                top_strikes = sorted(tot[tot >= threshold].index.tolist())
-                return float(top_strikes[len(top_strikes) // 2])
-        except Exception:
-            pass
-
-    # Priority 4: median strike by index
-    return float(strikes[len(strikes) // 2])
+    return _estimate_atm_strike(df, spot=spot)
 
 
 def add_greeks_to_chain(df: pd.DataFrame, spot_price: float, expiry_date: str) -> pd.DataFrame:

@@ -32,9 +32,7 @@ import app_config as C
 from helpers import (
     APIResponse, safe_background_gradient, safe_int, safe_float, safe_str, parse_funds,
     detect_position_type, get_closing_action, calculate_pnl, enrich_positions,
-    process_option_chain, create_pivot_table,
-    calculate_pcr, calculate_max_pain, estimate_atm_strike,
-    add_greeks_to_chain, get_market_status, format_currency,
+    get_market_status, format_currency,
     format_expiry, format_expiry_short, calculate_days_to_expiry,
     format_number, pnl_badge
 )
@@ -67,6 +65,7 @@ import live_feed as lf
 import holiday_calendar as _hc   # dynamic NSE holiday calendar
 from option_chain_alerts import build_commentary as build_option_chain_commentary, evaluate_alerts
 from option_chain_charts import (
+    build_charm_exposure_figure,
     build_delta_oi_profile_figure,
     build_expected_move_figure,
     build_gamma_exposure_figure,
@@ -78,16 +77,20 @@ from option_chain_charts import (
     build_oi_profile_figure,
     build_skew_shift_replay_figure,
     build_term_structure_figure,
+    build_vanna_exposure_figure,
 )
-from option_chain_metrics import detect_event_premium
+from option_chain_metrics import calculate_max_pain, calculate_pcr, detect_event_premium
 from option_chain_service import (
+    build_charm_profile,
     build_session_iv_extremes,
     build_top_movers,
     build_expiry_strip,
     build_gamma_profile,
     build_option_chain_ladder,
+    build_vanna_profile,
     build_window_change_dataset,
     enrich_option_chain,
+    estimate_atm_strike,
     fetch_option_chain_snapshot,
     filter_option_chain,
     load_replay_frame,
@@ -95,6 +98,7 @@ from option_chain_service import (
     summarize_chain,
 )
 from option_chain_state import ensure_option_chain_state, update_option_chain_state
+from option_chain_utils import process_option_chain
 
 # ─── Logging ──────────────────────────────────────────────────
 # Ensure logs directory exists before FileHandler is created.
@@ -510,6 +514,7 @@ def cleanup_option_chain_ws_subscriptions() -> None:
         if mgr:
             for tok in tokens:
                 mgr.unsubscribe_quote(tok)
+        lf.unregister_option_chain_tracking(tokens)
         tick_store.clear_tokens(tokens)
         st.session_state.pop(key, None)
 
@@ -1591,7 +1596,7 @@ def page_option_chain():
         )
         chart_tab = st.selectbox(
             "Chart Tab",
-            ["OI Profile", "Delta OI", "IV Smile", "Compare OI", "Compare IV Smile", "Term Structure", "Expected Move", "OI Heatmap", "Skew Replay", "Gamma", "Liquidity"],
+            ["OI Profile", "Delta OI", "IV Smile", "Compare OI", "Compare IV Smile", "Term Structure", "Expected Move", "OI Heatmap", "Skew Replay", "Gamma", "Vanna", "Charm", "Liquidity"],
             key="oc_chart_tab",
         )
 
@@ -1750,6 +1755,10 @@ def page_option_chain():
             for tok in to_remove:
                 mgr.unsubscribe_quote(tok)
             tick_store.clear_tokens(to_remove)
+        if to_remove:
+            lf.unregister_option_chain_tracking(to_remove)
+        if cur_tokens:
+            lf.register_option_chain_tracking(inst, token_map)
         st.session_state[ws_key] = sorted(cur_tokens)
 
     if quote_mode == "🔴 Live WS" and not ddf.empty and token_map:
@@ -1821,6 +1830,8 @@ def page_option_chain():
     )
     commentary = build_option_chain_commentary(ddf, alerts, spot=_spot, expiry=expiry)
     gamma_profile = build_gamma_profile(ddf)
+    vanna_profile = build_vanna_profile(ddf)
+    charm_profile = build_charm_profile(ddf)
     change_df = build_window_change_dataset(_db, inst, expiry, as_of_ts=as_of_ts, change_window=change_window) if as_of_ts else pd.DataFrame()
     top_movers = build_top_movers(change_df)
     session_iv_extremes = build_session_iv_extremes(_db, inst, expiry, trade_date=(as_of_ts[:10] if as_of_ts else date.today().isoformat()))
@@ -1897,6 +1908,10 @@ def page_option_chain():
         fig = build_skew_shift_replay_figure(replay_chart_df)
     elif chart_tab == "Gamma":
         fig = build_gamma_exposure_figure(gamma_profile, walls=summary["gamma_walls"])
+    elif chart_tab == "Vanna":
+        fig = build_vanna_exposure_figure(vanna_profile)
+    elif chart_tab == "Charm":
+        fig = build_charm_exposure_figure(charm_profile)
     elif chart_tab == "Liquidity":
         fig = build_liquidity_scatter_figure(ddf)
     if fig is not None:

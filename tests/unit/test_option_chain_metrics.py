@@ -1,15 +1,18 @@
 import json
+from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
 
 from option_chain_metrics import (
     calculate_expected_move,
+    calculate_charm,
     calculate_iv_percentile,
     calculate_iv_zscore,
     calculate_liquidity_score,
     calculate_max_pain,
     calculate_pcr,
+    calculate_vanna,
     classify_oi_buildup,
     detect_event_premium,
     detect_gamma_walls,
@@ -53,3 +56,11 @@ def test_event_premium_detector_flags_distortion():
     out = detect_event_premium(0.28, 0.22, threshold=0.03)
     assert out["is_elevated"] is True
     assert out["distortion"] == 0.06
+
+
+def test_vanna_and_charm_are_non_zero_for_active_contracts():
+    expiry = (date.today() + timedelta(days=14)).isoformat()
+    vanna = calculate_vanna(spot=22020, strike=22000, expiry=expiry, option_type="CE", iv=0.2)
+    charm = calculate_charm(spot=22020, strike=22000, expiry=expiry, option_type="CE", iv=0.2)
+    assert abs(vanna) > 0
+    assert abs(charm) > 0

@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import math
+from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional
 
 import numpy as np
 import pandas as pd
 
+import app_config as C
+from analytics import calculate_greeks
 
 def _as_numeric_series(series: pd.Series) -> pd.Series:
     return pd.to_numeric(series, errors="coerce")
@@ -16,6 +19,14 @@ def _as_numeric_series(series: pd.Series) -> pd.Series:
 def normalize_iv(value: Any) -> float:
     iv = float(value or 0)
     return iv / 100.0 if iv > 1 else iv
+
+
+def _time_to_expiry_years(expiry: str) -> float:
+    try:
+        expiry_dt = datetime.strptime(str(expiry)[:10], "%Y-%m-%d")
+        return max((expiry_dt - datetime.now()).days / C.DAYS_PER_YEAR, 1 / C.DAYS_PER_YEAR)
+    except Exception:
+        return 7 / C.DAYS_PER_YEAR
 
 
 def calculate_pcr(df: pd.DataFrame) -> float:
@@ -156,6 +167,40 @@ def detect_gamma_walls(df: pd.DataFrame, top_n: int = 2) -> List[Dict[str, float
         {"strike": float(strike), "net_gamma": round(float(net_gamma), 4)}
         for strike, net_gamma in grouped.items()
     ]
+
+
+def calculate_vanna(
+    spot: float,
+    strike: float,
+    expiry: str,
+    option_type: str,
+    iv: float,
+    vol_bump: float = 0.01,
+) -> float:
+    vol = normalize_iv(iv)
+    tte = _time_to_expiry_years(expiry)
+    if spot <= 0 or strike <= 0 or vol <= 0 or vol_bump <= 0:
+        return 0.0
+    up = calculate_greeks(spot, strike, tte, min(vol + vol_bump, 5.0), option_type)["delta"]
+    down = calculate_greeks(spot, strike, tte, max(vol - vol_bump, 0.001), option_type)["delta"]
+    return round((float(up) - float(down)) / (2.0 * vol_bump), 6)
+
+
+def calculate_charm(
+    spot: float,
+    strike: float,
+    expiry: str,
+    option_type: str,
+    iv: float,
+    day_bump: int = 1,
+) -> float:
+    vol = normalize_iv(iv)
+    tte = _time_to_expiry_years(expiry)
+    if spot <= 0 or strike <= 0 or vol <= 0 or tte <= 0:
+        return 0.0
+    current_delta = calculate_greeks(spot, strike, tte, vol, option_type)["delta"]
+    next_delta = calculate_greeks(spot, strike, max(tte - (day_bump / C.DAYS_PER_YEAR), 1e-6), vol, option_type)["delta"]
+    return round(float(next_delta) - float(current_delta), 6)
 
 
 def build_expiry_summary(df: pd.DataFrame, spot: float, days_to_expiry: int) -> Dict[str, float]:

@@ -6,10 +6,13 @@ from types import ModuleType, SimpleNamespace
 import pandas as pd
 
 from option_chain_service import (
+    build_charm_profile,
     build_expiry_strip,
+    build_gamma_profile,
     build_option_chain_ladder,
     build_session_iv_extremes,
     build_top_movers,
+    build_vanna_profile,
     build_window_change_dataset,
     enrich_option_chain,
     filter_option_chain,
@@ -120,3 +123,15 @@ def test_window_change_dataset_top_movers_and_session_iv_extremes():
     assert int(movers["oi_addition"].iloc[0]["strike"]) == 22000
     iv_extremes = build_session_iv_extremes(fake_db, "NIFTY", "2026-03-26", "2026-03-11")
     assert iv_extremes.loc[iv_extremes["strike"] == 22000, "session_iv_high"].iloc[0] == 0.21
+
+
+def test_gamma_vanna_and_charm_profiles_build():
+    df = enrich_option_chain(_fixture("option_chain_balanced.json"), "NIFTY", "2099-03-26", 22020, include_greeks=False)
+    gamma_profile = build_gamma_profile(df)
+    vanna_profile = build_vanna_profile(df)
+    charm_profile = build_charm_profile(df)
+    assert not gamma_profile.empty
+    assert not vanna_profile.empty
+    assert not charm_profile.empty
+    assert {"strike_price", "net_vanna"} <= set(vanna_profile.columns)
+    assert {"strike_price", "net_charm"} <= set(charm_profile.columns)

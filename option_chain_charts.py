@@ -194,6 +194,24 @@ def build_gamma_exposure_figure(df: pd.DataFrame, walls: Optional[List[Dict[str,
     return fig
 
 
+def build_vanna_exposure_figure(df: pd.DataFrame) -> go.Figure:
+    if df.empty or not {"strike_price", "net_vanna"}.issubset(df.columns):
+        return _empty_figure("Vanna Exposure", "No vanna data")
+    ordered = df.sort_values("strike_price")
+    fig = go.Figure(go.Bar(x=ordered["strike_price"], y=ordered["net_vanna"], name="Net Vanna", marker_color="#8c564b"))
+    fig.update_layout(title="Vanna Exposure Profile", hovermode="x unified")
+    return fig
+
+
+def build_charm_exposure_figure(df: pd.DataFrame) -> go.Figure:
+    if df.empty or not {"strike_price", "net_charm"}.issubset(df.columns):
+        return _empty_figure("Charm Exposure", "No charm data")
+    ordered = df.sort_values("strike_price")
+    fig = go.Figure(go.Bar(x=ordered["strike_price"], y=ordered["net_charm"], name="Net Charm", marker_color="#17becf"))
+    fig.update_layout(title="Charm Exposure Profile", hovermode="x unified")
+    return fig
+
+
 def build_liquidity_scatter_figure(df: pd.DataFrame) -> go.Figure:
     if df.empty or not {"spread_pct", "volume", "open_interest", "strike_price"}.issubset(df.columns):
         return _empty_figure("Liquidity Scatter", "No liquidity data")

@@ -9,19 +9,22 @@ import numpy as np
 import pandas as pd
 
 import app_config as C
-from helpers import add_greeks_to_chain, estimate_atm_strike, process_option_chain, safe_float
+from helpers import add_greeks_to_chain, safe_float
 from option_chain_metrics import (
     build_expiry_summary,
     calculate_expected_move,
+    calculate_charm,
     calculate_iv_percentile,
     calculate_iv_zscore,
     calculate_liquidity_score,
     calculate_max_pain,
     calculate_pcr,
+    calculate_vanna,
     classify_oi_buildup,
     detect_gamma_walls,
     normalize_iv,
 )
+from option_chain_utils import estimate_atm_strike, process_option_chain
 
 
 def _make_option_key(exchange: str, stock_code: str, expiry: str, strike: float, right_key: str) -> str:
@@ -131,6 +134,8 @@ def enrich_option_chain(
     iv_zscores: List[float] = []
     avg_volumes: List[float] = []
     liquidity_scores: List[float] = []
+    vannas: List[float] = []
+    charms: List[float] = []
     for _, row in out.iterrows():
         strike = int(safe_float(row.get("strike_price", 0), 0))
         right = str(row.get("right", "")).lower()
@@ -141,11 +146,17 @@ def enrich_option_chain(
         avg_volume = float((volume_baseline_map or {}).get((strike, option_type), 0.0))
         avg_volumes.append(avg_volume)
         liquidity_scores.append(calculate_liquidity_score(row.to_dict(), row.get("quote_age_seconds")))
+        vannas.append(calculate_vanna(spot=spot, strike=strike, expiry=expiry, option_type=option_type, iv=float(row.get("iv_numeric", 0))))
+        charms.append(calculate_charm(spot=spot, strike=strike, expiry=expiry, option_type=option_type, iv=float(row.get("iv_numeric", 0))))
     out["iv_percentile"] = iv_percentiles
     out["iv_zscore"] = iv_zscores
     out["avg_volume"] = avg_volumes
     out["volume_spike"] = np.where(pd.to_numeric(out.get("volume", 0), errors="coerce").fillna(0) > (pd.Series(avg_volumes).replace(0, np.nan) * 3), True, False)
     out["liquidity_score"] = liquidity_scores
+    out["vanna"] = vannas
+    out["charm"] = charms
+    out["net_vanna"] = pd.to_numeric(out.get("vanna", 0), errors="coerce").fillna(0.0) * pd.to_numeric(out.get("open_interest", 0), errors="coerce").fillna(0.0)
+    out["net_charm"] = pd.to_numeric(out.get("charm", 0), errors="coerce").fillna(0.0) * pd.to_numeric(out.get("open_interest", 0), errors="coerce").fillna(0.0)
     return out
 
 
@@ -236,6 +247,28 @@ def build_gamma_profile(df: pd.DataFrame) -> pd.DataFrame:
         working["gamma"] * working["open_interest"],
     )
     return working.groupby("strike_price", dropna=True)["net_gamma"].sum().reset_index().sort_values("strike_price")
+
+
+def build_vanna_profile(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty or not {"strike_price", "net_vanna"}.issubset(df.columns):
+        return pd.DataFrame(columns=["strike_price", "net_vanna"])
+    return (
+        df.groupby("strike_price", dropna=True)["net_vanna"]
+        .sum()
+        .reset_index()
+        .sort_values("strike_price")
+    )
+
+
+def build_charm_profile(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty or not {"strike_price", "net_charm"}.issubset(df.columns):
+        return pd.DataFrame(columns=["strike_price", "net_charm"])
+    return (
+        df.groupby("strike_price", dropna=True)["net_charm"]
+        .sum()
+        .reset_index()
+        .sort_values("strike_price")
+    )
 
 
 def load_replay_frame(db: Any, instrument: str, expiry: str, replay_ts: str) -> pd.DataFrame:

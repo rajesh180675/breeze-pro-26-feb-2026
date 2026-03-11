@@ -16,12 +16,15 @@ from datetime import date
 
 import pandas as pd
 
+import live_feed
 from historical import HistoricalDataFetcher
 from live_feed import (
     DEPTH_L1,
     FeedState,
     HEALTH_STALE_SECONDS,
     LiveFeedManager,
+    OptionChainBinding,
+    OptionChainMinuteAggregator,
     OrderNotificationBus,
     StockTokenResolver,
     TickStore,
@@ -253,3 +256,137 @@ def test_wait_for_disconnect_reconnects_on_stale_feed(monkeypatch):
 
     assert mgr._state == FeedState.RECONNECTING
     assert breeze.connected is False
+
+
+def test_option_chain_minute_aggregator_persists_finalized_minute(monkeypatch):
+    persisted = []
+
+    class FakeDB:
+        def record_option_chain_intraday_snapshot(self, **kwargs):
+            persisted.append(kwargs)
+
+    monkeypatch.setattr("persistence.TradeDB", lambda: FakeDB())
+    bar_store = BarStore()
+    aggregator = OptionChainMinuteAggregator(bar_store)
+    aggregator.register_tokens(
+        {
+            "tok1": OptionChainBinding(
+                instrument="NIFTY",
+                expiry="2026-03-26",
+                strike=22000,
+                option_type="CE",
+            )
+        }
+    )
+
+    aggregator.process_tick(
+        live_feed.TickData(
+            stock_token="tok1",
+            symbol="NIFTY",
+            exchange="NFO",
+            product_type="options",
+            expiry="2026-03-26",
+            strike=22000,
+            right="Call",
+            ltp=100,
+            ltt="",
+            ltq=1,
+            volume=1000,
+            open_interest=20000,
+            oi_change=100,
+            best_bid=99,
+            best_bid_qty=10,
+            best_ask=101,
+            best_ask_qty=12,
+            open=0,
+            high=0,
+            low=0,
+            prev_close=0,
+            change=0,
+            change_pct=0,
+            upper_circuit=0,
+            lower_circuit=0,
+            week_52_high=0,
+            week_52_low=0,
+            total_buy_qty=0,
+            total_sell_qty=0,
+            market_depth=[],
+            received_at=1710148505.0,
+        )
+    )
+    aggregator.process_tick(
+        live_feed.TickData(
+            stock_token="tok1",
+            symbol="NIFTY",
+            exchange="NFO",
+            product_type="options",
+            expiry="2026-03-26",
+            strike=22000,
+            right="Call",
+            ltp=102,
+            ltt="",
+            ltq=1,
+            volume=1200,
+            open_interest=20200,
+            oi_change=120,
+            best_bid=101,
+            best_bid_qty=11,
+            best_ask=103,
+            best_ask_qty=13,
+            open=0,
+            high=0,
+            low=0,
+            prev_close=0,
+            change=0,
+            change_pct=0,
+            upper_circuit=0,
+            lower_circuit=0,
+            week_52_high=0,
+            week_52_low=0,
+            total_buy_qty=0,
+            total_sell_qty=0,
+            market_depth=[],
+            received_at=1710148535.0,
+        )
+    )
+    aggregator.process_tick(
+        live_feed.TickData(
+            stock_token="tok1",
+            symbol="NIFTY",
+            exchange="NFO",
+            product_type="options",
+            expiry="2026-03-26",
+            strike=22000,
+            right="Call",
+            ltp=103,
+            ltt="",
+            ltq=1,
+            volume=1300,
+            open_interest=20300,
+            oi_change=130,
+            best_bid=102,
+            best_bid_qty=12,
+            best_ask=104,
+            best_ask_qty=14,
+            open=0,
+            high=0,
+            low=0,
+            prev_close=0,
+            change=0,
+            change_pct=0,
+            upper_circuit=0,
+            lower_circuit=0,
+            week_52_high=0,
+            week_52_low=0,
+            total_buy_qty=0,
+            total_sell_qty=0,
+            market_depth=[],
+            received_at=1710148562.0,
+        )
+    )
+    aggregator.flush_completed(force=True)
+
+    assert len(persisted) == 2
+    assert persisted[0]["source"] == "live_1m"
+    assert persisted[0]["rows"][0]["ltp"] == 102
+    assert persisted[0]["rows"][0]["bar_high"] == 102

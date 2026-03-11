@@ -11,7 +11,7 @@ import uuid
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -120,6 +120,47 @@ class OHLCVBar:
     volume: int
     open_interest: int
     received_at: float
+
+
+@dataclass
+class OptionChainBinding:
+    instrument: str
+    expiry: str
+    strike: int
+    option_type: str
+
+
+@dataclass
+class OptionChainMinuteBucket:
+    binding: OptionChainBinding
+    minute_ts: str
+    open: float
+    high: float
+    low: float
+    close: float
+    bid: float
+    ask: float
+    bid_qty: int
+    ask_qty: int
+    volume: int
+    open_interest: int
+    oi_change: int
+    received_at: float
+
+    def update(self, tick: "TickData") -> None:
+        price = float(tick.ltp or 0)
+        if price > 0:
+            self.high = max(self.high, price)
+            self.low = min(self.low, price) if self.low > 0 else price
+            self.close = price
+        self.bid = float(tick.best_bid or self.bid)
+        self.ask = float(tick.best_ask or self.ask)
+        self.bid_qty = int(tick.best_bid_qty or self.bid_qty)
+        self.ask_qty = int(tick.best_ask_qty or self.ask_qty)
+        self.volume = int(tick.volume or self.volume)
+        self.open_interest = int(tick.open_interest or self.open_interest)
+        self.oi_change = int(tick.oi_change or self.oi_change)
+        self.received_at = tick.received_at
 
 
 class OrderEventType:
@@ -446,6 +487,148 @@ class BarStore:
                 buf.append(bar)
 
 
+class OptionChainMinuteAggregator:
+    """Build finalized 1-minute option bars from quote ticks and persist them."""
+
+    def __init__(self, bar_store: BarStore):
+        self._bar_store = bar_store
+        self._bindings: Dict[str, OptionChainBinding] = {}
+        self._buckets: Dict[str, OptionChainMinuteBucket] = {}
+        self._lock = threading.RLock()
+
+    def register_tokens(self, bindings: Dict[str, OptionChainBinding]) -> None:
+        if not bindings:
+            return
+        with self._lock:
+            self._bindings.update(bindings)
+
+    def unregister_tokens(self, tokens: List[str]) -> None:
+        if not tokens:
+            return
+        to_persist: List[OptionChainMinuteBucket] = []
+        with self._lock:
+            for token in tokens:
+                self._bindings.pop(token, None)
+                bucket = self._buckets.pop(token, None)
+                if bucket is not None:
+                    to_persist.append(bucket)
+        self._persist_buckets(to_persist)
+
+    def process_tick(self, tick: TickData) -> None:
+        binding = self._bindings.get(tick.stock_token)
+        if binding is None:
+            return
+        minute_dt = self._floor_to_minute(tick.received_at)
+        minute_ts = minute_dt.isoformat()
+        to_persist: List[OptionChainMinuteBucket] = []
+        with self._lock:
+            bucket = self._buckets.get(tick.stock_token)
+            if bucket and bucket.minute_ts != minute_ts:
+                to_persist.append(bucket)
+                bucket = None
+            if bucket is None:
+                price = float(tick.ltp or 0)
+                bucket = OptionChainMinuteBucket(
+                    binding=binding,
+                    minute_ts=minute_ts,
+                    open=price,
+                    high=price,
+                    low=price,
+                    close=price,
+                    bid=float(tick.best_bid or 0),
+                    ask=float(tick.best_ask or 0),
+                    bid_qty=int(tick.best_bid_qty or 0),
+                    ask_qty=int(tick.best_ask_qty or 0),
+                    volume=int(tick.volume or 0),
+                    open_interest=int(tick.open_interest or 0),
+                    oi_change=int(tick.oi_change or 0),
+                    received_at=tick.received_at,
+                )
+                self._buckets[tick.stock_token] = bucket
+            else:
+                bucket.update(tick)
+        self._persist_buckets(to_persist)
+
+    def flush_completed(self, now_ts: Optional[float] = None, force: bool = False) -> None:
+        now_ts = time.time() if now_ts is None else now_ts
+        cutoff_dt = self._floor_to_minute(now_ts if force else max(0.0, now_ts - 60.0))
+        to_persist: List[OptionChainMinuteBucket] = []
+        with self._lock:
+            for token, bucket in list(self._buckets.items()):
+                bucket_dt = datetime.fromisoformat(bucket.minute_ts)
+                if force or bucket_dt <= cutoff_dt:
+                    to_persist.append(bucket)
+                    self._buckets.pop(token, None)
+        self._persist_buckets(to_persist)
+
+    @staticmethod
+    def _floor_to_minute(timestamp: float) -> datetime:
+        return datetime.fromtimestamp(timestamp, tz=timezone.utc).replace(second=0, microsecond=0)
+
+    def _persist_buckets(self, buckets: List[OptionChainMinuteBucket]) -> None:
+        if not buckets:
+            return
+        try:
+            from persistence import TradeDB
+
+            db = TradeDB()
+        except Exception as exc:  # pragma: no cover
+            log.debug("Option-chain minute aggregator could not initialize DB: %s", exc)
+            return
+        grouped: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = {}
+        for bucket in buckets:
+            key = (bucket.binding.instrument, bucket.binding.expiry, bucket.minute_ts)
+            grouped.setdefault(key, []).append(
+                {
+                    "strike_price": bucket.binding.strike,
+                    "option_type": bucket.binding.option_type,
+                    "ltp": bucket.close,
+                    "bar_open": bucket.open,
+                    "bar_high": bucket.high,
+                    "bar_low": bucket.low,
+                    "bid": bucket.bid,
+                    "ask": bucket.ask,
+                    "bid_qty": bucket.bid_qty,
+                    "ask_qty": bucket.ask_qty,
+                    "volume": bucket.volume,
+                    "open_interest": bucket.open_interest,
+                    "oi_change": bucket.oi_change,
+                }
+            )
+            self._bar_store.put(
+                OHLCVBar(
+                    stock_token=f"{bucket.binding.instrument}|{bucket.binding.expiry}|{bucket.binding.strike}|{bucket.binding.option_type}",
+                    interval="1minute",
+                    timestamp=bucket.minute_ts,
+                    open=bucket.open,
+                    high=bucket.high,
+                    low=bucket.low,
+                    close=bucket.close,
+                    volume=bucket.volume,
+                    open_interest=bucket.open_interest,
+                    received_at=bucket.received_at,
+                )
+            )
+        for (instrument, expiry, snapshot_ts), rows in grouped.items():
+            try:
+                db.record_option_chain_intraday_snapshot(
+                    instrument=instrument,
+                    expiry=expiry,
+                    rows=rows,
+                    snapshot_ts=snapshot_ts,
+                    trade_date=snapshot_ts[:10],
+                    source="live_1m",
+                )
+            except Exception as exc:  # pragma: no cover
+                log.debug(
+                    "Option-chain minute aggregator persist failed for %s/%s @ %s: %s",
+                    instrument,
+                    expiry,
+                    snapshot_ts,
+                    exc,
+                )
+
+
 class OrderNotificationBus:
     MAX_EVENT_HISTORY = 200
 
@@ -516,6 +699,7 @@ class LiveFeedManager:
         self._total_ticks = 0
         self._last_tick_time = 0.0
         self._errors: List[Dict] = []
+        self._option_chain_aggregator = OptionChainMinuteAggregator(bar_store)
 
     def connect(self) -> None:
         if self._state == FeedState.STOPPED:
@@ -528,6 +712,7 @@ class LiveFeedManager:
 
     def disconnect(self, clear_subscriptions: bool = True) -> None:
         self._stop_event.set()
+        self._option_chain_aggregator.flush_completed(force=True)
         try:
             self._breeze.ws_disconnect()
         except Exception:
@@ -617,6 +802,12 @@ class LiveFeedManager:
             "queue_size": self._tick_queue.qsize(),
         }
 
+    def register_option_chain_tracking(self, bindings: Dict[str, OptionChainBinding]) -> None:
+        self._option_chain_aggregator.register_tokens(bindings)
+
+    def unregister_option_chain_tracking(self, tokens: List[str]) -> None:
+        self._option_chain_aggregator.unregister_tokens(tokens)
+
     def _restore_subscriptions(self) -> None:
         """Re-subscribe all previously registered tokens after a reconnect."""
         with self._lock:
@@ -680,6 +871,7 @@ class LiveFeedManager:
                 self._total_ticks += 1
                 self._last_tick_time = time.time()
             except queue.Empty:
+                self._option_chain_aggregator.flush_completed()
                 continue
 
     def _route_tick(self, raw_tick: dict) -> None:
@@ -688,6 +880,7 @@ class LiveFeedManager:
             tick = self._parse_quote_tick(raw_tick)
             if tick:
                 self._tick_store.put(tick)
+                self._option_chain_aggregator.process_tick(tick)
         elif tick_type == SubscriptionType.OHLCV:
             bar = self._parse_ohlcv_bar(raw_tick)
             if bar:
@@ -858,3 +1051,34 @@ def initialize_live_feed(breeze: BreezeConnect, auto_load_security_master: bool 
         _live_feed_manager = LiveFeedManager(breeze=breeze, tick_store=_tick_store, bar_store=_bar_store,
                                              order_bus=_order_bus)
         return _live_feed_manager
+
+
+def register_option_chain_tracking(instrument: str, token_map: Dict[str, str]) -> None:
+    mgr = get_live_feed_manager()
+    if mgr is None or not token_map:
+        return
+    bindings: Dict[str, OptionChainBinding] = {}
+    for key, token in token_map.items():
+        if not token:
+            continue
+        parts = str(key).split("|")
+        if len(parts) != 6:
+            continue
+        _, _, _, expiry, strike, right = parts
+        try:
+            bindings[token] = OptionChainBinding(
+                instrument=instrument,
+                expiry=expiry,
+                strike=int(float(strike)),
+                option_type="CE" if right.lower() == "call" else "PE",
+            )
+        except (TypeError, ValueError):
+            continue
+    mgr.register_option_chain_tracking(bindings)
+
+
+def unregister_option_chain_tracking(tokens: List[str]) -> None:
+    mgr = get_live_feed_manager()
+    if mgr is None or not tokens:
+        return
+    mgr.unregister_option_chain_tracking(tokens)
