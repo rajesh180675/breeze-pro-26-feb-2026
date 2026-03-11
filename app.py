@@ -2997,7 +2997,7 @@ def page_analytics():
 
                 # Delta visualization
                 if any(r["Delta"] != "+0.00" for r in rows):
-                    delta_df = rows_df[["Position", "Strike", "Type", "Delta"]]
+                    delta_df = rows_df[["Position", "Strike", "Type", "Delta"]].copy()
                     delta_df["Delta_val"] = delta_df["Delta"].astype(float)
                     st.bar_chart(delta_df.set_index("Position")["Delta_val"])
 
@@ -3131,7 +3131,7 @@ def page_analytics():
 
             if not daily_df.empty and "date" in daily_df.columns and "realized_pnl" in daily_df.columns:
                 daily_df["date"] = pd.to_datetime(daily_df["date"], errors="coerce")
-                daily_plot = daily_df.dropna(subset=["date"]).sort_values("date").tail(30)
+                daily_plot = daily_df.dropna(subset=["date"]).sort_values("date").tail(30).copy()
                 if not daily_plot.empty:
                     st.bar_chart(daily_plot.set_index("date")["realized_pnl"], width="stretch")
 

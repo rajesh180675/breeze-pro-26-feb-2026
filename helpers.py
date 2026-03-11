@@ -49,7 +49,11 @@ def safe_str(value: Any, default: str = "") -> str:
 def safe_background_gradient(df: pd.DataFrame, **kwargs):
     """Apply a gradient style when optional matplotlib support is available."""
     try:
-        return df.style.background_gradient(**kwargs)
+        styled = df.style.background_gradient(**kwargs)
+        # Force pandas to resolve style dependencies now so missing optional
+        # packages fall back before Streamlit tries to render the Styler.
+        styled._compute()
+        return styled
     except (ImportError, ModuleNotFoundError) as exc:
         log.warning("background gradient unavailable: %s", exc)
         return df

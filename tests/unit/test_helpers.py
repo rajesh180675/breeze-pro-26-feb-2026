@@ -45,8 +45,9 @@ def test_add_greeks_to_chain_keeps_numeric_iv_when_computable(monkeypatch):
     assert isinstance(out.loc[0, "iv"], float)
 
 
-def test_safe_background_gradient_returns_styler():
+def test_safe_background_gradient_returns_styler(monkeypatch):
     df = pd.DataFrame({"value": [1, 2, 3]})
+    monkeypatch.setattr(Styler, "_compute", lambda self: self)
 
     styled = helpers.safe_background_gradient(df, cmap="RdYlGn")
 
@@ -60,6 +61,19 @@ def test_safe_background_gradient_falls_back_without_matplotlib(monkeypatch):
         raise ImportError("matplotlib is required for this operation")
 
     monkeypatch.setattr(Styler, "background_gradient", raise_import_error)
+
+    styled = helpers.safe_background_gradient(df, cmap="RdYlGn")
+
+    assert styled is df
+
+
+def test_safe_background_gradient_falls_back_when_compute_requires_matplotlib(monkeypatch):
+    df = pd.DataFrame({"value": [1, 2, 3]})
+
+    def raise_import_error(self, *args, **kwargs):
+        raise ImportError("background_gradient requires matplotlib.")
+
+    monkeypatch.setattr(Styler, "_compute", raise_import_error)
 
     styled = helpers.safe_background_gradient(df, cmap="RdYlGn")
 
