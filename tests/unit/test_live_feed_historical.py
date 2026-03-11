@@ -20,6 +20,7 @@ from historical import HistoricalDataFetcher
 from live_feed import (
     DEPTH_L1,
     FeedState,
+    HEALTH_STALE_SECONDS,
     LiveFeedManager,
     OrderNotificationBus,
     StockTokenResolver,
@@ -198,3 +199,57 @@ def test_initialize_live_feed_followed_by_get_token_resolver_uses_latest_breeze(
     assert first_resolver._breeze is first_breeze
     assert second_resolver._breeze is second_breeze
     assert second_resolver is not first_resolver
+
+
+def test_connect_with_backoff_restores_subscriptions_after_reconnect(monkeypatch):
+    breeze = DummyBreeze()
+    mgr = LiveFeedManager(
+        breeze=breeze,
+        tick_store=TickStore(),
+        bar_store=BarStore(),
+        order_bus=OrderNotificationBus(),
+    )
+    restore_calls = []
+    wait_calls = []
+
+    def fake_restore_subscriptions():
+        restore_calls.append("restored")
+
+    def fake_wait_for_disconnect():
+        wait_calls.append("wait")
+        if len(wait_calls) == 1:
+            mgr._state = FeedState.RECONNECTING
+        else:
+            mgr._stop_event.set()
+
+    mgr._last_tick_time = 123.0
+    monkeypatch.setattr(mgr, "_restore_subscriptions", fake_restore_subscriptions)
+    monkeypatch.setattr(mgr, "_wait_for_disconnect", fake_wait_for_disconnect)
+
+    mgr._connect_with_backoff()
+
+    assert mgr._connect_count == 2
+    assert restore_calls == ["restored"]
+    assert wait_calls == ["wait", "wait"]
+    assert mgr._last_tick_time == 0.0
+
+
+def test_wait_for_disconnect_reconnects_on_stale_feed(monkeypatch):
+    monkeypatch.setattr("live_feed.C.is_market_open", lambda: True)
+    monkeypatch.setattr("live_feed.time.time", lambda: HEALTH_STALE_SECONDS + 10)
+    monkeypatch.setattr("live_feed.time.sleep", lambda _: None)
+
+    breeze = DummyBreeze()
+    mgr = LiveFeedManager(
+        breeze=breeze,
+        tick_store=TickStore(),
+        bar_store=BarStore(),
+        order_bus=OrderNotificationBus(),
+    )
+    mgr._state = FeedState.CONNECTED
+    mgr._last_tick_time = 1.0
+
+    mgr._wait_for_disconnect()
+
+    assert mgr._state == FeedState.RECONNECTING
+    assert breeze.connected is False

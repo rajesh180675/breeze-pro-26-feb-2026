@@ -640,6 +640,9 @@ class LiveFeedManager:
             backoff = self.BACKOFF_SEQUENCE[min(attempt, len(self.BACKOFF_SEQUENCE) - 1)]
             try:
                 self._breeze.ws_connect()
+                if self._connect_count > 0:
+                    self._restore_subscriptions()
+                self._last_tick_time = 0.0
                 self._state = FeedState.CONNECTED
                 self._connect_count += 1
                 attempt = 0
@@ -655,6 +658,12 @@ class LiveFeedManager:
         while not self._stop_event.is_set() and self.is_connected():
             if self._last_tick_time and (time.time() - self._last_tick_time) > HEALTH_STALE_SECONDS and C.is_market_open():
                 log.warning("Feed stale")
+                self._state = FeedState.RECONNECTING
+                try:
+                    self._breeze.ws_disconnect()
+                except Exception:
+                    pass
+                return
             time.sleep(5)
 
     def _on_ticks_raw(self, raw_tick: dict) -> None:
