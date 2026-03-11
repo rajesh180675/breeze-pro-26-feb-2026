@@ -7,9 +7,11 @@ from historical import HistoricalCache, HistoricalDataFetcher
 class _FakeClient:
     def __init__(self):
         self.calls = 0
+        self.call_kwargs = []
 
     def get_historical_data_v2(self, **kwargs):
         self.calls += 1
+        self.call_kwargs.append(kwargs)
         rows = []
         start = pd.to_datetime(kwargs["from_date"])
         end = pd.to_datetime(kwargs["to_date"])
@@ -125,3 +127,57 @@ def test_single_chunk_fetch_does_not_sleep(monkeypatch):
 
     assert fetcher.last_api_calls == 1
     assert sleep_calls == []
+
+
+def test_fetch_normalizes_spot_exchange_for_nifty_cash_history():
+    client = _FakeClient()
+    fetcher = HistoricalDataFetcher(client, cache=HistoricalCache(ttl_seconds=0))
+
+    df = fetcher.fetch(
+        stock_code="NIFTY",
+        exchange_code="NFO",
+        product_type="cash",
+        from_date="2025-01-01",
+        to_date="2025-01-03",
+        interval="1day",
+    )
+
+    assert not df.empty
+    assert client.call_kwargs[-1]["exchange_code"] == "NSE"
+
+
+def test_fetch_normalizes_spot_exchange_for_bsesen_cash_history():
+    client = _FakeClient()
+    fetcher = HistoricalDataFetcher(client, cache=HistoricalCache(ttl_seconds=0))
+
+    df = fetcher.fetch(
+        stock_code="BSESEN",
+        exchange_code="BFO",
+        product_type="cash",
+        from_date="2025-01-01",
+        to_date="2025-01-03",
+        interval="1day",
+    )
+
+    assert not df.empty
+    assert client.call_kwargs[-1]["exchange_code"] == "BSE"
+
+
+def test_fetch_normalizes_options_exchange_for_nifty_option_history():
+    client = _FakeClient()
+    fetcher = HistoricalDataFetcher(client, cache=HistoricalCache(ttl_seconds=0))
+
+    df = fetcher.fetch(
+        stock_code="NIFTY",
+        exchange_code="NSE",
+        product_type="options",
+        from_date="2025-01-01",
+        to_date="2025-01-03",
+        interval="1day",
+        expiry_date="2025-01-30",
+        right="call",
+        strike_price="22000",
+    )
+
+    assert not df.empty
+    assert client.call_kwargs[-1]["exchange_code"] == "NFO"

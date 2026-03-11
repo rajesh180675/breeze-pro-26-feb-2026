@@ -105,9 +105,14 @@ class HistoricalDataFetcher:
         right: str = "",
         strike_price: str = "",
     ) -> pd.DataFrame:
+        effective_exchange_code = self._normalize_exchange_code(
+            stock_code=stock_code,
+            exchange_code=exchange_code,
+            product_type=product_type,
+        )
         params = {
             "stock_code": stock_code,
-            "exchange_code": exchange_code,
+            "exchange_code": effective_exchange_code,
             "product_type": product_type,
             "from_date": from_date,
             "to_date": to_date,
@@ -133,7 +138,7 @@ class HistoricalDataFetcher:
                 from_date=start,
                 to_date=end,
                 stock_code=stock_code,
-                exchange_code=exchange_code,
+                exchange_code=effective_exchange_code,
                 product_type=product_type,
                 expiry_date=expiry_date,
                 right=right,
@@ -226,6 +231,55 @@ class HistoricalDataFetcher:
         out["datetime"] = out["datetime"].dt.tz_convert(_IST)
 
         return out
+
+    @staticmethod
+    def _normalize_exchange_code(stock_code: str, exchange_code: str, product_type: str) -> str:
+        product = str(product_type or "").strip().lower()
+        exchange = str(exchange_code or "").strip().upper()
+
+        if product == "cash":
+            spot_exchange = HistoricalDataFetcher._lookup_exchange(stock_code, prefer_spot=True)
+            if spot_exchange and exchange in {"", "NFO", "BFO"}:
+                if exchange and exchange != spot_exchange:
+                    log.info(
+                        "Normalizing historical exchange for %s %s: %s -> %s",
+                        stock_code,
+                        product,
+                        exchange,
+                        spot_exchange,
+                    )
+                return spot_exchange
+            return exchange_code
+
+        if product in {"options", "futures"}:
+            derivative_exchange = HistoricalDataFetcher._lookup_exchange(stock_code, prefer_spot=False)
+            if derivative_exchange and exchange in {"", "NSE", "BSE"}:
+                if exchange and exchange != derivative_exchange:
+                    log.info(
+                        "Normalizing historical exchange for %s %s: %s -> %s",
+                        stock_code,
+                        product,
+                        exchange,
+                        derivative_exchange,
+                    )
+                return derivative_exchange
+
+        return exchange_code
+
+    @staticmethod
+    def _lookup_exchange(stock_code: str, prefer_spot: bool) -> str:
+        stock_code_norm = str(stock_code or "").strip().upper()
+        if not stock_code_norm:
+            return ""
+
+        for cfg in _C.INSTRUMENTS.values():
+            api_code = str(cfg.api_code or "").strip().upper()
+            spot_code = str(cfg.spot_code or "").strip().upper()
+            if stock_code_norm not in {api_code, spot_code}:
+                continue
+            return cfg.spot_exchange if prefer_spot else cfg.exchange
+
+        return ""
 
 
 def get_historical_cache() -> HistoricalCache:
