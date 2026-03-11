@@ -9,6 +9,7 @@ from option_chain_service import (
     build_charm_profile,
     build_expiry_strip,
     build_gamma_profile,
+    build_multi_expiry_dataset,
     build_option_chain_ladder,
     build_session_iv_extremes,
     build_top_movers,
@@ -31,10 +32,11 @@ def test_filter_and_ladder_build_are_stable():
     filtered = filter_option_chain(df, atm=22000, strikes_per_side=1, show_all=False)
     assert set(filtered["strike_price"]) == {21900, 22000, 22100}
     enriched = enrich_option_chain(filtered, "NIFTY", "2026-03-26", 22020, include_greeks=False)
-    ladder = build_option_chain_ladder(enriched, 22020, pinned_strikes=[22000])
+    ladder = build_option_chain_ladder(enriched, 22020, pinned_strikes=[22000], selected_strike=22000, sticky_atm=True)
     assert list(ladder.columns[:3]) == ["call_ltp", "call_oi", "call_oi_change"]
     assert 22000 in ladder["strike"].tolist()
     assert ladder.loc[ladder["strike"] == 22000, "is_pinned"].iloc[0] == 1
+    assert ladder.iloc[0]["strike"] == 22000
 
 
 def test_merge_live_overlay_updates_quote_fields(monkeypatch):
@@ -87,6 +89,10 @@ def test_window_change_dataset_top_movers_and_session_iv_extremes():
                     "option_type": "CE",
                     "current_ltp": 120,
                     "baseline_ltp": 100,
+                    "current_bid": 119,
+                    "baseline_bid": 99,
+                    "current_ask": 123,
+                    "baseline_ask": 101,
                     "current_volume": 2500,
                     "baseline_volume": 1800,
                     "current_open_interest": 20000,
@@ -99,6 +105,10 @@ def test_window_change_dataset_top_movers_and_session_iv_extremes():
                     "option_type": "PE",
                     "current_ltp": 140,
                     "baseline_ltp": 150,
+                    "current_bid": 138,
+                    "baseline_bid": 149,
+                    "current_ask": 145,
+                    "baseline_ask": 151,
                     "current_volume": 3000,
                     "baseline_volume": 2000,
                     "current_open_interest": 24000,
@@ -121,6 +131,7 @@ def test_window_change_dataset_top_movers_and_session_iv_extremes():
     assert list(change_df["open_interest_change"]) == [2000, -2000]
     movers = build_top_movers(change_df, top_n=1)
     assert int(movers["oi_addition"].iloc[0]["strike"]) == 22000
+    assert int(movers["spread_widening"].iloc[0]["strike"]) == 22100
     iv_extremes = build_session_iv_extremes(fake_db, "NIFTY", "2026-03-26", "2026-03-11")
     assert iv_extremes.loc[iv_extremes["strike"] == 22000, "session_iv_high"].iloc[0] == 0.21
 
@@ -135,3 +146,14 @@ def test_gamma_vanna_and_charm_profiles_build():
     assert not charm_profile.empty
     assert {"strike_price", "net_vanna"} <= set(vanna_profile.columns)
     assert {"strike_price", "net_charm"} <= set(charm_profile.columns)
+
+
+def test_multi_expiry_dataset_supports_normalization_modes():
+    cur = _fixture("option_chain_balanced.json")
+    nxt = _fixture("option_chain_expiry_day.json")
+    absolute = build_multi_expiry_dataset({"2026-03-26": cur, "2026-04-02": nxt}, "open_interest", normalization_mode="Absolute", spot=22020)
+    normalized = build_multi_expiry_dataset({"2026-03-26": cur, "2026-04-02": nxt}, "open_interest", normalization_mode="ATM Offset", spot=22020)
+    assert "comparison_axis" in absolute.columns
+    assert "comparison_axis" in normalized.columns
+    assert absolute["comparison_axis"].equals(absolute["strike_price"]) is True
+    assert normalized["comparison_axis"].abs().max() <= 500

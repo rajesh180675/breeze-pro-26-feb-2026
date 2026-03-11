@@ -132,7 +132,21 @@ def evaluate_alerts(
     if not current_df.empty and {"volume", "avg_volume"}.issubset(current_df.columns):
         unusual = current_df[pd.to_numeric(current_df["volume"], errors="coerce") > (pd.to_numeric(current_df["avg_volume"], errors="coerce").fillna(0) * 3)]
         if monitored_strikes:
-            unusual = unusual[unusual["strike_price"].isin(monitored_strikes)]
+            pinned_unusual = unusual[unusual["strike_price"].isin(monitored_strikes)]
+            if not pinned_unusual.empty:
+                row = pinned_unusual.sort_values("volume", ascending=False).iloc[0]
+                alerts.append(
+                    {
+                        "code": "pinned_strike_volume",
+                        "severity": "medium",
+                        "strike": int(float(row["strike_price"])),
+                        "expiry": expiry,
+                        "cause": "pinned_strike_volume_vs_baseline",
+                        "timestamp": snapshot_ts,
+                        "message": f"Pinned strike {int(float(row['strike_price']))} is trading unusual volume.",
+                    }
+                )
+            unusual = pinned_unusual
         if not unusual.empty:
             row = unusual.sort_values("volume", ascending=False).iloc[0]
             alerts.append(

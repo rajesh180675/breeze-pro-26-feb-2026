@@ -164,6 +164,8 @@ def build_option_chain_ladder(
     df: pd.DataFrame,
     spot: float,
     pinned_strikes: Optional[Iterable[int]] = None,
+    selected_strike: Optional[int] = None,
+    sticky_atm: bool = True,
 ) -> pd.DataFrame:
     if df.empty or "strike_price" not in df.columns:
         return pd.DataFrame()
@@ -191,6 +193,7 @@ def build_option_chain_ladder(
             "is_atm": int(float(strike) == float(atm)),
             "is_max_pain": int(float(strike) == float(max_pain)),
             "is_pinned": int(int(float(strike)) in pinned),
+            "is_selected": int(selected_strike is not None and int(float(strike)) == int(selected_strike)),
         }
         strike_rows = df[df["strike_price"] == strike]
         for _, option_row in strike_rows.iterrows():
@@ -203,7 +206,9 @@ def build_option_chain_ladder(
             row[f"{prefix}_liquidity"] = float(option_row.get("liquidity_score", 0) or 0)
         rows.append(row)
     ladder = pd.DataFrame(rows)
-    return ladder.sort_values(["is_pinned", "is_atm", "strike"], ascending=[False, False, True]).reset_index(drop=True)
+    sort_columns = ["is_selected", "is_pinned", "is_atm", "strike"] if sticky_atm else ["is_selected", "is_pinned", "strike"]
+    ascending = [False, False, False, True] if sticky_atm else [False, False, True]
+    return ladder.sort_values(sort_columns, ascending=ascending).reset_index(drop=True)
 
 
 def build_expiry_strip(
@@ -224,6 +229,8 @@ def build_expiry_strip(
 def build_multi_expiry_dataset(
     expiry_frames: Dict[str, pd.DataFrame],
     metric: str,
+    normalization_mode: str = "absolute",
+    spot: float = 0.0,
 ) -> pd.DataFrame:
     rows: List[Dict[str, Any]] = []
     for expiry, frame in expiry_frames.items():
@@ -231,8 +238,15 @@ def build_multi_expiry_dataset(
             continue
         grouped = frame.groupby(["strike_price", "right"], dropna=True)[metric].sum().reset_index()
         grouped["expiry"] = expiry
+        atm = estimate_atm_strike(frame, spot=spot)
+        if str(normalization_mode).lower() == "atm offset":
+            grouped["comparison_axis"] = pd.to_numeric(grouped["strike_price"], errors="coerce").fillna(0.0) - float(atm or 0.0)
+        elif str(normalization_mode).lower() == "atm %":
+            grouped["comparison_axis"] = np.where(float(atm or 0.0) > 0, ((pd.to_numeric(grouped["strike_price"], errors="coerce").fillna(0.0) / float(atm)) - 1.0) * 100.0, 0.0)
+        else:
+            grouped["comparison_axis"] = pd.to_numeric(grouped["strike_price"], errors="coerce").fillna(0.0)
         rows.append(grouped)
-    return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame(columns=["strike_price", "right", metric, "expiry"])
+    return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame(columns=["strike_price", "right", metric, "expiry", "comparison_axis"])
 
 
 def build_gamma_profile(df: pd.DataFrame) -> pd.DataFrame:
@@ -298,6 +312,9 @@ def build_window_change_dataset(
         return pd.DataFrame()
     out = pd.DataFrame(rows)
     out["ltp_change"] = pd.to_numeric(out["current_ltp"], errors="coerce").fillna(0) - pd.to_numeric(out["baseline_ltp"], errors="coerce").fillna(0)
+    out["current_spread"] = pd.to_numeric(out.get("current_ask", 0), errors="coerce").fillna(0) - pd.to_numeric(out.get("current_bid", 0), errors="coerce").fillna(0)
+    out["baseline_spread"] = pd.to_numeric(out.get("baseline_ask", 0), errors="coerce").fillna(0) - pd.to_numeric(out.get("baseline_bid", 0), errors="coerce").fillna(0)
+    out["spread_change"] = out["current_spread"] - out["baseline_spread"]
     out["volume_change"] = pd.to_numeric(out["current_volume"], errors="coerce").fillna(0) - pd.to_numeric(out["baseline_volume"], errors="coerce").fillna(0)
     out["open_interest_change"] = pd.to_numeric(out["current_open_interest"], errors="coerce").fillna(0) - pd.to_numeric(out["baseline_open_interest"], errors="coerce").fillna(0)
     out["iv_change"] = pd.to_numeric(out["current_iv"], errors="coerce").fillna(0) - pd.to_numeric(out["baseline_iv"], errors="coerce").fillna(0)
@@ -327,6 +344,7 @@ def build_top_movers(change_df: pd.DataFrame, top_n: int = 5) -> Dict[str, pd.Da
         "oi_reduction": ordered.sort_values("open_interest_change", ascending=True).head(top_n),
         "volume_burst": ordered.sort_values("volume_change", ascending=False).head(top_n),
         "iv_shift": ordered.sort_values("iv_change", ascending=False).head(top_n),
+        "spread_widening": ordered.sort_values("spread_change", ascending=False).head(top_n),
     }
 
 

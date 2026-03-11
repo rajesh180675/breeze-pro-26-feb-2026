@@ -31,15 +31,17 @@ def _fixture(name: str) -> pd.DataFrame:
 
 def test_core_option_chain_figures_render():
     df = enrich_option_chain(_fixture("option_chain_balanced.json"), "NIFTY", "2026-03-26", 22020, include_greeks=False)
-    oi_fig = build_oi_profile_figure(df, atm=22000, max_pain=22000)
-    delta_fig = build_delta_oi_profile_figure(df, atm=22000)
-    smile_fig = build_iv_smile_figure(df, atm=22000, selected_expiry="26 Mar")
+    oi_fig = build_oi_profile_figure(df, atm=22000, max_pain=22000, selected_strike=22100)
+    delta_fig = build_delta_oi_profile_figure(df, atm=22000, selected_strike=22100)
+    smile_fig = build_iv_smile_figure(df, atm=22000, selected_expiry="26 Mar", selected_strike=22100)
     liquidity_fig = build_liquidity_scatter_figure(df)
     assert len(oi_fig.data) == 2
     assert len(delta_fig.data) == 2
     assert len(smile_fig.data) == 2
     assert len(liquidity_fig.data) == 1
-    assert any(annotation.text == "ATM" for annotation in oi_fig.layout.annotations)
+    annotation_text = [annotation.text for annotation in oi_fig.layout.annotations]
+    assert "ATM" in annotation_text
+    assert "Selected" in annotation_text
 
 
 def test_term_structure_heatmap_and_gamma_figures_render():
@@ -68,8 +70,8 @@ def test_term_structure_heatmap_and_gamma_figures_render():
 def test_multi_expiry_and_skew_replay_figures_render():
     cur = _fixture("option_chain_balanced.json")
     nxt = _fixture("option_chain_expiry_day.json")
-    oi_fig = build_multi_expiry_oi_figure({"2026-03-26": cur, "2026-04-02": nxt})
-    iv_fig = build_multi_expiry_iv_smile_figure({"2026-03-26": cur, "2026-04-02": nxt})
+    oi_fig = build_multi_expiry_oi_figure({"2026-03-26": cur, "2026-04-02": nxt}, normalization_mode="ATM Offset", spot=22020)
+    iv_fig = build_multi_expiry_iv_smile_figure({"2026-03-26": cur, "2026-04-02": nxt}, normalization_mode="ATM %", spot=22020)
     replay_df = pd.DataFrame(
         [
             {"snapshot_ts": "2026-03-11T09:15:00", "option_type": "CE", "iv": 0.18},
@@ -82,6 +84,8 @@ def test_multi_expiry_and_skew_replay_figures_render():
     assert len(oi_fig.data) == 2
     assert len(iv_fig.data) == 2
     assert len(skew_fig.data) == 1
+    assert oi_fig.layout.xaxis.title.text == "ATM Offset"
+    assert iv_fig.layout.xaxis.title.text == "ATM %"
 
 
 def test_vanna_and_charm_figures_render():

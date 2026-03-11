@@ -502,6 +502,55 @@ class TradeDB:
         except Exception:
             return False
 
+    def sync_option_chain_watchlist(self, instrument: str, expiry: str, strikes: List[int]) -> bool:
+        try:
+            normalized = sorted({int(strike) for strike in strikes if int(strike) > 0})
+            with self._tx() as conn:
+                conn.execute(
+                    """
+                    DELETE FROM watchlist
+                    WHERE instrument=? AND expiry=? AND notes=?
+                    """,
+                    (instrument, expiry, "option_chain_monitor"),
+                )
+                for strike in normalized:
+                    conn.execute(
+                        """
+                        INSERT OR REPLACE INTO watchlist
+                        (symbol, instrument, strike, option_type, expiry, added_at, notes)
+                        VALUES (?,?,?,?,?,?,?)
+                        """,
+                        (
+                            instrument,
+                            instrument,
+                            strike,
+                            "",
+                            expiry,
+                            datetime.now().isoformat(),
+                            "option_chain_monitor",
+                        ),
+                    )
+            return True
+        except Exception as exc:
+            log.error("sync_option_chain_watchlist failed: %s", exc)
+            return False
+
+    def get_option_chain_watchlist(self, instrument: str, expiry: str) -> List[int]:
+        try:
+            conn = self._get_conn()
+            rows = conn.execute(
+                """
+                SELECT strike
+                FROM watchlist
+                WHERE instrument=? AND expiry=? AND notes=?
+                ORDER BY strike
+                """,
+                (instrument, expiry, "option_chain_monitor"),
+            ).fetchall()
+            return [int(row["strike"]) for row in rows if int(row["strike"] or 0) > 0]
+        except Exception:
+            return []
+
     # ─── Alerts ───────────────────────────────────────────────
 
     def log_alert(self, level: str, category: str, message: str,
@@ -943,6 +992,10 @@ class TradeDB:
                 cur.option_type,
                 cur.ltp AS current_ltp,
                 base.ltp AS baseline_ltp,
+                cur.bid AS current_bid,
+                base.bid AS baseline_bid,
+                cur.ask AS current_ask,
+                base.ask AS baseline_ask,
                 cur.volume AS current_volume,
                 base.volume AS baseline_volume,
                 cur.open_interest AS current_open_interest,

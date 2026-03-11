@@ -20,6 +20,7 @@ DEFAULT_STATE = {
     "show_only_unusual": False,
     "monitored_strikes": [],
     "visible_strike_window": None,
+    "sticky_atm": True,
 }
 
 

@@ -97,6 +97,14 @@ def test_save_and_load_settings(tmp_path, monkeypatch):
     assert db.get_setting("k") == "v"
 
 
+def test_option_chain_watchlist_sync_roundtrip(tmp_path, monkeypatch):
+    db = _fresh_db(tmp_path, monkeypatch)
+    assert db.sync_option_chain_watchlist("NIFTY", "2026-03-26", [22000, 22100]) is True
+    assert db.get_option_chain_watchlist("NIFTY", "2026-03-26") == [22000, 22100]
+    assert db.sync_option_chain_watchlist("NIFTY", "2026-03-26", [22200]) is True
+    assert db.get_option_chain_watchlist("NIFTY", "2026-03-26") == [22200]
+
+
 def test_get_volume_baseline_map_returns_dict(tmp_path, monkeypatch):
     db = _fresh_db(tmp_path, monkeypatch)
     db.record_option_chain_snapshot(
@@ -178,6 +186,8 @@ def test_option_chain_window_comparison_and_recent_history(tmp_path, monkeypatch
                     "strike_price": 22000,
                     "right": "Call",
                     "ltp": ltp,
+                    "best_bid_price": ltp - 1,
+                    "best_offer_price": ltp + (2 if ltp == 100 else 4),
                     "volume": oi // 2,
                     "open_interest": oi,
                     "oi_change": oi - 900,
@@ -196,6 +206,8 @@ def test_option_chain_window_comparison_and_recent_history(tmp_path, monkeypatch
     assert len(comparison) == 1
     assert comparison[0]["current_open_interest"] == 1250
     assert comparison[0]["baseline_open_interest"] == 1000
+    assert comparison[0]["current_ask"] == 112
+    assert comparison[0]["baseline_ask"] == 102
 
 
 def test_basket_template_crud_roundtrip(tmp_path, monkeypatch):

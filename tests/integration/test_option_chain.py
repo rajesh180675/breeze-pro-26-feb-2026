@@ -2,8 +2,21 @@ import os
 from pathlib import Path
 
 import json
+import sys
+import types
 import pytest
 import pandas as pd
+
+if "breeze_connect" not in sys.modules:
+    stub = types.ModuleType("breeze_connect")
+
+    class BreezeConnect:  # noqa: D401
+        """Stub BreezeConnect for offline deterministic tests."""
+
+        pass
+
+    stub.BreezeConnect = BreezeConnect
+    sys.modules["breeze_connect"] = stub
 
 import app_config as C
 from breeze_api import BreezeAPIClient
@@ -18,6 +31,7 @@ from option_chain_service import (
     build_expiry_strip,
     build_multi_expiry_dataset,
     build_window_change_dataset,
+    build_option_chain_ladder,
     enrich_option_chain,
     load_replay_frame,
 )
@@ -96,12 +110,25 @@ def test_compare_expiry_pipeline_builds_overlays_from_enriched_frames():
     expiry_frames = {"2099-03-26": front, "2099-04-02": next_expiry}
 
     dataset = build_multi_expiry_dataset(expiry_frames, "open_interest")
+    normalized_dataset = build_multi_expiry_dataset(expiry_frames, "open_interest", normalization_mode="ATM Offset", spot=22020)
     strip = build_expiry_strip(expiry_frames, 22020, lambda expiry: 7 if expiry.endswith("26") else 14)
-    oi_fig = build_multi_expiry_oi_figure(expiry_frames)
-    iv_fig = build_multi_expiry_iv_smile_figure(expiry_frames)
+    oi_fig = build_multi_expiry_oi_figure(expiry_frames, normalization_mode="ATM Offset", spot=22020)
+    iv_fig = build_multi_expiry_iv_smile_figure(expiry_frames, normalization_mode="ATM %", spot=22020)
 
     assert not dataset.empty
+    assert not normalized_dataset.empty
     assert sorted(dataset["expiry"].unique().tolist()) == ["2099-03-26", "2099-04-02"]
     assert len(strip) == 2
     assert len(oi_fig.data) == 2
     assert len(iv_fig.data) == 2
+
+
+def test_watchlist_backed_ladder_state_and_sticky_atm(tmp_path, monkeypatch):
+    db = _fresh_db(tmp_path, monkeypatch)
+    assert db.sync_option_chain_watchlist("NIFTY", "2099-03-26", [22000, 22100]) is True
+    persisted = db.get_option_chain_watchlist("NIFTY", "2099-03-26")
+    df = enrich_option_chain(_fixture("option_chain_balanced.json"), "NIFTY", "2099-03-26", 22020, include_greeks=False)
+    ladder = build_option_chain_ladder(df, 22020, pinned_strikes=persisted, selected_strike=22000, sticky_atm=True)
+    assert persisted == [22000, 22100]
+    assert ladder.iloc[0]["strike"] == 22000
+    assert int(ladder.loc[ladder["strike"] == 22100, "is_pinned"].iloc[0]) == 1

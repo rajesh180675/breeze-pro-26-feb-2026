@@ -44,3 +44,4 @@ def test_alerts_detect_skew_steepening_and_monitored_volume():
     codes = {alert["code"] for alert in alerts}
     assert "skew_steepening" in codes
     assert "unusual_volume" in codes
+    assert "pinned_strike_volume" in codes
