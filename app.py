@@ -88,6 +88,7 @@ from option_chain_service import (
     build_expiry_strip,
     build_gamma_profile,
     build_option_chain_ladder,
+    summarize_alert_commentary_payload,
     build_vanna_profile,
     build_window_change_dataset,
     enrich_option_chain,
@@ -100,6 +101,15 @@ from option_chain_service import (
 )
 from option_chain_state import ensure_option_chain_state, update_option_chain_state
 from option_chain_utils import process_option_chain
+from option_chain_workspace import (
+    build_replay_delta_oi_frame,
+    extract_dataframe_selection_rows,
+    extract_plotly_selected_strike,
+    option_chain_chart_supports_selection,
+    resolve_monitored_strike_defaults,
+    resolve_selected_strike,
+    style_option_chain_rows,
+)
 
 # ─── Logging ──────────────────────────────────────────────────
 # Ensure logs directory exists before FileHandler is created.
@@ -518,37 +528,6 @@ def cleanup_option_chain_ws_subscriptions() -> None:
         lf.unregister_option_chain_tracking(tokens)
         tick_store.clear_tokens(tokens)
         st.session_state.pop(key, None)
-
-
-def _extract_dataframe_selection_rows(selection_state: Any) -> List[int]:
-    selection = getattr(selection_state, "selection", None)
-    if selection is not None and hasattr(selection, "rows"):
-        return list(getattr(selection, "rows", []) or [])
-    if isinstance(selection_state, dict):
-        return list(selection_state.get("selection", {}).get("rows", []) or [])
-    return []
-
-
-def _extract_plotly_selected_strike(selection_state: Any) -> Optional[int]:
-    selection = getattr(selection_state, "selection", None)
-    points = getattr(selection, "points", None) if selection is not None else None
-    if points is None and isinstance(selection_state, dict):
-        points = selection_state.get("selection", {}).get("points", [])
-    for point in points or []:
-        candidate = None
-        if hasattr(point, "get"):
-            candidate = point.get("customdata", point.get("x"))
-        elif isinstance(point, dict):
-            candidate = point.get("customdata", point.get("x"))
-        try:
-            if isinstance(candidate, (list, tuple)) and candidate:
-                candidate = candidate[0]
-            value = int(float(candidate))
-            if value > 0:
-                return value
-        except (TypeError, ValueError):
-            continue
-    return None
 
 
 def get_client():
@@ -1773,10 +1752,11 @@ def page_option_chain():
     ddf = filter_option_chain(base_df, atm=atm, strikes_per_side=n_strikes, show_all=show_all)
     all_strikes = sorted(ddf["strike_price"].dropna().astype(int).unique().tolist()) if "strike_price" in ddf.columns else []
     persisted_monitored = _db.get_option_chain_watchlist(inst, expiry)
+    default_monitored = resolve_monitored_strike_defaults(state.get("monitored_strikes", []), persisted_monitored, all_strikes)
     monitor_strikes = st.sidebar.multiselect(
         "Monitor Strikes",
         options=all_strikes,
-        default=[strike for strike in (state.get("monitored_strikes", []) or persisted_monitored) if strike in all_strikes],
+        default=default_monitored,
         key="oc_monitored_strikes",
     )
     monitor_strikes = sorted({int(strike) for strike in monitor_strikes})
@@ -1862,10 +1842,8 @@ def page_option_chain():
         pinned_strikes.append(int(float(ddf.loc[put_wall, "strike_price"])))
     pinned_strikes.extend(monitor_strikes)
     pinned_strikes = list(dict.fromkeys([strike for strike in pinned_strikes if strike > 0]))
-    selected_strike = state.get("selected_strike")
-    if selected_strike not in all_strikes:
-        selected_strike = int(atm) if atm else (all_strikes[0] if all_strikes else None)
-        state = update_option_chain_state(st.session_state, selected_strike=selected_strike)
+    selected_strike = resolve_selected_strike(state.get("selected_strike"), all_strikes, atm)
+    state = update_option_chain_state(st.session_state, selected_strike=selected_strike)
 
     ladder = build_option_chain_ladder(ddf, _spot, pinned_strikes=pinned_strikes, selected_strike=selected_strike, sticky_atm=sticky_atm)
     as_of_ts = replay_ts or (replay_timestamps[-1] if replay_timestamps else "")
@@ -1878,10 +1856,12 @@ def page_option_chain():
         snapshot_ts=as_of_ts,
     )
     commentary = build_option_chain_commentary(ddf, alerts, spot=_spot, expiry=expiry)
+    panel_payload = summarize_alert_commentary_payload(alerts, commentary)
     gamma_profile = build_gamma_profile(ddf)
     vanna_profile = build_vanna_profile(ddf)
     charm_profile = build_charm_profile(ddf)
     change_df = build_window_change_dataset(_db, inst, expiry, as_of_ts=as_of_ts, change_window=change_window) if as_of_ts else pd.DataFrame()
+    delta_chart_df = build_replay_delta_oi_frame(change_df, ddf)
     top_movers = build_top_movers(change_df)
     session_iv_extremes = build_session_iv_extremes(_db, inst, expiry, trade_date=(as_of_ts[:10] if as_of_ts else date.today().isoformat()))
 
@@ -1892,7 +1872,16 @@ def page_option_chain():
             if ladder.empty:
                 st.info("No ladder rows to display.")
             else:
-                ladder_selection = st.dataframe(ladder, height=640, hide_index=True, width="stretch", key="oc_ladder_table", on_select="rerun", selection_mode="single-row")
+                st.caption(f"Selected strike: {selected_strike}" if selected_strike else "Selected strike: none")
+                ladder_selection = st.dataframe(
+                    style_option_chain_rows(ladder, selected_strike, pinned_strikes=pinned_strikes, atm=atm, max_pain=mp),
+                    height=640,
+                    hide_index=True,
+                    width="stretch",
+                    key="oc_ladder_table",
+                    on_select="rerun",
+                    selection_mode="single-row",
+                )
                 selected_rows = _extract_dataframe_selection_rows(ladder_selection)
                 if selected_rows:
                     selected_idx = selected_rows[0]
@@ -1900,27 +1889,32 @@ def page_option_chain():
                         selected_strike = int(ladder.iloc[selected_idx]["strike"])
                         state = update_option_chain_state(st.session_state, selected_strike=selected_strike)
         elif view == "Calls Only":
-            st.dataframe(ddf[ddf["right"] == "Call"], height=640, hide_index=True, width="stretch")
+            calls_df = ddf[ddf["right"] == "Call"].copy()
+            st.caption(f"Selected strike: {selected_strike}" if selected_strike else "Selected strike: none")
+            st.dataframe(style_option_chain_rows(calls_df, selected_strike, pinned_strikes=pinned_strikes, atm=atm, max_pain=mp), height=640, hide_index=True, width="stretch")
         elif view == "Puts Only":
-            st.dataframe(ddf[ddf["right"] == "Put"], height=640, hide_index=True, width="stretch")
+            puts_df = ddf[ddf["right"] == "Put"].copy()
+            st.caption(f"Selected strike: {selected_strike}" if selected_strike else "Selected strike: none")
+            st.dataframe(style_option_chain_rows(puts_df, selected_strike, pinned_strikes=pinned_strikes, atm=atm, max_pain=mp), height=640, hide_index=True, width="stretch")
         else:
+            st.caption(f"Selected strike: {selected_strike}" if selected_strike else "Selected strike: none")
             if chain_opt_oi_heatmap and "OI Change %" in ddf.columns:
                 st.dataframe(
-                    safe_background_gradient(ddf, subset=["OI Change %"], cmap="RdYlGn"),
+                    style_option_chain_rows(ddf, selected_strike, pinned_strikes=pinned_strikes, atm=atm, max_pain=mp),
                     height=640,
                     hide_index=True,
                     width="stretch",
                 )
             else:
-                st.dataframe(ddf, height=640, hide_index=True, width="stretch")
+                st.dataframe(style_option_chain_rows(ddf, selected_strike, pinned_strikes=pinned_strikes, atm=atm, max_pain=mp), height=640, hide_index=True, width="stretch")
 
     with analysis_col:
         section("🧠 Commentary")
-        for line in commentary[:4]:
+        for line in panel_payload["commentary"]:
             st.write(f"- {line}")
         section("🚨 Alerts")
-        if alerts:
-            for alert in alerts[:5]:
+        if panel_payload["alerts"]:
+            for alert in panel_payload["alerts"]:
                 st.write(f"- [{alert['severity'].upper()}] {alert['message']}")
         else:
             st.caption("No deterministic alerts triggered.")
@@ -1948,7 +1942,7 @@ def page_option_chain():
     if chart_tab == "OI Profile":
         fig = build_oi_profile_figure(ddf, atm=atm, max_pain=mp, selected_strike=float(selected_strike or 0))
     elif chart_tab == "Delta OI":
-        fig = build_delta_oi_profile_figure(ddf, atm=atm, selected_strike=float(selected_strike or 0))
+        fig = build_delta_oi_profile_figure(delta_chart_df, atm=atm, selected_strike=float(selected_strike or 0))
     elif chart_tab == "IV Smile":
         fig = build_iv_smile_figure(ddf, atm=atm, selected_expiry=format_expiry_short(expiry), selected_strike=float(selected_strike or 0))
     elif chart_tab == "Compare OI":
@@ -1974,10 +1968,13 @@ def page_option_chain():
     elif chart_tab == "Liquidity":
         fig = build_liquidity_scatter_figure(ddf)
     if fig is not None:
-        plotly_selection = st.plotly_chart(fig, use_container_width=True, key="oc_chain_chart", on_select="rerun", selection_mode="points", config={"displaylogo": False})
-        plotted_strike = _extract_plotly_selected_strike(plotly_selection)
-        if plotted_strike in all_strikes:
-            state = update_option_chain_state(st.session_state, selected_strike=plotted_strike)
+        selection_mode = "points"
+        on_select = "rerun" if option_chain_chart_supports_selection(chart_tab) else "ignore"
+        plotly_selection = st.plotly_chart(fig, use_container_width=True, key="oc_chain_chart", on_select=on_select, selection_mode=selection_mode, config={"displaylogo": False})
+        if option_chain_chart_supports_selection(chart_tab):
+            plotted_strike = _extract_plotly_selected_strike(plotly_selection)
+            if plotted_strike in all_strikes:
+                state = update_option_chain_state(st.session_state, selected_strike=plotted_strike)
 
     compare_dataset = build_multi_expiry_dataset(compare_frames, "open_interest", normalization_mode=normalization_mode, spot=_spot)
     if not compare_dataset.empty and chart_tab in {"Compare OI", "Compare IV Smile"}:

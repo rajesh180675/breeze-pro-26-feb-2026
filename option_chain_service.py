@@ -285,6 +285,18 @@ def build_charm_profile(df: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def summarize_alert_commentary_payload(
+    alerts: List[Dict[str, Any]],
+    commentary: List[str],
+    top_n_alerts: int = 5,
+    top_n_commentary: int = 4,
+) -> Dict[str, List[Any]]:
+    return {
+        "alerts": alerts[:top_n_alerts],
+        "commentary": commentary[:top_n_commentary],
+    }
+
+
 def load_replay_frame(db: Any, instrument: str, expiry: str, replay_ts: str) -> pd.DataFrame:
     rows = db.get_option_chain_snapshot_at_or_before(instrument, expiry, replay_ts)
     return pd.DataFrame(rows)

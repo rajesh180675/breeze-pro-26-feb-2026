@@ -33,6 +33,7 @@ def test_commentary_mentions_real_levels():
 def test_alerts_detect_skew_steepening_and_monitored_volume():
     previous_df = enrich_option_chain(_fixture("option_chain_balanced.json"), "NIFTY", "2026-03-26", 22020, include_greeks=False)
     current_df = enrich_option_chain(_fixture("option_chain_put_heavy.json"), "NIFTY", "2026-03-26", 22020, include_greeks=False)
+    current_df.loc[current_df["strike_price"] == 22000, "spread_pct"] = 6.5
     alerts = evaluate_alerts(
         current_df,
         previous_df=previous_df,
@@ -45,3 +46,4 @@ def test_alerts_detect_skew_steepening_and_monitored_volume():
     assert "skew_steepening" in codes
     assert "unusual_volume" in codes
     assert "pinned_strike_volume" in codes
+    assert "spread_blowout" in codes

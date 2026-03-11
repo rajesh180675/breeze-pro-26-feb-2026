@@ -3,6 +3,7 @@ import pytest
 plotly = pytest.importorskip("plotly")
 
 import pandas as pd
+import charts
 
 from charts import (
     _detect_support_resistance,
@@ -79,3 +80,16 @@ def test_detect_support_resistance_runs():
     df = _sample_ohlcv(60)
     levels = _detect_support_resistance(df["close"], df["high"], df["low"], n=3, window=5)
     assert isinstance(levels, list)
+
+
+def test_option_chain_chart_builders_do_not_live_in_charts_module():
+    forbidden = [
+        "build_oi_profile_figure",
+        "build_delta_oi_profile_figure",
+        "build_iv_smile_figure",
+        "build_multi_expiry_oi_figure",
+        "build_multi_expiry_iv_smile_figure",
+        "build_gamma_exposure_figure",
+    ]
+    for name in forbidden:
+        assert not hasattr(charts, name)

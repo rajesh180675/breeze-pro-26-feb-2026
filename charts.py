@@ -1,7 +1,8 @@
 """
-Production-grade Plotly chart generators for Breeze PRO.
+Production-grade Plotly chart generators for non-option-chain analytics.
 
-All functions return go.Figure objects ready for st.plotly_chart().
+Option-chain chart ownership now lives in `option_chain_charts.py`.
+All functions here return go.Figure objects ready for `st.plotly_chart()`.
 """
 
 from __future__ import annotations
