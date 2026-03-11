@@ -74,26 +74,23 @@ from option_chain_controller import (
     sync_option_chain_live_feed,
     sync_option_chain_watchlist,
 )
-from option_chain_metrics import calculate_max_pain, calculate_pcr, detect_event_premium
+from option_chain_metrics import calculate_max_pain, calculate_pcr
 from option_chain_page import (
     build_option_chain_chart,
     render_option_chain_analysis,
     render_option_chain_chart,
     render_option_chain_display,
 )
+from option_chain_summary import build_option_chain_summary_payload, render_option_chain_summary
 from option_chain_service import (
     build_multi_expiry_dataset,
     compose_option_chain_workspace,
     estimate_atm_strike,
-    fetch_option_chain_snapshot,
     filter_option_chain,
-    load_replay_frame,
-    merge_live_overlay,
 )
 from option_chain_state import ensure_option_chain_state, update_option_chain_state
 from option_chain_utils import process_option_chain
 from option_chain_workspace import (
-    resolve_monitored_strike_defaults,
     resolve_selected_strike,
 )
 
@@ -1653,37 +1650,24 @@ def page_option_chain():
     total_call_oi = base_df[base_df["right"] == "Call"]["open_interest"].sum() if "right" in base_df.columns else 0
     total_put_oi = base_df[base_df["right"] == "Put"]["open_interest"].sum() if "right" in base_df.columns else 0
     state = update_option_chain_state(st.session_state, selected_strike=selected_strike)
-
-    mc = st.columns(8)
-    mc[0].metric("Spot", f"{_spot:,.0f}" if _spot > 0 else "—")
-    mc[1].metric("ATM", f"{atm:,.0f}")
-    mc[2].metric("PCR", f"{pcr:.2f}", "Bullish" if pcr > 1 else "Bearish")
-    mc[3].metric("Max Pain", f"{mp:,.0f}")
-    mc[4].metric("DTE", str(dte), "⚠️ Expiry Soon!" if dte <= 2 else None,
-                 delta_color="inverse" if dte <= 2 else "normal")
-    mc[5].metric("Expected Move", f"±{expected_move:,.0f}" if expected_move else "—")
-    mc[6].metric("Call OI", format_number(total_call_oi))
-    mc[7].metric("Put OI", format_number(total_put_oi))
-    if controls.chain_opt_pcr_gauge:
-        st.progress(max(0.0, min(pcr / 2.0, 1.0)), text=f"PCR Gauge: {pcr:.2f}")
-
-    if dte <= 0:
-        warn_box("⚠️ <b>Expiry Day!</b> Options expire today. Consider squaring off short positions.")
-
-    if expiry_strip:
-        strip_cols = st.columns(min(len(expiry_strip), 3))
-        for idx, expiry_summary in enumerate(expiry_strip[:3]):
-            strip_cols[idx].metric(
-                f"{format_expiry_short(expiry_summary['expiry'])} ATM IV",
-                f"{expiry_summary['atm_iv'] * 100:.1f}%",
-                f"EM ±{expiry_summary['expected_move']:.0f}",
-            )
-        if len(expiry_strip) >= 2:
-            premium_check = detect_event_premium(expiry_strip[0]["atm_iv"], expiry_strip[1]["atm_iv"])
-            if premium_check["is_elevated"]:
-                st.info(
-                    f"Front expiry IV is elevated vs next expiry by {premium_check['distortion'] * 100:.1f} vol points."
-                )
+    summary_payload = build_option_chain_summary_payload(
+        _spot,
+        atm,
+        pcr,
+        mp,
+        dte,
+        expected_move,
+        total_call_oi,
+        total_put_oi,
+        expiry_strip,
+    )
+    render_option_chain_summary(
+        summary_payload,
+        controls.chain_opt_pcr_gauge,
+        format_number,
+        format_expiry_short,
+        warn_box,
+    )
 
     st.markdown("---")
 
