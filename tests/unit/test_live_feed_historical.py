@@ -94,3 +94,45 @@ def test_live_feed_health_and_restore_subscriptions(monkeypatch):
 
     mgr._restore_subscriptions()
     assert len(breeze.subscribed) >= 2
+
+
+def test_manual_disconnect_allows_reconnect(monkeypatch):
+    starts = []
+
+    class ImmediateThread:
+        def __init__(self, *, target, daemon, name):
+            self._target = target
+            self.daemon = daemon
+            self.name = name
+
+        def start(self):
+            starts.append(self.name)
+            self._target()
+
+    def fake_worker_loop():
+        starts.append("worker_ran")
+
+    def fake_connect_with_backoff():
+        starts.append("connector_ran")
+
+    breeze = DummyBreeze()
+    mgr = LiveFeedManager(
+        breeze=breeze,
+        tick_store=TickStore(),
+        bar_store=BarStore(),
+        order_bus=OrderNotificationBus(),
+    )
+    mgr._state = FeedState.CONNECTED
+
+    mgr.disconnect()
+
+    assert mgr._state == FeedState.DISCONNECTED
+    assert breeze.connected is False
+
+    monkeypatch.setattr("live_feed.threading.Thread", ImmediateThread)
+    monkeypatch.setattr(mgr, "_worker_loop", fake_worker_loop)
+    monkeypatch.setattr(mgr, "_connect_with_backoff", fake_connect_with_backoff)
+    mgr.connect()
+
+    assert mgr._state == FeedState.CONNECTING
+    assert starts == ["LiveFeedWorker", "worker_ran", "LiveFeedConnector", "connector_ran"]

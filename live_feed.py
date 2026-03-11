@@ -537,7 +537,7 @@ class LiveFeedManager:
                 stale_tokens = [k for k, v in self._subscriptions.items() if v.sub_type == SubscriptionType.QUOTE]
                 self._subscriptions.clear()
             self._tick_store.clear_tokens(stale_tokens)
-        self._state = FeedState.STOPPED
+        self._state = FeedState.DISCONNECTED
 
     def is_connected(self) -> bool:
         return self._state == FeedState.CONNECTED
