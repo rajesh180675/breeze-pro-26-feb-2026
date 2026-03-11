@@ -81,9 +81,9 @@ from option_chain_page import (
     render_option_chain_chart,
     render_option_chain_display,
 )
-from option_chain_summary import build_option_chain_summary_payload, render_option_chain_summary
+from option_chain_summary import render_option_chain_summary
+from option_chain_view_model import build_option_chain_page_view_model
 from option_chain_service import (
-    build_multi_expiry_dataset,
     compose_option_chain_workspace,
     estimate_atm_strike,
     filter_option_chain,
@@ -1629,40 +1629,20 @@ def page_option_chain():
         include_max_pain_marker=controls.chain_opt_max_pain_marker,
         dte_provider=calculate_days_to_expiry,
     )
-    ddf = workspace["display_df"]
-    summary = workspace["summary"]
-    atm = workspace["atm"]
-    mp = workspace["max_pain"]
-    pinned_strikes = workspace["pinned_strikes"]
-    ladder = workspace["ladder"]
-    panel_payload = workspace["commentary_payload"]
-    gamma_profile = workspace["gamma_profile"]
-    vanna_profile = workspace["vanna_profile"]
-    charm_profile = workspace["charm_profile"]
-    change_df = workspace["change_df"]
-    top_movers = workspace["top_movers"]
-    session_iv_extremes = workspace["session_iv_extremes"]
-    as_of_ts = workspace["as_of_ts"]
-    replay_chart_df = workspace["replay_chart_df"]
-    expiry_strip = workspace["expiry_strip"]
-    pcr = summary["pcr"]
-    expected_move = summary["expected_move"]["expected_move"]
-    total_call_oi = base_df[base_df["right"] == "Call"]["open_interest"].sum() if "right" in base_df.columns else 0
-    total_put_oi = base_df[base_df["right"] == "Put"]["open_interest"].sum() if "right" in base_df.columns else 0
-    state = update_option_chain_state(st.session_state, selected_strike=selected_strike)
-    summary_payload = build_option_chain_summary_payload(
+    view_model = build_option_chain_page_view_model(
+        controls,
+        workspace,
+        compare_frames,
+        base_df,
+        selected_strike,
         _spot,
-        atm,
-        pcr,
-        mp,
+        format_expiry_short(expiry),
         dte,
-        expected_move,
-        total_call_oi,
-        total_put_oi,
-        expiry_strip,
     )
+    atm = view_model.metrics.atm
+    state = update_option_chain_state(st.session_state, selected_strike=view_model.display.selected_strike)
     render_option_chain_summary(
-        summary_payload,
+        view_model.metrics.summary_payload,
         controls.chain_opt_pcr_gauge,
         format_number,
         format_expiry_short,
@@ -1676,59 +1656,43 @@ def page_option_chain():
         section("⛓️ Chain Ladder")
         selected_strike = render_option_chain_display(
             controls.view,
-            ddf,
-            ladder,
-            selected_strike,
-            pinned_strikes,
-            atm,
-            mp,
+            view_model.display.display_df,
+            view_model.display.ladder,
+            view_model.display.selected_strike,
+            view_model.display.pinned_strikes,
+            view_model.metrics.atm,
+            view_model.metrics.max_pain,
             all_strikes,
         )
         state = update_option_chain_state(st.session_state, selected_strike=selected_strike)
 
     with analysis_col:
         render_option_chain_analysis(
-            panel_payload,
-            change_df,
-            top_movers,
-            session_iv_extremes,
-            controls.change_window,
+            view_model.analysis_payload["panel_payload"],
+            view_model.analysis_payload["change_df"],
+            view_model.analysis_payload["top_movers"],
+            view_model.analysis_payload["session_iv_extremes"],
+            view_model.analysis_payload["change_window"],
             section,
         )
 
     st.markdown("---")
     section(f"📈 {controls.chart_tab}")
 
-    fig = build_option_chain_chart(
-        controls.chart_tab,
-        ddf,
-        change_df,
-        compare_frames,
-        controls.normalization_mode,
-        _spot,
-        atm,
-        mp,
-        selected_strike,
-        format_expiry_short(expiry),
-        expiry_strip,
-        replay_chart_df,
-        as_of_ts,
-        controls.change_window,
-        gamma_profile,
-        vanna_profile,
-        charm_profile,
-        summary["gamma_walls"],
-    )
+    fig = build_option_chain_chart(**view_model.chart_payload)
     selected_strike = render_option_chain_chart(fig, controls.chart_tab, selected_strike, all_strikes, atm)
     state = update_option_chain_state(st.session_state, selected_strike=selected_strike)
 
-    compare_dataset = build_multi_expiry_dataset(compare_frames, "open_interest", normalization_mode=controls.normalization_mode, spot=_spot)
-    if not compare_dataset.empty and controls.chart_tab in {"Compare OI", "Compare IV Smile"}:
-        st.caption(f"Comparison mode: {controls.normalization_mode}")
+    if view_model.compare_caption:
+        st.caption(view_model.compare_caption)
 
     # ── Export ────────────────────────────────────────────────
-    if not ddf.empty and controls.chain_opt_export:
-        export_to_csv(ddf, f"option_chain_{inst}_{expiry}.csv", label="📥 Export Chain CSV")
+    if view_model.display.export_payload["enabled"]:
+        export_to_csv(
+            view_model.display.display_df,
+            view_model.display.export_payload["filename"],
+            label="📥 Export Chain CSV",
+        )
 
 
 # ═══════════════════════════════════════════════════════════════
