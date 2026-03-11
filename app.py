@@ -30,7 +30,7 @@ from typing import Any, Dict, List, Optional
 
 import app_config as C
 from helpers import (
-    APIResponse, safe_int, safe_float, safe_str, parse_funds,
+    APIResponse, safe_background_gradient, safe_int, safe_float, safe_str, parse_funds,
     detect_position_type, get_closing_action, calculate_pnl, enrich_positions,
     process_option_chain, create_pivot_table,
     calculate_pcr, calculate_max_pain, estimate_atm_strike,
@@ -1778,7 +1778,7 @@ def page_option_chain():
     else:  # Flat
         if chain_opt_oi_heatmap and "OI Change %" in ddf_display.columns:
             st.dataframe(
-                ddf_display.style.background_gradient(subset=["OI Change %"], cmap="RdYlGn"),
+                safe_background_gradient(ddf_display, subset=["OI Change %"], cmap="RdYlGn"),
                 height=600,
                 hide_index=True,
                 use_container_width=True,
@@ -3062,7 +3062,7 @@ def page_analytics():
             corr = portfolio_correlation_matrix(corr_input)
             if not corr.empty:
                 st.markdown("**Symbol Correlation Matrix**")
-                st.dataframe(corr.style.background_gradient(cmap='RdYlGn', axis=None), use_container_width=True)
+                st.dataframe(safe_background_gradient(corr, cmap='RdYlGn', axis=None), use_container_width=True)
         else:
             empty_state("📈", "No P&L history yet", "Trade to build history")
 
@@ -3130,7 +3130,7 @@ def page_analytics():
                 month_heat = daily_plot.pivot_table(index="month", columns="day", values="realized_pnl", aggfunc="sum").fillna(0)
                 if not month_heat.empty:
                     st.markdown("**Monthly P&L Heatmap**")
-                    st.dataframe(month_heat.style.background_gradient(cmap="RdYlGn", axis=None), use_container_width=True)
+                    st.dataframe(safe_background_gradient(month_heat, cmap="RdYlGn", axis=None), use_container_width=True)
 
             inst_col = "stock_code" if "stock_code" in trades_df.columns else ("symbol" if "symbol" in trades_df.columns else None)
             if inst_col:
@@ -3204,7 +3204,7 @@ def page_analytics():
                 st.plotly_chart(fig, use_container_width=True)
                 # Show table of all scenarios
                 stress_df = pd.DataFrame(results)
-                st.dataframe(stress_df.style.background_gradient(cmap='RdYlGn', axis=None),
+                st.dataframe(safe_background_gradient(stress_df, cmap='RdYlGn', axis=None),
                              use_container_width=True)
 
 

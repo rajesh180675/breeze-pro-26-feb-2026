@@ -46,6 +46,15 @@ def safe_str(value: Any, default: str = "") -> str:
     return str(value).strip()
 
 
+def safe_background_gradient(df: pd.DataFrame, **kwargs):
+    """Apply a gradient style when optional matplotlib support is available."""
+    try:
+        return df.style.background_gradient(**kwargs)
+    except (ImportError, ModuleNotFoundError) as exc:
+        log.warning("background gradient unavailable: %s", exc)
+        return df
+
+
 # ═══════════════════════════════════════════════════════════════
 # API RESPONSE PARSER
 # ═══════════════════════════════════════════════════════════════
