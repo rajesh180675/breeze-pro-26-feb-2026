@@ -26,6 +26,20 @@ def _selected_marker(fig: go.Figure, selected_strike: Optional[float]) -> None:
         _marker_annotation(fig, float(selected_strike), "Selected", "#17a2b8")
 
 
+def _replay_timestamp_annotation(fig: go.Figure, replay_timestamp: str) -> None:
+    if replay_timestamp:
+        fig.add_annotation(
+            x=1.0,
+            y=1.08,
+            xref="paper",
+            yref="paper",
+            xanchor="right",
+            text=f"As of {replay_timestamp}",
+            showarrow=False,
+            font={"color": "#6c757d"},
+        )
+
+
 def _comparison_axis(frame: pd.DataFrame, normalization_mode: str, spot: float) -> pd.Series:
     strikes = pd.to_numeric(frame.get("strike_price", pd.Series(dtype=float)), errors="coerce").fillna(0.0)
     mode = str(normalization_mode).lower()
@@ -72,6 +86,43 @@ def build_delta_oi_profile_figure(df: pd.DataFrame, atm: float = 0.0, selected_s
         _marker_annotation(fig, atm, "ATM", "#1f77b4")
     _selected_marker(fig, selected_strike)
     fig.update_layout(title="Delta OI Profile", barmode="group", hovermode="x unified")
+    return fig
+
+
+def build_replay_delta_oi_figure(
+    change_df: pd.DataFrame,
+    atm: float = 0.0,
+    selected_strike: float = 0.0,
+    replay_timestamp: str = "",
+    change_window: str = "Since Open",
+) -> go.Figure:
+    if change_df.empty or not {"strike", "option_type", "open_interest_change"}.issubset(change_df.columns):
+        return _empty_figure("Replay Delta/OI Change", "No replay delta/OI change data")
+    frame = change_df.copy()
+    frame["strike"] = pd.to_numeric(frame["strike"], errors="coerce").fillna(0.0)
+    frame["open_interest_change"] = pd.to_numeric(frame["open_interest_change"], errors="coerce").fillna(0.0)
+    fig = go.Figure()
+    for option_type, label, color in (("CE", "Call ΔOI", "#ff9896"), ("PE", "Put ΔOI", "#98df8a")):
+        side = frame[frame["option_type"] == option_type].sort_values("strike")
+        fig.add_trace(
+            go.Bar(
+                x=side["strike"],
+                y=side["open_interest_change"],
+                name=label,
+                marker_color=color,
+                customdata=side["strike"],
+            )
+        )
+    if atm:
+        _marker_annotation(fig, atm, "ATM", "#1f77b4")
+    _selected_marker(fig, selected_strike)
+    _replay_timestamp_annotation(fig, replay_timestamp)
+    fig.update_layout(
+        title=f"Replay Delta/OI Change ({change_window})",
+        barmode="group",
+        hovermode="x unified",
+        yaxis_title="Open Interest Change",
+    )
     return fig
 
 
@@ -169,7 +220,7 @@ def build_expected_move_figure(expiry_summaries: Iterable[Dict[str, float]], spo
     return fig
 
 
-def build_oi_heatmap_figure(snapshot_df: pd.DataFrame) -> go.Figure:
+def build_oi_heatmap_figure(snapshot_df: pd.DataFrame, replay_timestamp: str = "") -> go.Figure:
     if snapshot_df.empty or not {"snapshot_ts", "strike", "open_interest"}.issubset(snapshot_df.columns):
         return _empty_figure("OI Heatmap", "No intraday snapshots")
     pivot = snapshot_df.pivot_table(index="strike", columns="snapshot_ts", values="open_interest", aggfunc="sum").sort_index()
@@ -182,11 +233,14 @@ def build_oi_heatmap_figure(snapshot_df: pd.DataFrame) -> go.Figure:
             colorbar={"title": "OI"},
         )
     )
+    if replay_timestamp and replay_timestamp in pivot.columns:
+        fig.add_vline(x=replay_timestamp, line_dash="dot", line_color="#17a2b8", opacity=0.9)
+    _replay_timestamp_annotation(fig, replay_timestamp)
     fig.update_layout(title="OI Heatmap", hovermode="closest")
     return fig
 
 
-def build_skew_shift_replay_figure(snapshot_df: pd.DataFrame) -> go.Figure:
+def build_skew_shift_replay_figure(snapshot_df: pd.DataFrame, replay_timestamp: str = "") -> go.Figure:
     if snapshot_df.empty or not {"snapshot_ts", "option_type", "iv"}.issubset(snapshot_df.columns):
         return _empty_figure("Skew Shift Replay", "No replay snapshots")
     grouped = (
@@ -205,6 +259,9 @@ def build_skew_shift_replay_figure(snapshot_df: pd.DataFrame) -> go.Figure:
             name="PE-CE Skew",
         )
     )
+    if replay_timestamp and replay_timestamp in grouped["snapshot_ts"].astype(str).tolist():
+        fig.add_vline(x=replay_timestamp, line_dash="dot", line_color="#17a2b8", opacity=0.9)
+    _replay_timestamp_annotation(fig, replay_timestamp)
     fig.update_layout(title="Skew Shift Replay", hovermode="x unified", yaxis_title="IV Skew")
     return fig
 

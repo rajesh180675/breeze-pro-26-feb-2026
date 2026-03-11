@@ -25,6 +25,7 @@ pytest.importorskip("plotly")
 from option_chain_charts import (
     build_multi_expiry_iv_smile_figure,
     build_multi_expiry_oi_figure,
+    build_replay_delta_oi_figure,
     build_skew_shift_replay_figure,
 )
 from option_chain_service import (
@@ -32,11 +33,13 @@ from option_chain_service import (
     build_multi_expiry_dataset,
     build_window_change_dataset,
     build_option_chain_ladder,
+    compose_option_chain_workspace,
     summarize_alert_commentary_payload,
     enrich_option_chain,
     load_replay_frame,
 )
 from option_chain_workspace import (
+    apply_selected_strike,
     build_replay_delta_oi_frame,
     option_chain_chart_supports_selection,
     resolve_monitored_strike_defaults,
@@ -165,6 +168,61 @@ def test_page_flow_helpers_cover_replay_selection_normalization_and_watchlist_re
     nxt = enrich_option_chain(_fixture("option_chain_expiry_day.json"), "NIFTY", "2099-04-02", 22020, include_greeks=False)
     dataset = build_multi_expiry_dataset({"2099-03-26": front, "2099-04-02": nxt}, "open_interest", normalization_mode="ATM %", spot=22020)
     assert "comparison_axis" in dataset.columns
+
+
+def test_replay_mode_and_normalization_mode_stay_consistent(tmp_path, monkeypatch):
+    db = _fresh_db(tmp_path, monkeypatch)
+    for snapshot_ts, oi_base in (
+        ("2026-03-11T09:15:00", 1000),
+        ("2026-03-11T09:20:00", 1200),
+        ("2026-03-11T09:25:00", 1400),
+    ):
+        db.record_option_chain_intraday_snapshot(
+            instrument="NIFTY",
+            expiry="2026-03-26",
+            trade_date="2026-03-11",
+            snapshot_ts=snapshot_ts,
+            rows=[
+                {"strike_price": 22000, "right": "Call", "ltp": 100, "volume": 500, "open_interest": oi_base, "oi_change": 100, "iv": 0.18},
+                {"strike_price": 22000, "right": "Put", "ltp": 110, "volume": 550, "open_interest": oi_base + 200, "oi_change": 120, "iv": 0.19},
+            ],
+        )
+
+    front = enrich_option_chain(_fixture("option_chain_balanced.json"), "NIFTY", "2099-03-26", 22020, include_greeks=False)
+    nxt = enrich_option_chain(_fixture("option_chain_expiry_day.json"), "NIFTY", "2099-04-02", 22020, include_greeks=False)
+    selected = apply_selected_strike(None, 22100, sorted(front["strike_price"].astype(int).unique().tolist()), 22020)
+    workspace = compose_option_chain_workspace(
+        db,
+        instrument="NIFTY",
+        expiry="2026-03-26",
+        days_to_expiry=7,
+        base_df=front,
+        display_df=front,
+        compare_frames={"2099-03-26": front, "2099-04-02": nxt},
+        replay_timestamps=["2026-03-11T09:15:00", "2026-03-11T09:20:00", "2026-03-11T09:25:00"],
+        replay_ts="2026-03-11T09:20:00",
+        change_window="5m",
+        spot=22020,
+        history_provider=lambda *args, **kwargs: [],
+        monitored_strikes=[22000],
+        selected_strike=selected,
+        include_greeks=False,
+        dte_provider=lambda expiry: 7 if expiry.endswith("26") else 14,
+    )
+    normalized = build_multi_expiry_dataset({"2099-03-26": front, "2099-04-02": nxt}, "open_interest", normalization_mode="ATM %", spot=22020)
+    replay_delta = build_replay_delta_oi_figure(
+        workspace["change_df"],
+        atm=workspace["atm"],
+        selected_strike=float(selected),
+        replay_timestamp=workspace["as_of_ts"],
+        change_window="5m",
+    )
+    ladder = build_option_chain_ladder(front, 22020, pinned_strikes=workspace["pinned_strikes"], selected_strike=selected, sticky_atm=True)
+
+    assert workspace["replay_chart_df"]["snapshot_ts"].max() == "2026-03-11T09:20:00"
+    assert "comparison_axis" in normalized.columns
+    assert replay_delta.layout.title.text == "Replay Delta/OI Change (5m)"
+    assert ladder.iloc[0]["strike"] == 22100
 
 
 def test_alert_and_commentary_page_payload_is_deterministic():

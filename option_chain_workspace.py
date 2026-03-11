@@ -47,6 +47,18 @@ def resolve_selected_strike(
     return allowed[0]
 
 
+def apply_selected_strike(
+    current_selected_strike: Optional[int],
+    candidate_strike: Optional[int],
+    all_strikes: Sequence[int],
+    atm: float,
+) -> Optional[int]:
+    allowed = {int(strike) for strike in all_strikes}
+    if candidate_strike is not None and int(candidate_strike) in allowed:
+        return int(candidate_strike)
+    return resolve_selected_strike(current_selected_strike, all_strikes, atm)
+
+
 def option_chain_chart_supports_selection(chart_tab: str) -> bool:
     return str(chart_tab) in STRIKE_SELECTABLE_CHARTS
 

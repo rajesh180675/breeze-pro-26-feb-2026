@@ -75,6 +75,7 @@ from option_chain_charts import (
     build_multi_expiry_oi_figure,
     build_oi_heatmap_figure,
     build_oi_profile_figure,
+    build_replay_delta_oi_figure,
     build_skew_shift_replay_figure,
     build_term_structure_figure,
     build_vanna_exposure_figure,
@@ -88,6 +89,7 @@ from option_chain_service import (
     build_expiry_strip,
     build_gamma_profile,
     build_option_chain_ladder,
+    compose_option_chain_workspace,
     summarize_alert_commentary_payload,
     build_vanna_profile,
     build_window_change_dataset,
@@ -102,7 +104,7 @@ from option_chain_service import (
 from option_chain_state import ensure_option_chain_state, update_option_chain_state
 from option_chain_utils import process_option_chain
 from option_chain_workspace import (
-    build_replay_delta_oi_frame,
+    apply_selected_strike,
     extract_dataframe_selection_rows,
     extract_plotly_selected_strike,
     option_chain_chart_supports_selection,
@@ -1707,49 +1709,8 @@ def page_option_chain():
                 st.caption(f"Replay snapshot: {replay_ts}")
 
     dte = calculate_days_to_expiry(expiry)
-    summary = summarize_chain(base_df, _spot, dte)
-    atm = summary["atm"]
-    pcr = summary["pcr"]
-    mp = summary["max_pain"]
-    total_call_oi = base_df[base_df["right"] == "Call"]["open_interest"].sum() if "right" in base_df.columns else 0
-    total_put_oi = base_df[base_df["right"] == "Put"]["open_interest"].sum() if "right" in base_df.columns else 0
-    expected_move = summary["expected_move"]["expected_move"]
-
-    expiry_strip = build_expiry_strip(compare_frames, _spot, calculate_days_to_expiry)
-    mc = st.columns(8)
-    mc[0].metric("Spot", f"{_spot:,.0f}" if _spot > 0 else "—")
-    mc[1].metric("ATM", f"{atm:,.0f}")
-    mc[2].metric("PCR", f"{pcr:.2f}", "Bullish" if pcr > 1 else "Bearish")
-    mc[3].metric("Max Pain", f"{mp:,.0f}")
-    mc[4].metric("DTE", str(dte), "⚠️ Expiry Soon!" if dte <= 2 else None,
-                 delta_color="inverse" if dte <= 2 else "normal")
-    mc[5].metric("Expected Move", f"±{expected_move:,.0f}" if expected_move else "—")
-    mc[6].metric("Call OI", format_number(total_call_oi))
-    mc[7].metric("Put OI", format_number(total_put_oi))
-    if chain_opt_pcr_gauge:
-        st.progress(max(0.0, min(pcr / 2.0, 1.0)), text=f"PCR Gauge: {pcr:.2f}")
-
-    if dte <= 0:
-        warn_box("⚠️ <b>Expiry Day!</b> Options expire today. Consider squaring off short positions.")
-
-    if expiry_strip:
-        strip_cols = st.columns(min(len(expiry_strip), 3))
-        for idx, expiry_summary in enumerate(expiry_strip[:3]):
-            strip_cols[idx].metric(
-                f"{format_expiry_short(expiry_summary['expiry'])} ATM IV",
-                f"{expiry_summary['atm_iv'] * 100:.1f}%",
-                f"EM ±{expiry_summary['expected_move']:.0f}",
-            )
-        if len(expiry_strip) >= 2:
-            premium_check = detect_event_premium(expiry_strip[0]["atm_iv"], expiry_strip[1]["atm_iv"])
-            if premium_check["is_elevated"]:
-                st.info(
-                    f"Front expiry IV is elevated vs next expiry by {premium_check['distortion'] * 100:.1f} vol points."
-                )
-
-    st.markdown("---")
-
-    ddf = filter_option_chain(base_df, atm=atm, strikes_per_side=n_strikes, show_all=show_all)
+    provisional_atm = estimate_atm_strike(base_df, spot=_spot)
+    ddf = filter_option_chain(base_df, atm=provisional_atm, strikes_per_side=n_strikes, show_all=show_all)
     all_strikes = sorted(ddf["strike_price"].dropna().astype(int).unique().tolist()) if "strike_price" in ddf.columns else []
     persisted_monitored = _db.get_option_chain_watchlist(inst, expiry)
     default_monitored = resolve_monitored_strike_defaults(state.get("monitored_strikes", []), persisted_monitored, all_strikes)
@@ -1793,77 +1754,86 @@ def page_option_chain():
             log.debug(f"Live WS quote overlay failed: {exc}")
 
     baseline_map = _db.get_volume_baseline_map(inst, lookback_days=5) if chain_opt_volume_spike else {}
-    ddf = enrich_option_chain(
-        ddf,
+    selected_strike = resolve_selected_strike(state.get("selected_strike"), all_strikes, provisional_atm)
+    workspace = compose_option_chain_workspace(
+        _db,
         instrument=inst,
         expiry=expiry,
+        days_to_expiry=dte,
+        base_df=base_df,
+        display_df=ddf,
+        compare_frames=compare_frames,
+        replay_timestamps=replay_timestamps,
+        replay_ts=replay_ts or "",
+        change_window=change_window,
         spot=_spot,
+        baseline_map=baseline_map,
         history_provider=_db.get_iv_history,
-        volume_baseline_map=baseline_map,
+        monitored_strikes=monitor_strikes,
+        selected_strike=selected_strike,
+        sticky_atm=sticky_atm,
+        show_only_liquid=show_only_liquid,
+        show_only_unusual=show_only_unusual,
         include_greeks=show_greeks,
+        include_oi_change_pct=chain_opt_oi_heatmap,
+        include_iv_percentile=chain_opt_iv_percentile,
+        include_max_pain_marker=chain_opt_max_pain_marker,
+        dte_provider=calculate_days_to_expiry,
     )
-    if chain_opt_oi_heatmap and {"open_interest", "oi_change"}.issubset(ddf.columns):
-        oi_base = ddf["open_interest"].replace(0, np.nan)
-        ddf["OI Change %"] = ((ddf["oi_change"] / oi_base) * 100.0).replace([np.inf, -np.inf], np.nan).fillna(0.0)
-    if show_only_liquid and "liquidity_score" in ddf.columns:
-        ddf = ddf[ddf["liquidity_score"] >= 50]
-    if show_only_unusual and "volume_spike" in ddf.columns:
-        ddf = ddf[ddf["volume_spike"]]
-    if chain_opt_iv_percentile and "iv_percentile" in ddf.columns:
-        ddf["IV Percentile"] = ddf["iv_percentile"]
-    if chain_opt_max_pain_marker and "strike_price" in ddf.columns:
-        ddf["Strike"] = ddf["strike_price"].apply(
-            lambda s: f"MP {int(s)}" if safe_float(s) == safe_float(mp) else str(int(s))
-        )
-
-    previous_df = pd.DataFrame()
-    if replay_timestamps:
-        reference_ts = replay_ts or replay_timestamps[-1]
-        previous_ts = next((ts for ts in reversed(replay_timestamps) if ts < reference_ts), None)
-        if previous_ts:
-            previous_df = load_replay_frame(_db, inst, expiry, previous_ts)
-            if not previous_df.empty:
-                previous_df = enrich_option_chain(
-                    previous_df,
-                    instrument=inst,
-                    expiry=expiry,
-                    spot=_spot,
-                    history_provider=_db.get_iv_history,
-                    volume_baseline_map=baseline_map,
-                    include_greeks=False,
-                )
-
-    call_wall = int(ddf[ddf["right"] == "Call"]["open_interest"].astype(float).idxmax()) if not ddf.empty and not ddf[ddf["right"] == "Call"].empty else None
-    put_wall = int(ddf[ddf["right"] == "Put"]["open_interest"].astype(float).idxmax()) if not ddf.empty and not ddf[ddf["right"] == "Put"].empty else None
-    pinned_strikes = [int(atm), int(mp)] if atm and mp else [int(atm)] if atm else []
-    if call_wall is not None and "strike_price" in ddf.columns:
-        pinned_strikes.append(int(float(ddf.loc[call_wall, "strike_price"])))
-    if put_wall is not None and "strike_price" in ddf.columns:
-        pinned_strikes.append(int(float(ddf.loc[put_wall, "strike_price"])))
-    pinned_strikes.extend(monitor_strikes)
-    pinned_strikes = list(dict.fromkeys([strike for strike in pinned_strikes if strike > 0]))
-    selected_strike = resolve_selected_strike(state.get("selected_strike"), all_strikes, atm)
+    ddf = workspace["display_df"]
+    summary = workspace["summary"]
+    atm = workspace["atm"]
+    mp = workspace["max_pain"]
+    pinned_strikes = workspace["pinned_strikes"]
+    ladder = workspace["ladder"]
+    panel_payload = workspace["commentary_payload"]
+    gamma_profile = workspace["gamma_profile"]
+    vanna_profile = workspace["vanna_profile"]
+    charm_profile = workspace["charm_profile"]
+    change_df = workspace["change_df"]
+    top_movers = workspace["top_movers"]
+    session_iv_extremes = workspace["session_iv_extremes"]
+    as_of_ts = workspace["as_of_ts"]
+    replay_chart_df = workspace["replay_chart_df"]
+    expiry_strip = workspace["expiry_strip"]
+    pcr = summary["pcr"]
+    expected_move = summary["expected_move"]["expected_move"]
+    total_call_oi = base_df[base_df["right"] == "Call"]["open_interest"].sum() if "right" in base_df.columns else 0
+    total_put_oi = base_df[base_df["right"] == "Put"]["open_interest"].sum() if "right" in base_df.columns else 0
     state = update_option_chain_state(st.session_state, selected_strike=selected_strike)
 
-    ladder = build_option_chain_ladder(ddf, _spot, pinned_strikes=pinned_strikes, selected_strike=selected_strike, sticky_atm=sticky_atm)
-    as_of_ts = replay_ts or (replay_timestamps[-1] if replay_timestamps else "")
-    alerts = evaluate_alerts(
-        ddf,
-        previous_df=previous_df,
-        spot=_spot,
-        expiry=expiry,
-        monitored_strikes=monitor_strikes,
-        snapshot_ts=as_of_ts,
-    )
-    commentary = build_option_chain_commentary(ddf, alerts, spot=_spot, expiry=expiry)
-    panel_payload = summarize_alert_commentary_payload(alerts, commentary)
-    gamma_profile = build_gamma_profile(ddf)
-    vanna_profile = build_vanna_profile(ddf)
-    charm_profile = build_charm_profile(ddf)
-    change_df = build_window_change_dataset(_db, inst, expiry, as_of_ts=as_of_ts, change_window=change_window) if as_of_ts else pd.DataFrame()
-    delta_chart_df = build_replay_delta_oi_frame(change_df, ddf)
-    top_movers = build_top_movers(change_df)
-    session_iv_extremes = build_session_iv_extremes(_db, inst, expiry, trade_date=(as_of_ts[:10] if as_of_ts else date.today().isoformat()))
+    mc = st.columns(8)
+    mc[0].metric("Spot", f"{_spot:,.0f}" if _spot > 0 else "—")
+    mc[1].metric("ATM", f"{atm:,.0f}")
+    mc[2].metric("PCR", f"{pcr:.2f}", "Bullish" if pcr > 1 else "Bearish")
+    mc[3].metric("Max Pain", f"{mp:,.0f}")
+    mc[4].metric("DTE", str(dte), "⚠️ Expiry Soon!" if dte <= 2 else None,
+                 delta_color="inverse" if dte <= 2 else "normal")
+    mc[5].metric("Expected Move", f"±{expected_move:,.0f}" if expected_move else "—")
+    mc[6].metric("Call OI", format_number(total_call_oi))
+    mc[7].metric("Put OI", format_number(total_put_oi))
+    if chain_opt_pcr_gauge:
+        st.progress(max(0.0, min(pcr / 2.0, 1.0)), text=f"PCR Gauge: {pcr:.2f}")
+
+    if dte <= 0:
+        warn_box("⚠️ <b>Expiry Day!</b> Options expire today. Consider squaring off short positions.")
+
+    if expiry_strip:
+        strip_cols = st.columns(min(len(expiry_strip), 3))
+        for idx, expiry_summary in enumerate(expiry_strip[:3]):
+            strip_cols[idx].metric(
+                f"{format_expiry_short(expiry_summary['expiry'])} ATM IV",
+                f"{expiry_summary['atm_iv'] * 100:.1f}%",
+                f"EM ±{expiry_summary['expected_move']:.0f}",
+            )
+        if len(expiry_strip) >= 2:
+            premium_check = detect_event_premium(expiry_strip[0]["atm_iv"], expiry_strip[1]["atm_iv"])
+            if premium_check["is_elevated"]:
+                st.info(
+                    f"Front expiry IV is elevated vs next expiry by {premium_check['distortion'] * 100:.1f} vol points."
+                )
+
+    st.markdown("---")
 
     display_col, analysis_col = st.columns([3, 2])
     with display_col:
@@ -1882,11 +1852,16 @@ def page_option_chain():
                     on_select="rerun",
                     selection_mode="single-row",
                 )
-                selected_rows = _extract_dataframe_selection_rows(ladder_selection)
+                selected_rows = extract_dataframe_selection_rows(ladder_selection)
                 if selected_rows:
                     selected_idx = selected_rows[0]
                     if 0 <= selected_idx < len(ladder):
-                        selected_strike = int(ladder.iloc[selected_idx]["strike"])
+                        selected_strike = apply_selected_strike(
+                            selected_strike,
+                            int(ladder.iloc[selected_idx]["strike"]),
+                            all_strikes,
+                            atm,
+                        )
                         state = update_option_chain_state(st.session_state, selected_strike=selected_strike)
         elif view == "Calls Only":
             calls_df = ddf[ddf["right"] == "Call"].copy()
@@ -1942,7 +1917,13 @@ def page_option_chain():
     if chart_tab == "OI Profile":
         fig = build_oi_profile_figure(ddf, atm=atm, max_pain=mp, selected_strike=float(selected_strike or 0))
     elif chart_tab == "Delta OI":
-        fig = build_delta_oi_profile_figure(delta_chart_df, atm=atm, selected_strike=float(selected_strike or 0))
+        fig = build_replay_delta_oi_figure(
+            change_df,
+            atm=atm,
+            selected_strike=float(selected_strike or 0),
+            replay_timestamp=as_of_ts,
+            change_window=change_window,
+        )
     elif chart_tab == "IV Smile":
         fig = build_iv_smile_figure(ddf, atm=atm, selected_expiry=format_expiry_short(expiry), selected_strike=float(selected_strike or 0))
     elif chart_tab == "Compare OI":
@@ -1954,11 +1935,9 @@ def page_option_chain():
     elif chart_tab == "Expected Move":
         fig = build_expected_move_figure(expiry_strip, _spot)
     elif chart_tab == "OI Heatmap":
-        heatmap_df = pd.DataFrame(_db.get_option_chain_intraday_snapshots(inst, expiry=expiry, trade_date=date.today().isoformat(), limit=5000))
-        fig = build_oi_heatmap_figure(heatmap_df)
+        fig = build_oi_heatmap_figure(replay_chart_df, replay_timestamp=as_of_ts)
     elif chart_tab == "Skew Replay":
-        replay_chart_df = pd.DataFrame(_db.get_option_chain_intraday_snapshots(inst, expiry=expiry, trade_date=(as_of_ts[:10] if as_of_ts else date.today().isoformat()), limit=5000))
-        fig = build_skew_shift_replay_figure(replay_chart_df)
+        fig = build_skew_shift_replay_figure(replay_chart_df, replay_timestamp=as_of_ts)
     elif chart_tab == "Gamma":
         fig = build_gamma_exposure_figure(gamma_profile, walls=summary["gamma_walls"], selected_strike=float(selected_strike or 0))
     elif chart_tab == "Vanna":
@@ -1972,9 +1951,9 @@ def page_option_chain():
         on_select = "rerun" if option_chain_chart_supports_selection(chart_tab) else "ignore"
         plotly_selection = st.plotly_chart(fig, use_container_width=True, key="oc_chain_chart", on_select=on_select, selection_mode=selection_mode, config={"displaylogo": False})
         if option_chain_chart_supports_selection(chart_tab):
-            plotted_strike = _extract_plotly_selected_strike(plotly_selection)
-            if plotted_strike in all_strikes:
-                state = update_option_chain_state(st.session_state, selected_strike=plotted_strike)
+            plotted_strike = extract_plotly_selected_strike(plotly_selection)
+            selected_strike = apply_selected_strike(selected_strike, plotted_strike, all_strikes, atm)
+            state = update_option_chain_state(st.session_state, selected_strike=selected_strike)
 
     compare_dataset = build_multi_expiry_dataset(compare_frames, "open_interest", normalization_mode=normalization_mode, spot=_spot)
     if not compare_dataset.empty and chart_tab in {"Compare OI", "Compare IV Smile"}:

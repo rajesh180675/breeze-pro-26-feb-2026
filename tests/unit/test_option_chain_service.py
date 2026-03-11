@@ -11,6 +11,8 @@ from option_chain_service import (
     build_gamma_profile,
     build_multi_expiry_dataset,
     build_option_chain_ladder,
+    compose_option_chain_workspace,
+    load_intraday_snapshot_frame,
     build_session_iv_extremes,
     build_top_movers,
     build_vanna_profile,
@@ -20,6 +22,7 @@ from option_chain_service import (
     merge_live_overlay,
     summarize_chain,
 )
+from option_chain_workspace import apply_selected_strike
 
 
 def _fixture(name: str) -> pd.DataFrame:
@@ -157,3 +160,93 @@ def test_multi_expiry_dataset_supports_normalization_modes():
     assert "comparison_axis" in normalized.columns
     assert absolute["comparison_axis"].equals(absolute["strike_price"]) is True
     assert normalized["comparison_axis"].abs().max() <= 500
+
+
+def test_chart_selected_strike_reorders_ladder_and_marks_selection():
+    df = enrich_option_chain(_fixture("option_chain_balanced.json"), "NIFTY", "2026-03-26", 22020, include_greeks=False)
+    all_strikes = sorted(df["strike_price"].dropna().astype(int).unique().tolist())
+    selected = apply_selected_strike(22000, 22100, all_strikes, 22020)
+    ladder = build_option_chain_ladder(df, 22020, pinned_strikes=[22000], selected_strike=selected, sticky_atm=True)
+    assert selected == 22100
+    assert ladder.iloc[0]["strike"] == 22100
+    assert int(ladder.loc[ladder["strike"] == 22100, "is_selected"].iloc[0]) == 1
+
+
+def test_workspace_composer_limits_replay_history_to_selected_timestamp():
+    class FakeDB:
+        def get_option_chain_window_comparison(self, *args, **kwargs):
+            return [
+                {
+                    "strike": 22000,
+                    "option_type": "CE",
+                    "current_ltp": 120,
+                    "baseline_ltp": 100,
+                    "current_bid": 119,
+                    "baseline_bid": 99,
+                    "current_ask": 123,
+                    "baseline_ask": 101,
+                    "current_volume": 2500,
+                    "baseline_volume": 1800,
+                    "current_open_interest": 20000,
+                    "baseline_open_interest": 18000,
+                    "current_iv": 0.2,
+                    "baseline_iv": 0.18,
+                }
+            ]
+
+        def get_option_chain_intraday_snapshots(self, *args, **kwargs):
+            return [
+                {"snapshot_ts": "2026-03-11T09:15:00", "strike": 22000, "option_type": "CE", "iv": 0.18, "open_interest": 1000},
+                {"snapshot_ts": "2026-03-11T09:20:00", "strike": 22000, "option_type": "PE", "iv": 0.2, "open_interest": 1100},
+                {"snapshot_ts": "2026-03-11T09:25:00", "strike": 22100, "option_type": "CE", "iv": 0.19, "open_interest": 1200},
+            ]
+
+        def get_option_chain_snapshot_at_or_before(self, *args, **kwargs):
+            return []
+
+        def get_iv_history(self, *args, **kwargs):
+            return []
+
+    base_df = _fixture("option_chain_balanced.json")
+    display_df = filter_option_chain(base_df, atm=22000, strikes_per_side=1, show_all=False)
+    workspace = compose_option_chain_workspace(
+        FakeDB(),
+        instrument="NIFTY",
+        expiry="2026-03-26",
+        days_to_expiry=7,
+        base_df=base_df,
+        display_df=display_df,
+        compare_frames={"2026-03-26": base_df},
+        replay_timestamps=["2026-03-11T09:15:00", "2026-03-11T09:20:00", "2026-03-11T09:25:00"],
+        replay_ts="2026-03-11T09:20:00",
+        change_window="5m",
+        spot=22020,
+        history_provider=lambda *args, **kwargs: [],
+        monitored_strikes=[22000],
+        selected_strike=22000,
+        include_greeks=False,
+        include_oi_change_pct=True,
+        dte_provider=lambda expiry: 7,
+    )
+    replay_chart_df = workspace["replay_chart_df"]
+    assert replay_chart_df["snapshot_ts"].max() == "2026-03-11T09:20:00"
+    assert "OI Change %" in workspace["display_df"].columns
+
+
+def test_load_intraday_snapshot_frame_filters_future_rows():
+    class FakeDB:
+        def get_option_chain_intraday_snapshots(self, *args, **kwargs):
+            return [
+                {"snapshot_ts": "2026-03-11T09:15:00", "strike": 22000, "open_interest": 1000},
+                {"snapshot_ts": "2026-03-11T09:20:00", "strike": 22000, "open_interest": 1100},
+                {"snapshot_ts": "2026-03-11T09:25:00", "strike": 22000, "open_interest": 1200},
+            ]
+
+    frame = load_intraday_snapshot_frame(
+        FakeDB(),
+        "NIFTY",
+        "2026-03-26",
+        "2026-03-11",
+        as_of_ts="2026-03-11T09:20:00",
+    )
+    assert frame["snapshot_ts"].tolist() == ["2026-03-11T09:15:00", "2026-03-11T09:20:00"]

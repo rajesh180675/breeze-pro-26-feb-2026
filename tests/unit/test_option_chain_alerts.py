@@ -47,3 +47,28 @@ def test_alerts_detect_skew_steepening_and_monitored_volume():
     assert "unusual_volume" in codes
     assert "pinned_strike_volume" in codes
     assert "spread_blowout" in codes
+
+
+def test_alerts_cover_combined_session_flow_wall_shift_spread_and_pinned_volume():
+    previous_df = enrich_option_chain(_fixture("option_chain_balanced.json"), "NIFTY", "2026-03-26", 22020, include_greeks=False)
+    current_df = enrich_option_chain(_fixture("option_chain_balanced.json"), "NIFTY", "2026-03-26", 22020, include_greeks=False)
+    current_df.loc[(current_df["strike_price"] == 22100) & (current_df["right"] == "Call"), "open_interest"] = 50000
+    current_df.loc[(current_df["strike_price"] == 21900) & (current_df["right"] == "Put"), "open_interest"] = 52000
+    current_df.loc[current_df["strike_price"] == 22000, "spread_pct"] = 6.8
+    current_df.loc[current_df["strike_price"] == 22000, "avg_volume"] = 1000
+    current_df.loc[current_df["strike_price"] == 22000, "volume"] = 4200
+
+    alerts = evaluate_alerts(
+        current_df,
+        previous_df=previous_df,
+        spot=22020,
+        expiry="2026-03-26",
+        monitored_strikes=[22000],
+        snapshot_ts="2026-03-11T09:30:00",
+    )
+    codes = {alert["code"] for alert in alerts}
+    assert "call_wall_shift" in codes
+    assert "put_wall_shift" in codes
+    assert "spread_blowout" in codes
+    assert "pinned_strike_volume" in codes
+    assert "unusual_volume" in codes

@@ -17,6 +17,7 @@ from option_chain_charts import (
     build_multi_expiry_oi_figure,
     build_oi_heatmap_figure,
     build_oi_profile_figure,
+    build_replay_delta_oi_figure,
     build_skew_shift_replay_figure,
     build_term_structure_figure,
     build_vanna_exposure_figure,
@@ -60,11 +61,12 @@ def test_term_structure_heatmap_and_gamma_figures_render():
     )
     gamma_profile = build_gamma_profile(enrich_option_chain(_fixture("option_chain_call_wall_trend.json"), "NIFTY", "2026-03-26", 22100, include_greeks=False))
     gamma_fig = build_gamma_exposure_figure(gamma_profile, walls=[{"strike": 22200, "net_gamma": 1.0}])
-    heatmap_fig = build_oi_heatmap_figure(heatmap_df)
+    heatmap_fig = build_oi_heatmap_figure(heatmap_df, replay_timestamp="2026-03-11T09:16:00")
     assert len(term_fig.data) == 1
     assert len(exp_fig.data) == 1
     assert len(gamma_fig.data) == 1
     assert len(heatmap_fig.data) == 1
+    assert len(heatmap_fig.layout.shapes) == 1
 
 
 def test_multi_expiry_and_skew_replay_figures_render():
@@ -80,12 +82,32 @@ def test_multi_expiry_and_skew_replay_figures_render():
             {"snapshot_ts": "2026-03-11T09:20:00", "option_type": "PE", "iv": 0.22},
         ]
     )
-    skew_fig = build_skew_shift_replay_figure(replay_df)
+    skew_fig = build_skew_shift_replay_figure(replay_df, replay_timestamp="2026-03-11T09:20:00")
     assert len(oi_fig.data) == 2
     assert len(iv_fig.data) == 2
     assert len(skew_fig.data) == 1
     assert oi_fig.layout.xaxis.title.text == "ATM Offset"
     assert iv_fig.layout.xaxis.title.text == "ATM %"
+    assert len(skew_fig.layout.shapes) == 1
+
+
+def test_replay_delta_oi_figure_renders_timestamp_context():
+    change_df = pd.DataFrame(
+        [
+            {"strike": 22000, "option_type": "CE", "open_interest_change": 1000},
+            {"strike": 22000, "option_type": "PE", "open_interest_change": -600},
+        ]
+    )
+    fig = build_replay_delta_oi_figure(
+        change_df,
+        atm=22000,
+        selected_strike=22000,
+        replay_timestamp="2026-03-11T09:20:00",
+        change_window="15m",
+    )
+    assert len(fig.data) == 2
+    assert fig.layout.title.text == "Replay Delta/OI Change (15m)"
+    assert any("As of 2026-03-11T09:20:00" in annotation.text for annotation in fig.layout.annotations)
 
 
 def test_vanna_and_charm_figures_render():

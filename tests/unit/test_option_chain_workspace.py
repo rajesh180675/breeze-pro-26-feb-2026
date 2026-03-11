@@ -2,6 +2,7 @@ import pandas as pd
 
 from option_chain_workspace import (
     STRIKE_SELECTABLE_CHARTS,
+    apply_selected_strike,
     build_replay_delta_oi_frame,
     option_chain_chart_supports_selection,
     resolve_monitored_strike_defaults,
@@ -23,6 +24,11 @@ def test_chart_selection_only_enabled_for_strike_charts():
     assert option_chain_chart_supports_selection("OI Profile") is True
     assert option_chain_chart_supports_selection("Expected Move") is False
     assert option_chain_chart_supports_selection("Liquidity") is False
+
+
+def test_selected_strike_persists_without_new_candidate():
+    assert apply_selected_strike(22100, None, [21900, 22000, 22100], 22020) == 22100
+    assert apply_selected_strike(None, 22100, [21900, 22000, 22100], 22020) == 22100
 
 
 def test_replay_delta_view_prefers_window_change_dataset():

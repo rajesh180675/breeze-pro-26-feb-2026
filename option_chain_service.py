@@ -10,6 +10,7 @@ import pandas as pd
 
 import app_config as C
 from helpers import add_greeks_to_chain, safe_float
+from option_chain_alerts import build_commentary, evaluate_alerts
 from option_chain_metrics import (
     build_expiry_summary,
     calculate_expected_move,
@@ -112,23 +113,31 @@ def enrich_option_chain(
     if df.empty:
         return df.copy()
     out = df.copy()
+
+    def _numeric_column(name: str, default: float = 0.0) -> pd.Series:
+        if name in out.columns:
+            return pd.to_numeric(out[name], errors="coerce").fillna(default)
+        return pd.Series(default, index=out.index, dtype=float)
+
     if include_greeks and spot > 0:
         out = add_greeks_to_chain(out, spot, expiry)
-    out["iv_numeric"] = pd.to_numeric(out.get("iv", 0), errors="coerce").fillna(0).map(normalize_iv)
-    out["bid"] = pd.to_numeric(out.get("best_bid_price", 0), errors="coerce").fillna(0)
-    out["ask"] = pd.to_numeric(out.get("best_offer_price", 0), errors="coerce").fillna(0)
+    out["iv_numeric"] = _numeric_column("iv").map(normalize_iv)
+    out["bid"] = _numeric_column("best_bid_price")
+    out["ask"] = _numeric_column("best_offer_price")
     out["spread"] = (out["ask"] - out["bid"]).clip(lower=0)
     mid = ((out["ask"] + out["bid"]) / 2.0).replace(0, np.nan)
-    out["mid_price"] = mid.fillna(pd.to_numeric(out.get("ltp", 0), errors="coerce").fillna(0))
+    out["mid_price"] = mid.fillna(_numeric_column("ltp"))
     out["spread_pct"] = np.where(out["mid_price"] > 0, (out["spread"] / out["mid_price"]) * 100.0, 0.0)
-    qty_total = pd.to_numeric(out.get("bid_qty", 0), errors="coerce").fillna(0) + pd.to_numeric(out.get("offer_qty", 0), errors="coerce").fillna(0)
-    out["bid_ask_imbalance"] = np.where(qty_total > 0, (pd.to_numeric(out.get("bid_qty", 0), errors="coerce").fillna(0) - pd.to_numeric(out.get("offer_qty", 0), errors="coerce").fillna(0)) / qty_total, 0.0)
-    out["distance_from_spot"] = pd.to_numeric(out.get("strike_price", 0), errors="coerce").fillna(0) - float(spot or 0)
-    out["notional_oi"] = pd.to_numeric(out.get("open_interest", 0), errors="coerce").fillna(0) * out["mid_price"]
-    out["ltp_change"] = pd.to_numeric(out.get("ltp", 0), errors="coerce").fillna(0) - pd.to_numeric(out.get("close", 0), errors="coerce").fillna(0)
+    bid_qty = _numeric_column("bid_qty")
+    offer_qty = _numeric_column("offer_qty")
+    qty_total = bid_qty + offer_qty
+    out["bid_ask_imbalance"] = np.where(qty_total > 0, (bid_qty - offer_qty) / qty_total, 0.0)
+    out["distance_from_spot"] = _numeric_column("strike_price") - float(spot or 0)
+    out["notional_oi"] = _numeric_column("open_interest") * out["mid_price"]
+    out["ltp_change"] = _numeric_column("ltp") - _numeric_column("close")
     out["oi_buildup"] = [
         classify_oi_buildup(float(ltp_change), float(oi_change))
-        for ltp_change, oi_change in zip(out["ltp_change"], pd.to_numeric(out.get("oi_change", 0), errors="coerce").fillna(0))
+        for ltp_change, oi_change in zip(out["ltp_change"], _numeric_column("oi_change"))
     ]
     iv_percentiles: List[float] = []
     iv_zscores: List[float] = []
@@ -151,12 +160,12 @@ def enrich_option_chain(
     out["iv_percentile"] = iv_percentiles
     out["iv_zscore"] = iv_zscores
     out["avg_volume"] = avg_volumes
-    out["volume_spike"] = np.where(pd.to_numeric(out.get("volume", 0), errors="coerce").fillna(0) > (pd.Series(avg_volumes).replace(0, np.nan) * 3), True, False)
+    out["volume_spike"] = np.where(_numeric_column("volume") > (pd.Series(avg_volumes).replace(0, np.nan) * 3), True, False)
     out["liquidity_score"] = liquidity_scores
     out["vanna"] = vannas
     out["charm"] = charms
-    out["net_vanna"] = pd.to_numeric(out.get("vanna", 0), errors="coerce").fillna(0.0) * pd.to_numeric(out.get("open_interest", 0), errors="coerce").fillna(0.0)
-    out["net_charm"] = pd.to_numeric(out.get("charm", 0), errors="coerce").fillna(0.0) * pd.to_numeric(out.get("open_interest", 0), errors="coerce").fillna(0.0)
+    out["net_vanna"] = _numeric_column("vanna") * _numeric_column("open_interest")
+    out["net_charm"] = _numeric_column("charm") * _numeric_column("open_interest")
     return out
 
 
@@ -302,6 +311,26 @@ def load_replay_frame(db: Any, instrument: str, expiry: str, replay_ts: str) -> 
     return pd.DataFrame(rows)
 
 
+def load_intraday_snapshot_frame(
+    db: Any,
+    instrument: str,
+    expiry: str,
+    trade_date: str,
+    limit: int = 5000,
+    as_of_ts: str = "",
+) -> pd.DataFrame:
+    rows = db.get_option_chain_intraday_snapshots(
+        instrument,
+        expiry=expiry,
+        trade_date=trade_date,
+        limit=limit,
+    )
+    frame = pd.DataFrame(rows)
+    if frame.empty or not as_of_ts or "snapshot_ts" not in frame.columns:
+        return frame
+    return frame[frame["snapshot_ts"].astype(str) <= str(as_of_ts)].copy()
+
+
 def build_window_change_dataset(
     db: Any,
     instrument: str,
@@ -357,6 +386,153 @@ def build_top_movers(change_df: pd.DataFrame, top_n: int = 5) -> Dict[str, pd.Da
         "volume_burst": ordered.sort_values("volume_change", ascending=False).head(top_n),
         "iv_shift": ordered.sort_values("iv_change", ascending=False).head(top_n),
         "spread_widening": ordered.sort_values("spread_change", ascending=False).head(top_n),
+    }
+
+
+def compose_option_chain_workspace(
+    db: Any,
+    instrument: str,
+    expiry: str,
+    days_to_expiry: int,
+    base_df: pd.DataFrame,
+    display_df: pd.DataFrame,
+    compare_frames: Dict[str, pd.DataFrame],
+    replay_timestamps: List[str],
+    replay_ts: str,
+    change_window: str,
+    spot: float,
+    baseline_map: Optional[Dict[Any, float]] = None,
+    history_provider: Optional[Any] = None,
+    monitored_strikes: Optional[Iterable[int]] = None,
+    selected_strike: Optional[int] = None,
+    sticky_atm: bool = True,
+    show_only_liquid: bool = False,
+    show_only_unusual: bool = False,
+    include_greeks: bool = True,
+    include_oi_change_pct: bool = False,
+    include_iv_percentile: bool = False,
+    include_max_pain_marker: bool = False,
+    dte_provider: Optional[Any] = None,
+) -> Dict[str, Any]:
+    summary = summarize_chain(base_df, spot, days_to_expiry)
+    atm = summary["atm"]
+    max_pain = summary["max_pain"]
+    expiry_strip = build_expiry_strip(compare_frames, spot, dte_provider or (lambda exp: 0))
+
+    ddf = enrich_option_chain(
+        display_df,
+        instrument=instrument,
+        expiry=expiry,
+        spot=spot,
+        history_provider=history_provider,
+        volume_baseline_map=baseline_map,
+        include_greeks=include_greeks,
+    )
+    if include_oi_change_pct and {"open_interest", "oi_change"}.issubset(ddf.columns):
+        oi_base = ddf["open_interest"].replace(0, np.nan)
+        ddf["OI Change %"] = ((ddf["oi_change"] / oi_base) * 100.0).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    if show_only_liquid and "liquidity_score" in ddf.columns:
+        ddf = ddf[ddf["liquidity_score"] >= 50].copy()
+    if show_only_unusual and "volume_spike" in ddf.columns:
+        ddf = ddf[ddf["volume_spike"]].copy()
+    if include_iv_percentile and "iv_percentile" in ddf.columns:
+        ddf["IV Percentile"] = ddf["iv_percentile"]
+    if include_max_pain_marker and "strike_price" in ddf.columns:
+        ddf["Strike"] = ddf["strike_price"].apply(
+            lambda strike: f"MP {int(strike)}" if safe_float(strike) == safe_float(max_pain) else str(int(strike))
+        )
+
+    previous_df = pd.DataFrame()
+    if replay_timestamps:
+        reference_ts = replay_ts or replay_timestamps[-1]
+        previous_ts = next((ts for ts in reversed(replay_timestamps) if ts < reference_ts), None)
+        if previous_ts:
+            previous_df = load_replay_frame(db, instrument, expiry, previous_ts)
+            if not previous_df.empty:
+                previous_df = enrich_option_chain(
+                    previous_df,
+                    instrument=instrument,
+                    expiry=expiry,
+                    spot=spot,
+                    history_provider=history_provider,
+                    volume_baseline_map=baseline_map,
+                    include_greeks=False,
+                )
+
+    call_wall = None
+    put_wall = None
+    if not ddf.empty and "right" in ddf.columns and "open_interest" in ddf.columns:
+        call_side = ddf[ddf["right"] == "Call"]
+        put_side = ddf[ddf["right"] == "Put"]
+        if not call_side.empty:
+            call_wall = int(float(call_side.loc[call_side["open_interest"].astype(float).idxmax(), "strike_price"]))
+        if not put_side.empty:
+            put_wall = int(float(put_side.loc[put_side["open_interest"].astype(float).idxmax(), "strike_price"]))
+
+    pinned_strikes = [int(strike) for strike in monitored_strikes or [] if int(strike) > 0]
+    if atm:
+        pinned_strikes.insert(0, int(atm))
+    if max_pain:
+        pinned_strikes.insert(1 if pinned_strikes else 0, int(max_pain))
+    if call_wall:
+        pinned_strikes.append(call_wall)
+    if put_wall:
+        pinned_strikes.append(put_wall)
+    pinned_strikes = list(dict.fromkeys(pinned_strikes))
+
+    ladder = build_option_chain_ladder(
+        ddf,
+        spot,
+        pinned_strikes=pinned_strikes,
+        selected_strike=selected_strike,
+        sticky_atm=sticky_atm,
+    )
+    as_of_ts = replay_ts or (replay_timestamps[-1] if replay_timestamps else "")
+    alerts = evaluate_alerts(
+        ddf,
+        previous_df=previous_df,
+        spot=spot,
+        expiry=expiry,
+        monitored_strikes=list(monitored_strikes or []),
+        snapshot_ts=as_of_ts,
+    )
+    commentary = build_commentary(ddf, alerts, spot=spot, expiry=expiry)
+    change_df = build_window_change_dataset(
+        db,
+        instrument,
+        expiry,
+        as_of_ts=as_of_ts,
+        change_window=change_window,
+    ) if as_of_ts else pd.DataFrame()
+    trade_date = as_of_ts[:10] if as_of_ts else datetime.now(timezone.utc).date().isoformat()
+    replay_chart_df = load_intraday_snapshot_frame(
+        db,
+        instrument,
+        expiry,
+        trade_date=trade_date,
+        limit=5000,
+        as_of_ts=as_of_ts,
+    )
+    session_iv_extremes = build_session_iv_extremes(db, instrument, expiry, trade_date=trade_date)
+    return {
+        "summary": summary,
+        "atm": atm,
+        "max_pain": max_pain,
+        "pinned_strikes": pinned_strikes,
+        "display_df": ddf,
+        "previous_df": previous_df,
+        "ladder": ladder,
+        "alerts": alerts,
+        "commentary_payload": summarize_alert_commentary_payload(alerts, commentary),
+        "gamma_profile": build_gamma_profile(ddf),
+        "vanna_profile": build_vanna_profile(ddf),
+        "charm_profile": build_charm_profile(ddf),
+        "change_df": change_df,
+        "top_movers": build_top_movers(change_df),
+        "session_iv_extremes": session_iv_extremes,
+        "as_of_ts": as_of_ts,
+        "replay_chart_df": replay_chart_df,
+        "expiry_strip": expiry_strip,
     }
 
 
