@@ -42,8 +42,8 @@ ignore_missing_imports = true
 strict_optional = true
 warn_return_any = false
 warn_unused_ignores = false
-# Only type-check the production app package
-files = ["app/lib/"]
+# Type-check the production package rather than only legacy compatibility shims.
+files = ["app/"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

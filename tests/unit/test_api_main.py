@@ -1,8 +1,9 @@
 import sqlite3
 
+from fastapi.testclient import TestClient
 from fastapi import HTTPException
 
-from app.api.main import _readiness_status, healthz, ready, version
+from app.api.main import _readiness_status, app, create_app, healthz, ready, version
 from app.lib.config import get_settings
 
 
@@ -14,6 +15,24 @@ def _set_required_env(monkeypatch):
 
 def test_healthz_ok():
     assert healthz() == {"status": "ok"}
+
+
+def test_create_app_exposes_system_routes():
+    created = create_app()
+    client = TestClient(created)
+
+    response = client.get("/healthz")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
+def test_module_level_app_uses_factory():
+    client = TestClient(app)
+
+    response = client.get("/healthz")
+
+    assert response.status_code == 200
 
 
 def test_version_happy_path(monkeypatch):
