@@ -303,6 +303,134 @@ SIDEBAR_HIDDEN_CSS = """
 </style>
 """
 
+STARTUP_SCREEN_CSS = """
+<style>
+.startup-hero {
+  background: linear-gradient(135deg, rgba(15, 23, 42, 0.96), rgba(8, 47, 73, 0.92));
+  border: 1px solid rgba(34, 211, 238, 0.18);
+  border-radius: 18px;
+  padding: 1.5rem;
+  margin-bottom: 1.25rem;
+  box-shadow: 0 20px 50px rgba(2, 6, 23, 0.35);
+}
+.startup-kicker {
+  color: #67e8f9;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  margin-bottom: 0.65rem;
+}
+.startup-title {
+  color: #f8fafc;
+  font-size: 2rem;
+  font-weight: 800;
+  line-height: 1.1;
+  margin-bottom: 0.55rem;
+}
+.startup-subtitle {
+  color: rgba(226, 232, 240, 0.84);
+  font-size: 1rem;
+  max-width: 50rem;
+}
+.startup-badge-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  margin-top: 1rem;
+}
+.startup-badge {
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  background: rgba(15, 23, 42, 0.42);
+  color: #e2e8f0;
+  border-radius: 999px;
+  padding: 0.4rem 0.8rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+.startup-status-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.85rem;
+  margin-bottom: 1rem;
+}
+.startup-status-card {
+  border-radius: 14px;
+  padding: 0.95rem 1rem;
+  min-height: 7rem;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  background: rgba(15, 23, 42, 0.82);
+}
+.startup-status-card.ok { border-color: rgba(34, 197, 94, 0.35); }
+.startup-status-card.warn { border-color: rgba(245, 158, 11, 0.35); }
+.startup-status-card.danger { border-color: rgba(248, 113, 113, 0.35); }
+.startup-status-label {
+  color: #94a3b8;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 0.55rem;
+}
+.startup-status-value {
+  color: #f8fafc;
+  font-size: 1.05rem;
+  font-weight: 700;
+  margin-bottom: 0.35rem;
+}
+.startup-status-detail {
+  color: rgba(226, 232, 240, 0.7);
+  font-size: 0.88rem;
+  line-height: 1.35;
+}
+.startup-preview-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.85rem;
+  margin-top: 0.65rem;
+}
+.startup-preview-card {
+  background: rgba(248, 250, 252, 0.04);
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 14px;
+  padding: 1rem;
+}
+.startup-preview-title {
+  color: #f8fafc;
+  font-size: 1rem;
+  font-weight: 700;
+  margin-bottom: 0.35rem;
+}
+.startup-preview-copy {
+  color: rgba(226, 232, 240, 0.72);
+  font-size: 0.9rem;
+  line-height: 1.4;
+}
+.startup-side-note {
+  color: rgba(226, 232, 240, 0.78);
+  font-size: 0.92rem;
+  line-height: 1.5;
+  padding: 1rem;
+  border-radius: 14px;
+  background: rgba(15, 23, 42, 0.62);
+  border: 1px solid rgba(148, 163, 184, 0.14);
+}
+.startup-shortcuts {
+  color: #94a3b8;
+  font-size: 0.84rem;
+  margin-top: 0.85rem;
+}
+@media (max-width: 900px) {
+  .startup-status-grid,
+  .startup-preview-grid {
+    grid-template-columns: 1fr;
+  }
+  .startup-title {
+    font-size: 1.65rem;
+  }
+}
+</style>
+"""
+
 st.markdown(THEME_CSS, unsafe_allow_html=True)
 
 # ═══════════════════════════════════════════════════════════════
@@ -1184,7 +1312,8 @@ def render_sidebar():
                 st.rerun()
 
         else:
-            _render_login_form(has_secrets)
+            st.caption("Connect from the startup screen in the main workspace.")
+            st.caption("The left menu is now navigation-only before login.")
 
         st.markdown("---")
         with st.expander("⚙️ Quick Settings"):
@@ -1197,10 +1326,9 @@ def render_sidebar():
                 if k:
                     st.caption(f"API: {k[:4]}...{k[-4:]}")
 
-
-
-def _render_login_form(has_secrets: bool):
+def _get_login_profile_context() -> Dict[str, Any]:
     profile_db = AccountProfileDB(_db)
+    profiles = profile_db.get_profiles()
     active_profile = profile_db.get_active_profile()
     decrypted_active = None
     if active_profile and st.session_state.get("master_password"):
@@ -1212,25 +1340,65 @@ def _render_login_form(has_secrets: bool):
                     break
         except Exception:
             decrypted_active = None
-    if active_profile:
+    return {
+        "profile_db": profile_db,
+        "profiles": profiles,
+        "active_profile": active_profile,
+        "decrypted_active": decrypted_active,
+    }
+
+
+def render_connect_form(form_prefix: str = "startup"):
+    has_secrets = Credentials.has_stored_credentials()
+    profile_ctx = _get_login_profile_context()
+    profile_db = profile_ctx["profile_db"]
+    profiles = profile_ctx["profiles"]
+    active_profile = profile_ctx["active_profile"]
+    decrypted_active = profile_ctx["decrypted_active"]
+
+    if profiles:
+        opts = [p["profile_name"] for p in profiles]
+        current_profile_name = (active_profile or {}).get("profile_name", opts[0])
+        if st.session_state.get("master_password"):
+            def _fmt_profile(name: str) -> str:
+                rec = next((p for p in profiles if p["profile_name"] == name), {})
+                last_used = rec.get("last_used") or "never"
+                return f"{name} ({last_used[:16]})"
+
+            selected_profile = st.selectbox(
+                "Account Profile",
+                opts,
+                index=opts.index(current_profile_name) if current_profile_name in opts else 0,
+                format_func=_fmt_profile,
+                key=f"{form_prefix}_profile_switch",
+            )
+            if selected_profile != current_profile_name:
+                profile_db.set_active(selected_profile)
+                Credentials.clear_runtime_credentials()
+                st.session_state["totp_secret"] = ""
+                st.rerun()
+        elif active_profile:
+            st.caption(f"Active Profile: {active_profile.get('profile_name')}")
+            st.caption("Set master password in Settings to unlock saved profile switching.")
+    elif active_profile:
         st.caption(f"Active Profile: {active_profile.get('profile_name')}")
 
     if has_secrets:
-        st.markdown("### 🔑 Daily Login")
-        st.success("✅ API Keys loaded from secrets")
-        with st.form("quick_login"):
+        st.markdown("### Connect to Breeze")
+        st.success("Stored API credentials detected. Enter only the fresh session token.")
+        with st.form(f"{form_prefix}_quick_login"):
             tok = st.text_input("Session Token", type="password",
                                 placeholder="8-digit token from ICICI")
-            if st.form_submit_button("🔑 Connect", type="primary", width="stretch"):
+            if st.form_submit_button("Connect to Breeze", type="primary", width="stretch"):
                 if tok and len(tok.strip()) >= 4:
                     k, s, _ = Credentials.get_all_credentials()
                     do_login(k, s, tok.strip(), st.session_state.get("totp_secret", ""))
                 else:
                     st.warning("Enter a valid session token")
     else:
-        st.markdown("### 🔐 Login")
-        st.warning("No secrets found. Enter credentials.")
-        with st.form("full_login"):
+        st.markdown("### Secure Login")
+        st.warning("Secrets were not detected. Enter credentials or unlock a saved profile.")
+        with st.form(f"{form_prefix}_full_login"):
             k, s, _ = Credentials.get_all_credentials()
             if active_profile and not k:
                 if decrypted_active:
@@ -1242,11 +1410,136 @@ def _render_login_form(has_secrets: bool):
             nk = st.text_input("API Key", value=k, type="password")
             ns = st.text_input("API Secret", value=s, type="password")
             tok = st.text_input("Session Token (optional if TOTP secret set)", type="password")
-            if st.form_submit_button("🔑 Connect", type="primary", width="stretch"):
+            if st.session_state.get("totp_secret"):
+                st.caption("TOTP secret detected. Session token may be left blank.")
+            if st.form_submit_button("Connect to Breeze", type="primary", width="stretch"):
                 if nk and ns and (tok or st.session_state.get("totp_secret")):
                     do_login(nk.strip(), ns.strip(), tok.strip(), st.session_state.get("totp_secret", ""))
                 else:
                     st.warning("Provide API credentials and token or TOTP secret")
+
+
+def _startup_status_card(label: str, value: str, detail: str, tone: str = "ok") -> str:
+    return (
+        f'<div class="startup-status-card {tone}">'
+        f'<div class="startup-status-label">{label}</div>'
+        f'<div class="startup-status-value">{value}</div>'
+        f'<div class="startup-status-detail">{detail}</div>'
+        f'</div>'
+    )
+
+
+@error_handler
+def page_startup():
+    st.markdown(STARTUP_SCREEN_CSS, unsafe_allow_html=True)
+    has_secrets = Credentials.has_stored_credentials()
+    profile_ctx = _get_login_profile_context()
+    profiles = profile_ctx["profiles"]
+    active_profile = profile_ctx["active_profile"] or {}
+    market_status = C.get_market_status()
+    db_ready = True
+    db_detail = "Local workspace ready for session bootstrapping."
+    try:
+        _db.get_all_settings()
+    except Exception as exc:
+        db_ready = False
+        db_detail = f"Database check failed: {exc}"
+
+    profile_name = active_profile.get("profile_name") or "No active profile"
+    nav_hidden = not st.session_state.get("sidebar_visible", True)
+    badge_items = [
+        f"Market: {market_status.get('label', 'Unknown')}",
+        f"Profiles: {len(profiles)} saved",
+        "Startup mode",
+    ]
+    badge_html = "".join(f'<span class="startup-badge">{item}</span>' for item in badge_items)
+
+    st.markdown(
+        (
+            '<section class="startup-hero">'
+            '<div class="startup-kicker">Breeze PRO Trading Terminal</div>'
+            '<div class="startup-title">Connect before entering the workspace</div>'
+            '<div class="startup-subtitle">'
+            'Authentication now lives in the main startup screen so the platform remains usable '
+            'even when the left menu is hidden or compacted.'
+            '</div>'
+            f'<div class="startup-badge-row">{badge_html}</div>'
+            '</section>'
+        ),
+        unsafe_allow_html=True,
+    )
+
+    lead_col, side_col = st.columns([3, 2])
+    with lead_col:
+        section("Connect")
+        st.caption("Authenticate here first. The dashboard and trading pages open after a successful session.")
+        render_connect_form("startup")
+        st.markdown("---")
+        section("Workspace Preview")
+        preview_cards = [
+            ("Option Chain", "Live chain ladder, Greeks, replay, and intraday context after login."),
+            ("Positions", "Account exposure, P&L, and square-off actions in one place."),
+            ("Risk Monitor", "Portfolio alerts, aging session cues, and stop controls."),
+            ("Paper Trading", "Practice workflows without sending live exchange orders."),
+        ]
+        preview_html = (
+            '<div class="startup-preview-grid">'
+            + "".join(
+                f'<div class="startup-preview-card">'
+                f'<div class="startup-preview-title">{title}</div>'
+                f'<div class="startup-preview-copy">{copy}</div>'
+                f'</div>'
+                for title, copy in preview_cards
+            )
+            + '</div>'
+        )
+        st.markdown(preview_html, unsafe_allow_html=True)
+        st.markdown(
+            '<div class="startup-shortcuts">Shortcuts stay available after login: Alt+1..9 for page navigation, Alt+R to refresh the active workspace.</div>',
+            unsafe_allow_html=True,
+        )
+
+    with side_col:
+        section("Readiness")
+        readiness_cards = [
+            _startup_status_card(
+                "Credentials",
+                "Stored keys ready" if has_secrets else "Manual credentials",
+                "Session token only is required." if has_secrets else "API key, API secret, and token or TOTP are needed.",
+                "ok" if has_secrets else "warn",
+            ),
+            _startup_status_card(
+                "Active Profile",
+                profile_name,
+                f"{len(profiles)} saved profile(s) available." if profiles else "No encrypted profiles detected yet.",
+                "ok" if profiles else "warn",
+            ),
+            _startup_status_card(
+                "Database",
+                "Ready" if db_ready else "Attention needed",
+                db_detail,
+                "ok" if db_ready else "danger",
+            ),
+            _startup_status_card(
+                "Navigation",
+                "Menu hidden" if nav_hidden else "Menu visible",
+                "Connect remains available in the main panel." if nav_hidden else "You can hide the menu without losing the connect flow.",
+                "warn" if nav_hidden else "ok",
+            ),
+        ]
+        st.markdown(
+            f'<div class="startup-status-grid">{"".join(readiness_cards)}</div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            '<div class="startup-side-note">'
+            'After login the workspace opens with the dashboard, trading tools, analytics, and monitoring pages. '
+            'The sidebar remains for navigation, but it is no longer the only path to connect or reconnect.'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+        if nav_hidden:
+            info_box("The left menu is hidden right now, but this startup screen stays fully usable.")
 
 
 def _cleanup_session():
@@ -1317,53 +1610,7 @@ def page_dashboard():
     page_header("🏠 Dashboard")
 
     if not SessionState.is_authenticated():
-        # Welcome screen
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            st.markdown("""
-            <div class="metric-card">
-            <h3>📊 Market Data</h3>
-            <ul>
-            <li>Live option chains</li>
-            <li>Greeks & IV smile</li>
-            <li>PCR, Max Pain, OI charts</li>
-            <li>IV term structure</li>
-            </ul>
-            </div>""", unsafe_allow_html=True)
-        with c2:
-            st.markdown("""
-            <div class="metric-card">
-            <h3>💰 Trading</h3>
-            <ul>
-            <li>Sell/Buy options</li>
-            <li>15+ strategy templates</li>
-            <li>Payoff diagrams</li>
-            <li>Bulk square-off</li>
-            </ul>
-            </div>""", unsafe_allow_html=True)
-        with c3:
-            st.markdown("""
-            <div class="metric-card">
-            <h3>🛡️ Risk Management</h3>
-            <ul>
-            <li>Fixed & trailing stops</li>
-            <li>Portfolio-level limits</li>
-            <li>Stress testing</li>
-            <li>Real-time alerts</li>
-            </ul>
-            </div>""", unsafe_allow_html=True)
-
-        st.markdown("---")
-        section("📋 Supported Instruments")
-        rows = [{"Name": n, "Exchange": c.exchange, "Lot": c.lot_size,
-                 "Strike Gap": c.strike_gap, "Expiry": c.expiry_day,
-                 "Description": c.description}
-                for n, c in C.INSTRUMENTS.items()]
-        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
-        if st.session_state.get("sidebar_visible", True):
-            info_box("👈 <b>Login from the sidebar</b> to start trading.")
-        else:
-            info_box("Use <b>Show Menu</b> to open the left sidebar and log in.")
+        page_startup()
         return
 
     client = get_client()
@@ -4972,11 +5219,9 @@ def main():
         render_layout_controls()
 
         if not SessionState.is_authenticated():
-            if st.session_state.get("sidebar_visible", True):
-                render_sidebar()
             render_alert_banners()
             st.markdown("---")
-            page_dashboard()
+            page_startup()
             return
 
         client = get_client()
