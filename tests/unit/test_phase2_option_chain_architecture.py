@@ -1,0 +1,48 @@
+from app.application.option_chain.controller import OptionChainControls as AppOptionChainControls
+from app.application.option_chain.service import compose_option_chain_workspace as AppComposeOptionChainWorkspace
+from app.application.option_chain.state import ensure_option_chain_state as AppEnsureOptionChainState
+from app.application.option_chain.view_model import build_option_chain_page_view_model as AppBuildOptionChainPageViewModel
+from app.domain.option_chain.metrics import calculate_pcr as DomainCalculatePcr
+from app.domain.option_chain.summary import build_option_chain_summary_payload as DomainBuildOptionChainSummaryPayload
+from app.domain.option_chain.utils import estimate_atm_strike as DomainEstimateAtmStrike
+from app.domain.option_chain.workspace import apply_selected_strike as DomainApplySelectedStrike
+from option_chain_controller import OptionChainControls
+from option_chain_metrics import calculate_pcr
+from option_chain_service import compose_option_chain_workspace
+from option_chain_state import ensure_option_chain_state
+from option_chain_summary import build_option_chain_summary_payload
+from option_chain_utils import estimate_atm_strike
+from option_chain_view_model import build_option_chain_page_view_model
+from option_chain_workspace import apply_selected_strike
+
+
+def test_option_chain_controller_shim_preserves_controls_type():
+    assert OptionChainControls is AppOptionChainControls
+
+
+def test_option_chain_service_shim_preserves_workspace_builder():
+    assert compose_option_chain_workspace is AppComposeOptionChainWorkspace
+
+
+def test_option_chain_state_shim_preserves_state_helper():
+    assert ensure_option_chain_state is AppEnsureOptionChainState
+
+
+def test_option_chain_view_model_shim_preserves_builder():
+    assert build_option_chain_page_view_model is AppBuildOptionChainPageViewModel
+
+
+def test_option_chain_metrics_shim_preserves_domain_function():
+    assert calculate_pcr is DomainCalculatePcr
+
+
+def test_option_chain_summary_shim_preserves_domain_function():
+    assert build_option_chain_summary_payload is DomainBuildOptionChainSummaryPayload
+
+
+def test_option_chain_utils_shim_preserves_domain_function():
+    assert estimate_atm_strike is DomainEstimateAtmStrike
+
+
+def test_option_chain_workspace_shim_preserves_domain_function():
+    assert apply_selected_strike is DomainApplySelectedStrike
