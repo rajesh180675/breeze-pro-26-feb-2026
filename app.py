@@ -93,6 +93,15 @@ from option_chain_utils import process_option_chain
 from option_chain_workspace import (
     resolve_selected_strike,
 )
+from ui_theme import (
+    APP_SHELL_CSS,
+    BREEZE_PRO_CSS,
+    KEYBOARD_SHORTCUTS_JS,
+    RESPONSIVE_CSS,
+    SIDEBAR_COMPACT_CSS,
+    STARTUP_SCREEN_CSS,
+    THEME_CSS,
+)
 
 # ─── Logging ──────────────────────────────────────────────────
 # Ensure logs directory exists before FileHandler is created.
@@ -124,445 +133,6 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
-
-THEME_CSS = """
-<style>
-/* ── Layout ── */
-#MainMenu {visibility:hidden}
-footer {visibility:hidden}
-header {visibility:hidden}
-.block-container {padding-top:1rem;padding-bottom:1rem}
-
-/* ── Typography ── */
-.page-header {
-    font-size:1.9rem;font-weight:800;
-    background:linear-gradient(135deg,#1f77b4,#17a2b8);
-    -webkit-background-clip:text;-webkit-text-fill-color:transparent;
-    border-bottom:3px solid #1f77b4;padding-bottom:.5rem;margin-bottom:1.5rem
-}
-.section-header {
-    font-size:1.3rem;font-weight:700;color:#2c3e50;
-    margin:1.2rem 0 .8rem;border-left:4px solid #1f77b4;padding-left:.7rem
-}
-.subsection {font-size:1.1rem;font-weight:600;color:#495057;margin:.8rem 0 .4rem}
-
-/* ── Status badges ── */
-.badge-connected {
-    background:#d4edda;color:#155724;padding:5px 14px;
-    border-radius:20px;font-weight:700;font-size:.85rem;display:inline-block
-}
-.badge-warning {
-    background:#fff3cd;color:#856404;padding:5px 14px;
-    border-radius:20px;font-weight:700;font-size:.85rem;display:inline-block
-}
-.badge-danger {
-    background:#f8d7da;color:#721c24;padding:5px 14px;
-    border-radius:20px;font-weight:700;font-size:.85rem;display:inline-block
-}
-
-/* ── P&L Colors ── */
-.profit {color:#28a745!important;font-weight:700}
-.loss {color:#dc3545!important;font-weight:700}
-.neutral {color:#6c757d!important}
-
-/* ── Cards ── */
-.metric-card {
-    background:#f8f9fa;padding:1.2rem;border-radius:10px;
-    border:1px solid #dee2e6;margin:.4rem 0;
-    box-shadow:0 1px 3px rgba(0,0,0,.06)
-}
-.metric-card-green {
-    background:linear-gradient(135deg,#d4edda,#c3e6cb);
-    border-color:#28a745;padding:1.2rem;border-radius:10px;margin:.4rem 0
-}
-.metric-card-red {
-    background:linear-gradient(135deg,#f8d7da,#f5c6cb);
-    border-color:#dc3545;padding:1.2rem;border-radius:10px;margin:.4rem 0
-}
-
-/* ── Alerts ── */
-.info-box {
-    background:#e7f3ff;border-left:5px solid #2196F3;
-    padding:1rem;margin:.8rem 0;border-radius:0 8px 8px 0
-}
-.danger-box {
-    background:#fdecea;border-left:5px solid #dc3545;
-    padding:1rem;margin:.8rem 0;border-radius:0 8px 8px 0
-}
-.warn-box {
-    background:#fff8e1;border-left:5px solid #ff9800;
-    padding:1rem;margin:.8rem 0;border-radius:0 8px 8px 0
-}
-.success-box {
-    background:#e8f5e9;border-left:5px solid #4caf50;
-    padding:1rem;margin:.8rem 0;border-radius:0 8px 8px 0
-}
-
-/* ── Empty state ── */
-.empty-state {text-align:center;padding:2.5rem 1rem;color:#6c757d}
-.empty-state-icon {font-size:3rem;margin-bottom:.8rem;opacity:.5}
-
-/* ── Market status pill ── */
-.mkt-open {
-    background:#e8f5e9;color:#2e7d32;padding:4px 12px;
-    border-radius:20px;font-weight:700;font-size:.8rem
-}
-.mkt-closed {
-    background:#ffebee;color:#c62828;padding:4px 12px;
-    border-radius:20px;font-weight:700;font-size:.8rem
-}
-
-/* ── Sidebar ── */
-[data-testid="stSidebar"] {background:#0f1117}
-[data-testid="stSidebar"] * {color:#fafafa}
-
-/* ── Data table ── */
-.stDataFrame {border-radius:8px;overflow:hidden}
-
-/* ── Button variants ── */
-.stButton button[kind="primary"] {
-    background:linear-gradient(135deg,#1f77b4,#17a2b8);
-    border:none;font-weight:700
-}
-</style>
-"""
-
-BREEZE_PRO_CSS = """
-<style>
-:root {
-  --bg-primary:#0d1117; --bg-secondary:#161b22; --bg-card:#1c2128;
-  --border:#30363d; --text-primary:#e6edf3; --text-muted:#8b949e;
-  --accent:#388bfd; --success:#3fb950; --warning:#d29922; --danger:#f85149;
-}
-.stApp { background-color: var(--bg-primary); color: var(--text-primary); }
-.stSidebar { background-color: var(--bg-secondary) !important; }
-.page-header { color: var(--text-primary); border-bottom: 2px solid var(--accent); }
-.metric-card { background: var(--bg-card); border:1px solid var(--border); border-radius:8px; }
-.metric-label { color: var(--text-muted); }
-.metric-value { color: var(--text-primary); font-weight:700; }
-.stDataFrame thead { background: var(--bg-secondary) !important; }
-.stDataFrame tbody tr:hover { background: var(--bg-card) !important; }
-.stButton > button[kind="primary"] { background-color: var(--accent); border:none; font-weight:600; }
-.stButton > button[kind="primary"]:hover { background-color:#58a6ff; box-shadow:0 0 8px rgba(56,139,253,.4); }
-.badge-success { color: var(--success); font-weight:600; }
-.badge-danger { color: var(--danger); font-weight:600; }
-.badge-warning { color: var(--warning); font-weight:600; }
-.badge-muted { color: var(--text-muted); }
-.scroll-table { max-height:400px; overflow-y:auto; border:1px solid var(--border); border-radius:6px; }
-</style>
-"""
-
-KEYBOARD_SHORTCUTS_JS = """
-<script>
-document.addEventListener('keydown', function(e) {
-  if (e.altKey && e.key >= '1' && e.key <= '9') {
-    e.preventDefault();
-    const pages = document.querySelectorAll('[data-testid="stRadio"] label');
-    const idx = parseInt(e.key) - 1;
-    if (pages[idx]) pages[idx].click();
-  }
-  if (e.altKey && (e.key === 'r' || e.key === 'R')) {
-    e.preventDefault();
-    const refreshBtns = document.querySelectorAll('button');
-    for (const btn of refreshBtns) {
-      if (btn.textContent.includes('Refresh') || btn.textContent.includes('🔄')) { btn.click(); break; }
-    }
-  }
-});
-</script>
-"""
-
-RESPONSIVE_CSS = """
-<style>
-@media (max-width: 768px) {
-  section[data-testid="stSidebar"] { width: 0 !important; }
-  .page-header { font-size: 1.2rem; }
-  .stColumns { flex-direction: column !important; }
-}
-</style>
-"""
-
-APP_SHELL_CSS = """
-<style>
-.shell-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
-  padding: 0.95rem 1.1rem;
-  border: 1px solid rgba(56, 189, 248, 0.16);
-  border-radius: 16px;
-  background: linear-gradient(135deg, rgba(15, 23, 42, 0.95), rgba(17, 24, 39, 0.92));
-  box-shadow: 0 18px 45px rgba(2, 6, 23, 0.18);
-  margin-bottom: 0.9rem;
-}
-.shell-brand {
-  display: flex;
-  align-items: center;
-  gap: 0.85rem;
-}
-.shell-brand-mark {
-  width: 2.5rem;
-  height: 2.5rem;
-  border-radius: 0.8rem;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  background: linear-gradient(135deg, #0891b2, #1d4ed8);
-  color: #f8fafc;
-  font-weight: 800;
-  font-size: 1rem;
-}
-.shell-brand-copy {
-  display: flex;
-  flex-direction: column;
-  gap: 0.08rem;
-}
-.shell-brand-name {
-  color: #f8fafc;
-  font-size: 1rem;
-  font-weight: 800;
-  line-height: 1.1;
-}
-.shell-brand-meta {
-  color: #94a3b8;
-  font-size: 0.78rem;
-}
-.shell-page-title {
-  color: #f8fafc;
-  font-size: 1.1rem;
-  font-weight: 700;
-  line-height: 1.2;
-  margin-bottom: 0.15rem;
-}
-.shell-page-copy {
-  color: #a5b4fc;
-  font-size: 0.84rem;
-}
-.shell-status-stack {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-  justify-content: flex-end;
-}
-.shell-pill {
-  display: inline-flex;
-  align-items: center;
-  border-radius: 999px;
-  padding: 0.38rem 0.75rem;
-  font-size: 0.8rem;
-  font-weight: 700;
-  border: 1px solid transparent;
-}
-.shell-pill.connected {
-  color: #bbf7d0;
-  background: rgba(22, 163, 74, 0.14);
-  border-color: rgba(34, 197, 94, 0.25);
-}
-.shell-pill.warning {
-  color: #fde68a;
-  background: rgba(245, 158, 11, 0.14);
-  border-color: rgba(245, 158, 11, 0.24);
-}
-.shell-pill.offline {
-  color: #cbd5e1;
-  background: rgba(71, 85, 105, 0.28);
-  border-color: rgba(148, 163, 184, 0.18);
-}
-.shell-pill.market {
-  color: #67e8f9;
-  background: rgba(8, 145, 178, 0.15);
-  border-color: rgba(34, 211, 238, 0.18);
-}
-.shell-note {
-  color: #94a3b8;
-  font-size: 0.82rem;
-  margin: 0.1rem 0 0.85rem;
-}
-.shell-rail-brand {
-  display: flex;
-  align-items: center;
-  gap: 0.7rem;
-  margin-bottom: 0.75rem;
-}
-.shell-rail-mark {
-  width: 2.15rem;
-  height: 2.15rem;
-  border-radius: 0.75rem;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  background: linear-gradient(135deg, #0891b2, #1d4ed8);
-  color: #f8fafc;
-  font-weight: 800;
-}
-.shell-rail-copy {
-  display: flex;
-  flex-direction: column;
-  gap: 0.08rem;
-}
-.shell-rail-name {
-  color: #f8fafc;
-  font-weight: 800;
-  font-size: 1rem;
-}
-.shell-rail-meta {
-  color: #94a3b8;
-  font-size: 0.75rem;
-}
-@media (max-width: 900px) {
-  .shell-bar {
-    padding: 0.8rem 0.9rem;
-  }
-  .shell-page-copy {
-    display: none;
-  }
-}
-</style>
-"""
-
-SIDEBAR_COMPACT_CSS = """
-<style>
-[data-testid="stSidebar"] {
-  min-width: 14rem !important;
-  max-width: 14rem !important;
-}
-[data-testid="stSidebar"] > div:first-child {
-  width: 14rem !important;
-}
-.rail-detail {
-  display: none !important;
-}
-</style>
-"""
-
-STARTUP_SCREEN_CSS = """
-<style>
-.startup-hero {
-  background: linear-gradient(135deg, rgba(15, 23, 42, 0.96), rgba(8, 47, 73, 0.92));
-  border: 1px solid rgba(34, 211, 238, 0.18);
-  border-radius: 18px;
-  padding: 1.5rem;
-  margin-bottom: 1.25rem;
-  box-shadow: 0 20px 50px rgba(2, 6, 23, 0.35);
-}
-.startup-kicker {
-  color: #67e8f9;
-  font-size: 0.78rem;
-  font-weight: 700;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  margin-bottom: 0.65rem;
-}
-.startup-title {
-  color: #f8fafc;
-  font-size: 2rem;
-  font-weight: 800;
-  line-height: 1.1;
-  margin-bottom: 0.55rem;
-}
-.startup-subtitle {
-  color: rgba(226, 232, 240, 0.84);
-  font-size: 1rem;
-  max-width: 50rem;
-}
-.startup-badge-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.65rem;
-  margin-top: 1rem;
-}
-.startup-badge {
-  border: 1px solid rgba(148, 163, 184, 0.22);
-  background: rgba(15, 23, 42, 0.42);
-  color: #e2e8f0;
-  border-radius: 999px;
-  padding: 0.4rem 0.8rem;
-  font-size: 0.85rem;
-  font-weight: 600;
-}
-.startup-status-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 0.85rem;
-  margin-bottom: 1rem;
-}
-.startup-status-card {
-  border-radius: 14px;
-  padding: 0.95rem 1rem;
-  min-height: 7rem;
-  border: 1px solid rgba(148, 163, 184, 0.18);
-  background: rgba(15, 23, 42, 0.82);
-}
-.startup-status-card.ok { border-color: rgba(34, 197, 94, 0.35); }
-.startup-status-card.warn { border-color: rgba(245, 158, 11, 0.35); }
-.startup-status-card.danger { border-color: rgba(248, 113, 113, 0.35); }
-.startup-status-label {
-  color: #94a3b8;
-  font-size: 0.78rem;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  margin-bottom: 0.55rem;
-}
-.startup-status-value {
-  color: #f8fafc;
-  font-size: 1.05rem;
-  font-weight: 700;
-  margin-bottom: 0.35rem;
-}
-.startup-status-detail {
-  color: rgba(226, 232, 240, 0.7);
-  font-size: 0.88rem;
-  line-height: 1.35;
-}
-.startup-preview-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 0.85rem;
-  margin-top: 0.65rem;
-}
-.startup-preview-card {
-  background: rgba(248, 250, 252, 0.04);
-  border: 1px solid rgba(148, 163, 184, 0.16);
-  border-radius: 14px;
-  padding: 1rem;
-}
-.startup-preview-title {
-  color: #f8fafc;
-  font-size: 1rem;
-  font-weight: 700;
-  margin-bottom: 0.35rem;
-}
-.startup-preview-copy {
-  color: rgba(226, 232, 240, 0.72);
-  font-size: 0.9rem;
-  line-height: 1.4;
-}
-.startup-side-note {
-  color: rgba(226, 232, 240, 0.78);
-  font-size: 0.92rem;
-  line-height: 1.5;
-  padding: 1rem;
-  border-radius: 14px;
-  background: rgba(15, 23, 42, 0.62);
-  border: 1px solid rgba(148, 163, 184, 0.14);
-}
-.startup-shortcuts {
-  color: #94a3b8;
-  font-size: 0.84rem;
-  margin-top: 0.85rem;
-}
-@media (max-width: 900px) {
-  .startup-status-grid,
-  .startup-preview-grid {
-    grid-template-columns: 1fr;
-  }
-  .startup-title {
-    font-size: 1.65rem;
-  }
-}
-</style>
-"""
 
 st.markdown(THEME_CSS, unsafe_allow_html=True)
 
@@ -615,7 +185,7 @@ def require_auth(f):
     def w(*a, **k):
         if not SessionState.is_authenticated():
             st.warning("🔒 Please connect your account first")
-            if st.button("Go to Login →"):
+            if st.button("Go to Connect Screen →"):
                 SessionState.navigate_to("🏠 Dashboard")
                 st.rerun()
             return
@@ -631,7 +201,7 @@ def empty_state(icon, msg, sub=""):
     st.markdown(
         f'<div class="empty-state">'
         f'<div class="empty-state-icon">{icon}</div>'
-        f'<h3>{msg}</h3><p style="opacity:.7">{sub}</p></div>',
+        f'<h3>{msg}</h3><p class="empty-state-sub">{sub}</p></div>',
         unsafe_allow_html=True
     )
 
@@ -640,26 +210,86 @@ def page_header(title: str):
     st.markdown(f'<h1 class="page-header">{title}</h1>', unsafe_allow_html=True)
 
 
+def _get_startup_recovery_state() -> Dict[str, str]:
+    raw = st.session_state.get("startup_recovery_state")
+    if not isinstance(raw, dict):
+        return {}
+    reason = str(raw.get("reason", "")).strip().lower()
+    detail = str(raw.get("detail", "")).strip()
+    if not reason:
+        return {}
+    return {"reason": reason, "detail": detail}
+
+
+def _set_startup_recovery_state(reason: str, detail: str = "") -> None:
+    normalized_reason = str(reason).strip().lower()
+    if not normalized_reason:
+        st.session_state.pop("startup_recovery_state", None)
+        return
+    st.session_state["startup_recovery_state"] = {
+        "reason": normalized_reason,
+        "detail": str(detail).strip(),
+    }
+
+
+def _clear_startup_recovery_state() -> None:
+    st.session_state.pop("startup_recovery_state", None)
+
+
+def _format_session_timestamp(timestamp_value: Optional[str]) -> str:
+    if not timestamp_value:
+        return "No successful login yet"
+    try:
+        dt_value = datetime.fromisoformat(timestamp_value)
+        if dt_value.tzinfo is None:
+            dt_value = C.IST.localize(dt_value)
+        return dt_value.astimezone(C.IST).strftime("%d %b %Y, %I:%M %p IST")
+    except Exception:
+        return str(timestamp_value)
+
+
 def render_layout_controls() -> None:
     page_label = "Startup" if not SessionState.is_authenticated() else SessionState.get_current_page()
     nav_mode = SessionState.get_nav_mode()
     market_status = C.get_market_status()
-    if not SessionState.is_authenticated():
-        connection_label = "Not Connected"
-        connection_class = "offline"
-        page_copy = "Startup mode keeps connect access visible in the main workspace."
-    elif SessionState.is_session_expired():
+    recovery_state = _get_startup_recovery_state()
+    recovery_reason = recovery_state.get("reason")
+
+    if SessionState.is_authenticated() and SessionState.is_session_expired():
         connection_label = "Session Expired"
         connection_class = "warning"
         page_copy = "Reconnect to re-enter the live trading workspace."
-    elif SessionState.is_session_stale():
-        connection_label = "Session Aging"
+        connect_label = "Reconnect"
+    elif SessionState.is_authenticated():
+        if SessionState.is_session_stale():
+            connection_label = "Session Aging"
+            connection_class = "warning"
+            page_copy = "Workspace is live, but the session should be refreshed soon."
+        else:
+            connection_label = "Connected"
+            connection_class = "connected"
+            page_copy = "Professional workspace shell with persistent navigation and session controls."
+        connect_label = "Reconnect"
+    elif recovery_reason == "expired":
+        connection_label = "Session Expired"
         connection_class = "warning"
-        page_copy = "Workspace is live, but the session should be refreshed soon."
+        page_copy = recovery_state.get("detail") or "Reconnect with a fresh session token to re-enter the live trading workspace."
+        connect_label = "Reconnect"
+    elif recovery_reason == "reconnect":
+        connection_label = "Reconnect Required"
+        connection_class = "warning"
+        page_copy = recovery_state.get("detail") or "Reconnect to refresh the live trading workspace."
+        connect_label = "Reconnect"
+    elif recovery_reason == "disconnect":
+        connection_label = "Disconnected"
+        connection_class = "offline"
+        page_copy = recovery_state.get("detail") or "Session closed cleanly. Connect again when you're ready."
+        connect_label = "Connect"
     else:
-        connection_label = "Connected"
-        connection_class = "connected"
-        page_copy = "Professional workspace shell with persistent navigation and session controls."
+        connection_label = "Not Connected"
+        connection_class = "offline"
+        page_copy = "Startup mode keeps connect access visible in the main workspace."
+        connect_label = "Connect"
 
     st.markdown(
         (
@@ -692,17 +322,17 @@ def render_layout_controls() -> None:
         if SessionState.is_authenticated():
             with action_cols[action_index]:
                 if st.button("Reconnect", key="shell_reconnect_action", width="stretch"):
-                    _cleanup_session()
+                    _cleanup_session(reason="reconnect")
                     st.rerun()
             action_index += 1
             with action_cols[action_index]:
                 if st.button("Disconnect", key="shell_disconnect_action", width="stretch"):
-                    _cleanup_session()
+                    _cleanup_session(reason="disconnect")
                     st.rerun()
             action_index += 1
         else:
             with action_cols[action_index]:
-                if st.button("Connect", key="shell_connect_action", width="stretch"):
+                if st.button(connect_label, key="shell_connect_action", width="stretch"):
                     st.session_state["startup_focus_connect"] = True
                     SessionState.navigate_to("🏠 Dashboard")
                     st.rerun()
@@ -732,11 +362,11 @@ def danger_box(text: str):
 
 
 def pnl_metric(label: str, value: float, col=None):
-    color = "#28a745" if value >= 0 else "#dc3545"
     icon = "▲" if value >= 0 else "▼"
+    value_class = "positive" if value >= 0 else "negative"
     html = (f'<div class="metric-card">'
-            f'<small style="color:#6c757d">{label}</small><br>'
-            f'<span style="font-size:1.6rem;font-weight:800;color:{color}">'
+            f'<div class="metric-card-label">{label}</div>'
+            f'<span class="metric-card-value {value_class}">'
             f'{icon} {format_currency(value)}</span></div>')
     target = col if col else st
     target.markdown(html, unsafe_allow_html=True)
@@ -798,22 +428,23 @@ def render_live_price_badge(stock_token: str, fallback_price: float = 0.0, col=N
     if tick:
         ltp = tick.ltp
         chg = tick.change_pct
-        color = "#28a745" if chg >= 0 else "#dc3545"
+        tone = "positive" if chg >= 0 else "negative"
         sign = "+" if chg >= 0 else ""
         age = time.time() - tick.received_at
         freshness = "🟢" if age < 5 else ("🟡" if age < 30 else "🔴")
         html = (
-            f'<span style="color:{color};font-weight:700;font-size:1.1rem">'
-            f'₹{ltp:,.2f}</span> '
-            f'<span style="color:{color};font-size:.85rem">'
-            f'{sign}{chg:.2f}%</span> '
-            f'<span title="{age:.1f}s ago">{freshness}</span>'
+            '<span class="live-price-badge">'
+            f'<span class="live-price-price {tone}">₹{ltp:,.2f}</span>'
+            f'<span class="live-price-change {tone}">{sign}{chg:.2f}%</span>'
+            f'<span class="live-price-freshness" title="{age:.1f}s ago">{freshness}</span>'
+            '</span>'
         )
     else:
         html = (
-            f'<span style="color:#6c757d;font-size:1.1rem">'
-            f'₹{fallback_price:,.2f}</span> '
-            f'<span title="No live tick">⚫</span>'
+            '<span class="live-price-badge">'
+            f'<span class="live-price-price muted">₹{fallback_price:,.2f}</span>'
+            '<span class="live-price-freshness" title="No live tick">⚫</span>'
+            '</span>'
         )
 
     target = col if col is not None else st
@@ -883,10 +514,11 @@ def get_client():
     if (_time.time() - last_check) >= _SESSION_HEALTH_CHECK_INTERVAL:
         st.session_state["_session_health_ts"] = _time.time()
         if not check_session_health(c):
-            SessionState.set_authentication(False, None)
-            SessionState.navigate_to("⚙️ Settings")
-            st.error("🔴 Session expired or revoked. Please re-login from Settings.")
-            return None
+            _cleanup_session(
+                reason="expired",
+                detail="The broker session expired or was revoked during a health check. Reconnect to restore the workspace.",
+            )
+            st.rerun()
     return c
 
 
@@ -1402,12 +1034,10 @@ def render_sidebar():
         st.markdown("---")
 
         if st.session_state.get("paper_trading_enabled"):
-            st.markdown("""
-            <div style="background:#fd7e14;color:black;padding:.5rem;
-                        border-radius:6px;text-align:center;font-weight:700">
-            📄 PAPER TRADING MODE
-            </div>
-            """, unsafe_allow_html=True)
+            st.markdown(
+                '<div class="paper-mode-banner">📄 PAPER TRADING MODE</div>',
+                unsafe_allow_html=True,
+            )
 
         has_secrets = Credentials.has_stored_credentials()
         avail = list(PAGES.keys()) if SessionState.is_authenticated() else ["🏠 Dashboard"]
@@ -1447,7 +1077,10 @@ def render_sidebar():
                 selected_profile = st.selectbox("Switch Account", opts, index=opts.index(current_profile_name) if current_profile_name in opts else 0, format_func=_fmt_profile, key="sidebar_profile_switch")
                 if selected_profile != current_profile_name:
                     profile_db.set_active(selected_profile)
-                    _cleanup_session()
+                    _cleanup_session(
+                        reason="reconnect",
+                        detail=f"Profile switched to {selected_profile}. Reconnect to continue in the new account context.",
+                    )
                     st.success(f"Switched to {selected_profile}. Please login again.")
                     st.rerun()
             elif profiles:
@@ -1511,7 +1144,7 @@ def render_sidebar():
 
             st.markdown("---")
             if st.button("🔓 Disconnect", width="stretch"):
-                _cleanup_session()
+                _cleanup_session(reason="disconnect")
                 st.rerun()
 
         else:
@@ -1622,11 +1255,17 @@ def render_connect_form(form_prefix: str = "startup"):
                     st.warning("Provide API credentials and token or TOTP secret")
 
 
-def _startup_status_card(label: str, value: str, detail: str, tone: str = "ok") -> str:
+def _startup_status_card(
+    label: str,
+    value: str,
+    detail: str,
+    tone: str = "ok",
+    value_class: str = "",
+) -> str:
     return (
         f'<div class="startup-status-card {tone}">'
         f'<div class="startup-status-label">{label}</div>'
-        f'<div class="startup-status-value">{value}</div>'
+        f'<div class="startup-status-value {value_class}">{value}</div>'
         f'<div class="startup-status-detail">{detail}</div>'
         f'</div>'
     )
@@ -1639,6 +1278,8 @@ def page_startup():
     profile_ctx = _get_login_profile_context()
     profiles = profile_ctx["profiles"]
     active_profile = profile_ctx["active_profile"] or {}
+    recovery_state = _get_startup_recovery_state()
+    recovery_reason = recovery_state.get("reason")
     market_status = C.get_market_status()
     db_ready = True
     db_detail = "Local workspace ready for session bootstrapping."
@@ -1650,22 +1291,52 @@ def page_startup():
 
     profile_name = active_profile.get("profile_name") or "No active profile"
     nav_compact = SessionState.get_nav_mode() == "compact"
+    last_login_display = _format_session_timestamp(st.session_state.get("last_login_time"))
+
+    ws_value = "Cold start"
+    ws_detail = "Websocket will initialize after a successful connection."
+    ws_tone = "ok"
+    try:
+        live_feed_manager = lf.get_live_feed_manager()
+        if live_feed_manager is not None:
+            feed_stats = live_feed_manager.get_health_stats()
+            feed_state = str(feed_stats.get("state", "")).lower()
+            if "connected" in feed_state:
+                ws_value = "Ready"
+                ws_detail = "Live feed manager is already warm and can resume after reconnect."
+            elif "reconnect" in feed_state:
+                ws_value = "Recovering"
+                ws_detail = "Live feed manager is still recovering from the previous session."
+                ws_tone = "warn"
+            else:
+                ws_value = "Standby"
+                ws_detail = "Live feed manager is present and will reconnect after login."
+    except Exception as exc:
+        ws_value = "Status unavailable"
+        ws_detail = f"Websocket readiness check failed: {exc}"
+        ws_tone = "warn"
+
+    reconnect_required = recovery_reason in {"expired", "reconnect"}
     badge_items = [
         f"Market: {market_status.get('label', 'Unknown')}",
         f"Profiles: {len(profiles)} saved",
-        "Startup mode",
+        "Reconnect required" if reconnect_required else "Startup mode",
     ]
     badge_html = "".join(f'<span class="startup-badge">{item}</span>' for item in badge_items)
+    hero_title = "Reconnect before entering the workspace" if reconnect_required else "Connect before entering the workspace"
+    hero_subtitle = (
+        recovery_state.get("detail")
+        or "Your previous session needs to be refreshed from the main startup screen so navigation and reconnect access stay visible."
+        if reconnect_required
+        else "Authentication now lives in the main startup screen so the platform remains usable even when the left menu is hidden or compacted."
+    )
 
     st.markdown(
         (
             '<section class="startup-hero">'
             '<div class="startup-kicker">Breeze PRO Trading Terminal</div>'
-            '<div class="startup-title">Connect before entering the workspace</div>'
-            '<div class="startup-subtitle">'
-            'Authentication now lives in the main startup screen so the platform remains usable '
-            'even when the left menu is hidden or compacted.'
-            '</div>'
+            f'<div class="startup-title">{hero_title}</div>'
+            f'<div class="startup-subtitle">{hero_subtitle}</div>'
             f'<div class="startup-badge-row">{badge_html}</div>'
             '</section>'
         ),
@@ -1674,6 +1345,18 @@ def page_startup():
 
     lead_col, side_col = st.columns([3, 2])
     with lead_col:
+        if reconnect_required:
+            st.markdown(
+                (
+                    '<div class="startup-recovery-panel">'
+                    '<div class="startup-recovery-title">Reconnect Path Active</div>'
+                    '<div class="startup-recovery-copy">'
+                    f'{recovery_state.get("detail") or "Use a fresh session token to restore the trading workspace."}'
+                    '</div>'
+                    '</div>'
+                ),
+                unsafe_allow_html=True,
+            )
         section("Connect")
         st.caption("Authenticate here first. The dashboard and trading pages open after a successful session.")
         render_connect_form("startup")
@@ -1724,6 +1407,19 @@ def page_startup():
                 "ok" if db_ready else "danger",
             ),
             _startup_status_card(
+                "Last Login",
+                last_login_display,
+                "Most recent successful workspace authentication retained for reconnect context.",
+                "ok" if st.session_state.get("last_login_time") else "warn",
+                value_class="mono",
+            ),
+            _startup_status_card(
+                "Websocket",
+                ws_value,
+                ws_detail,
+                ws_tone,
+            ),
+            _startup_status_card(
                 "Navigation",
                 "Menu compact" if nav_compact else "Menu expanded",
                 "Connect remains available in the main panel." if nav_compact else "Navigation stays visible while the full rail is expanded.",
@@ -1747,7 +1443,7 @@ def page_startup():
             info_box("The navigation rail is compact right now, but this startup screen stays fully usable.")
 
 
-def _cleanup_session():
+def _cleanup_session(reason: str = "", detail: str = ""):
     cleanup_option_chain_ws_subscriptions()
     mgr = lf.get_live_feed_manager()
     if mgr is not None:
@@ -1759,7 +1455,16 @@ def _cleanup_session():
     Credentials.clear_runtime_credentials()
     CacheManager.clear_all()
     SessionState.navigate_to("🏠 Dashboard")
-    _db.log_activity("LOGOUT", "Session ended")
+    recovery_detail_map = {
+        "disconnect": "Session closed. Use Connect to open a new workspace session.",
+        "reconnect": "Reconnect with a fresh token to restore the live workspace.",
+        "expired": "Session expired or was revoked. Reconnect with a fresh token to continue.",
+    }
+    if reason:
+        _set_startup_recovery_state(reason, detail or recovery_detail_map.get(reason, "Reconnect to continue."))
+    else:
+        _clear_startup_recovery_state()
+    _db.log_activity("LOGOUT", detail or recovery_detail_map.get(reason, "Session ended"))
 
 
 def do_login(api_key, api_secret, token, totp_secret=""):
@@ -1773,6 +1478,8 @@ def do_login(api_key, api_secret, token, totp_secret=""):
             if resp["success"]:
                 Credentials.save_runtime_credentials(api_key, api_secret, token)
                 SessionState.set_authentication(True, client)
+                st.session_state["last_login_time"] = st.session_state.get("login_time")
+                _clear_startup_recovery_state()
                 if "paper_engine" not in st.session_state:
                     st.session_state.paper_engine = PaperTradingEngine(client)
                 st.session_state.user_name = "Trader"
@@ -1823,20 +1530,6 @@ def page_dashboard():
         return
 
     render_auto_refresh("dashboard")
-
-    st.markdown(
-        """
-        <style>
-        .dashboard-metric-wrap div[data-testid="stMetric"] {
-            background: linear-gradient(135deg, rgba(17, 138, 178, 0.10), rgba(0, 60, 100, 0.06));
-            border: 1px solid rgba(17, 138, 178, 0.30);
-            border-radius: 10px;
-            padding: 8px 10px;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
     dashboard_metrics = get_dashboard_metrics(client)
     metric_labels = [
         "NIFTY SPOT",
@@ -4932,7 +4625,10 @@ def render_account_switcher(db: TradeDB) -> None:
             with col2:
                 if (not is_active) and st.button("Switch", key=f"switch_{name}"):
                     profile_db.set_active(name)
-                    _cleanup_session()
+                    _cleanup_session(
+                        reason="reconnect",
+                        detail=f"Profile switched to {name}. Reconnect to continue in the selected account.",
+                    )
                     st.success(f"Switched to {name}. Re-login required.")
                     st.rerun()
             with col3:
@@ -4940,7 +4636,7 @@ def render_account_switcher(db: TradeDB) -> None:
                     deleting_active = is_active
                     profile_db.delete_profile(name)
                     if deleting_active:
-                        _cleanup_session()
+                        _cleanup_session(reason="disconnect")
                     st.rerun()
 
     st.divider()
@@ -5416,6 +5112,8 @@ PAGE_FN = {
 def main():
     try:
         SessionState.initialize()
+        if SessionState.is_authenticated() and SessionState.is_session_expired():
+            _cleanup_session(reason="expired")
         st.markdown(BREEZE_PRO_CSS, unsafe_allow_html=True)
         st.markdown(APP_SHELL_CSS, unsafe_allow_html=True)
         st.markdown(RESPONSIVE_CSS, unsafe_allow_html=True)
@@ -5457,14 +5155,7 @@ def main():
 
         page = SessionState.get_current_page()
         if page in AUTH_PAGES and not SessionState.is_authenticated():
-            st.warning("🔒 Please login from the sidebar to access this page.")
-            return
-
-        if SessionState.is_session_expired():
-            st.error("🔴 Session expired (8 hours). Please reconnect.")
-            if st.button("🔄 Reconnect", type="primary"):
-                _cleanup_session()
-                st.rerun()
+            st.warning("🔒 Please reconnect from the startup screen to access this page.")
             return
 
         PAGE_FN.get(page, page_dashboard)()
