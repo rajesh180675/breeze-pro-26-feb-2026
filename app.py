@@ -101,6 +101,7 @@ from ui_theme import (
     SIDEBAR_COMPACT_CSS,
     STARTUP_SCREEN_CSS,
     THEME_CSS,
+    WORKSPACE_RAIL_CSS,
 )
 
 # ─── Logging ──────────────────────────────────────────────────
@@ -348,6 +349,28 @@ def render_sidebar_module_navigation(key_prefix: str) -> None:
                     st.rerun()
                 if is_selected:
                     st.caption("Current workspace module." if auth else "Selected launch target.")
+
+
+def render_workspace_module_rail(key_prefix: str) -> None:
+    auth = SessionState.is_authenticated()
+    selected_page = SessionState.get_current_page() if auth else _get_post_login_target()
+    rail_mode = "compact" if SessionState.get_nav_mode() == "compact" else "expanded"
+    st.markdown(
+        f'<div class="workspace-left-rail {rail_mode}">',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        (
+            '<div class="workspace-left-rail-head">'
+            '<div class="workspace-left-rail-kicker">Workspace</div>'
+            f'<div class="workspace-left-rail-title">{_page_display_name(selected_page)}</div>'
+            '<div class="workspace-left-rail-copy">Switch modules from this left rail while the center pane stays focused on the active workspace.</div>'
+            '</div>'
+        ),
+        unsafe_allow_html=True,
+    )
+    render_sidebar_module_navigation(key_prefix)
+    st.markdown("</div>", unsafe_allow_html=True)
 
 
 def render_workspace_module_directory(key_prefix: str) -> None:
@@ -5330,6 +5353,7 @@ def main():
             _cleanup_session(reason="expired")
         st.markdown(BREEZE_PRO_CSS, unsafe_allow_html=True)
         st.markdown(APP_SHELL_CSS, unsafe_allow_html=True)
+        st.markdown(WORKSPACE_RAIL_CSS, unsafe_allow_html=True)
         st.markdown(RESPONSIVE_CSS, unsafe_allow_html=True)
         if SessionState.get_nav_mode() == "compact":
             st.markdown(SIDEBAR_COMPACT_CSS, unsafe_allow_html=True)
@@ -5372,7 +5396,13 @@ def main():
             st.warning("🔒 Please reconnect from the startup screen to access this page.")
             return
 
-        PAGE_FN.get(page, page_dashboard)()
+        nav_mode = SessionState.get_nav_mode()
+        rail_widths = [1.15, 5.85] if nav_mode == "compact" else [1.55, 5.45]
+        rail_col, workspace_col = st.columns(rail_widths, gap="medium")
+        with rail_col:
+            render_workspace_module_rail("workspace_shell_nav")
+        with workspace_col:
+            PAGE_FN.get(page, page_dashboard)()
 
     except Exception as e:
         log.critical(f"Fatal: {e}", exc_info=True)

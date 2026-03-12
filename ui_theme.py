@@ -644,6 +644,59 @@ APP_SHELL_CSS = """
 </style>
 """
 
+WORKSPACE_RAIL_CSS = """
+<style>
+.workspace-left-rail {
+  position: sticky;
+  top: 1rem;
+  align-self: flex-start;
+  padding: 0.95rem 0.9rem;
+  border-radius: 16px;
+  border: 1px solid rgba(30, 200, 223, 0.16);
+  background: linear-gradient(180deg, rgba(7, 16, 24, 0.98), rgba(10, 18, 27, 0.96));
+  box-shadow: 0 18px 42px rgba(2, 6, 23, 0.22);
+  margin-bottom: 1rem;
+}
+
+.workspace-left-rail.compact {
+  padding: 0.8rem 0.75rem;
+}
+
+.workspace-left-rail-head {
+  margin-bottom: 0.75rem;
+}
+
+.workspace-left-rail-kicker {
+  color: #67e8f9;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  margin-bottom: 0.35rem;
+}
+
+.workspace-left-rail-title {
+  color: #f8fafc;
+  font-size: 1.05rem;
+  font-weight: 800;
+  line-height: 1.15;
+  margin-bottom: 0.3rem;
+}
+
+.workspace-left-rail-copy {
+  color: rgba(226, 232, 240, 0.72);
+  font-size: 0.84rem;
+  line-height: 1.4;
+}
+
+@media (max-width: 1024px) {
+  .workspace-left-rail {
+    position: static;
+  }
+}
+</style>
+"""
+
 SIDEBAR_COMPACT_CSS = """
 <style>
 [data-testid="stSidebar"] {

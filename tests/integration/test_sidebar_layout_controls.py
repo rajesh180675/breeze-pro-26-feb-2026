@@ -9,6 +9,10 @@ def _find_button(at: AppTest, label: str):
     return next(button for button in at.button if button.label == label)
 
 
+def _button_labels(at: AppTest):
+    return [button.label for button in at.button]
+
+
 def _startup_layout_script() -> str:
     return """
 import sys
@@ -282,7 +286,9 @@ def test_logged_out_users_land_on_startup_screen():
     at = AppTest.from_string(_startup_layout_script())
     at.run(timeout=20)
 
-    assert [item.label for item in at.button] == ["Connect", "Collapse Sidebar"]
+    labels = _button_labels(at)
+    assert "Connect" in labels
+    assert "Collapse Sidebar" in labels
     assert [item.value for item in at.sidebar.caption] == ["Sidebar navigation"]
     assert "Startup screen" in [item.value for item in at.markdown]
     assert "Dashboard body" not in [item.value for item in at.markdown]
@@ -292,20 +298,30 @@ def test_workspace_layout_can_compact_and_restore_sidebar():
     at = AppTest.from_string(_workspace_layout_script())
     at.run(timeout=20)
 
-    assert [item.label for item in at.button] == ["Reconnect", "Disconnect", "Collapse Sidebar"]
+    labels = _button_labels(at)
+    assert "Reconnect" in labels
+    assert "Disconnect" in labels
+    assert "Collapse Sidebar" in labels
+    assert "Option Chain" in labels
     assert [item.value for item in at.sidebar.caption] == ["Sidebar navigation"]
     assert "Dashboard body" in [item.value for item in at.markdown]
 
-    at.button[2].click().run()
+    _find_button(at, "Collapse Sidebar").click().run()
 
-    assert [item.label for item in at.button] == ["Reconnect", "Disconnect", "Expand Sidebar"]
+    labels = _button_labels(at)
+    assert "Reconnect" in labels
+    assert "Disconnect" in labels
+    assert "Expand Sidebar" in labels
     assert [item.value for item in at.sidebar.caption] == ["Sidebar navigation"]
     assert "The left module rail is collapsed. Expand it to browse the full workspace." in [item.value for item in at.caption]
     assert "Dashboard body" in [item.value for item in at.markdown]
 
-    at.button[2].click().run()
+    _find_button(at, "Expand Sidebar").click().run()
 
-    assert [item.label for item in at.button] == ["Reconnect", "Disconnect", "Collapse Sidebar"]
+    labels = _button_labels(at)
+    assert "Reconnect" in labels
+    assert "Disconnect" in labels
+    assert "Collapse Sidebar" in labels
     assert [item.value for item in at.sidebar.caption] == ["Sidebar navigation"]
 
 
@@ -313,7 +329,11 @@ def test_compact_rail_keeps_option_chain_accessible():
     at = AppTest.from_string(_compact_option_chain_layout_script())
     at.run(timeout=20)
 
-    assert [item.label for item in at.button] == ["Reconnect", "Disconnect", "Expand Sidebar"]
+    labels = _button_labels(at)
+    assert "Reconnect" in labels
+    assert "Disconnect" in labels
+    assert "Expand Sidebar" in labels
+    assert "Option Chain" in labels
     assert [item.value for item in at.sidebar.caption] == ["Sidebar navigation"]
     assert "The left module rail is collapsed. Expand it to browse the full workspace." in [item.value for item in at.caption]
     assert "Option chain body" in [item.value for item in at.markdown]
@@ -323,7 +343,9 @@ def test_expired_session_routes_to_startup_with_reconnect_action():
     at = AppTest.from_string(_expired_session_recovery_script())
     at.run(timeout=20)
 
-    assert [item.label for item in at.button] == ["Reconnect", "Collapse Sidebar"]
+    labels = _button_labels(at)
+    assert "Reconnect" in labels
+    assert "Collapse Sidebar" in labels
     assert [item.value for item in at.sidebar.caption] == ["Sidebar navigation"]
     assert any("Session Expired" in item.value for item in at.markdown)
     assert "Startup recovery: expired" in [item.value for item in at.markdown]
@@ -372,3 +394,13 @@ def test_dashboard_workspace_stays_clear_of_module_launcher_cards():
         in item.value
         for item in at.markdown
     )
+
+
+def test_workspace_shell_renders_visible_module_rail_in_main_panel():
+    at = AppTest.from_string(_workspace_layout_script())
+    at.run(timeout=20)
+
+    labels = _button_labels(at)
+    assert "Option Chain" in labels
+    assert "Paper Trading" in labels
+    assert "Analytics" in labels
