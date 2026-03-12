@@ -155,6 +155,7 @@ class SessionState:
         "activity_log": [],
         "_order_in_progress": False,
         "master_password": os.getenv("BREEZE_MASTER_PASSWORD", ""),
+        "nav_mode": "expanded",
         "sidebar_visible": True,
     }
 
@@ -162,7 +163,13 @@ class SessionState:
     def initialize():
         for k, v in SessionState.DEFAULTS.items():
             if k not in st.session_state:
-                st.session_state[k] = v
+                if k == "nav_mode":
+                    legacy_visible = st.session_state.get("sidebar_visible", True)
+                    st.session_state[k] = "expanded" if legacy_visible else "compact"
+                else:
+                    st.session_state[k] = v
+        if st.session_state.get("nav_mode") not in ("expanded", "compact"):
+            st.session_state["nav_mode"] = "expanded"
 
     @staticmethod
     def is_authenticated():
@@ -184,6 +191,20 @@ class SessionState:
     @staticmethod
     def navigate_to(page):
         st.session_state.current_page = page
+
+    @staticmethod
+    def get_nav_mode():
+        mode = st.session_state.get("nav_mode", "expanded")
+        if mode not in ("expanded", "compact"):
+            mode = "expanded"
+            st.session_state["nav_mode"] = mode
+        return mode
+
+    @staticmethod
+    def set_nav_mode(mode: str):
+        st.session_state["nav_mode"] = "compact" if str(mode).lower() == "compact" else "expanded"
+        # Preserve the legacy flag as a migration shim for older code paths.
+        st.session_state["sidebar_visible"] = True
 
     @staticmethod
     def log_activity(action, detail=""):

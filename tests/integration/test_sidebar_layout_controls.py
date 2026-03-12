@@ -73,8 +73,8 @@ def test_logged_out_users_land_on_startup_screen():
     at = AppTest.from_string(_startup_layout_script())
     at.run(timeout=10)
 
-    assert [item.label for item in at.button] == ["Hide Menu"]
-    assert not at.sidebar.caption
+    assert [item.label for item in at.button] == ["Connect", "Compact Menu"]
+    assert [item.value for item in at.sidebar.caption] == ["Sidebar navigation"]
     assert "Startup screen" in [item.value for item in at.markdown]
     assert "Dashboard body" not in [item.value for item in at.markdown]
 
@@ -83,18 +83,18 @@ def test_workspace_layout_can_hide_and_restore_sidebar():
     at = AppTest.from_string(_workspace_layout_script())
     at.run(timeout=10)
 
-    assert [item.label for item in at.button] == ["Hide Menu"]
+    assert [item.label for item in at.button] == ["Reconnect", "Disconnect", "Compact Menu"]
     assert [item.value for item in at.sidebar.caption] == ["Sidebar navigation"]
     assert "Dashboard body" in [item.value for item in at.markdown]
 
-    at.button[0].click().run()
+    at.button[2].click().run()
 
-    assert [item.label for item in at.button] == ["Show Menu"]
-    assert not at.sidebar.caption
-    assert "Left menu hidden. Use Show Menu to reopen it." in [item.value for item in at.caption]
+    assert [item.label for item in at.button] == ["Reconnect", "Disconnect", "Expand Menu"]
+    assert [item.value for item in at.sidebar.caption] == ["Sidebar navigation"]
+    assert "Navigation rail is compact. Expand it for full context." in [item.value for item in at.caption]
     assert "Dashboard body" in [item.value for item in at.markdown]
 
-    at.button[0].click().run()
+    at.button[2].click().run()
 
-    assert [item.label for item in at.button] == ["Hide Menu"]
+    assert [item.label for item in at.button] == ["Reconnect", "Disconnect", "Compact Menu"]
     assert [item.value for item in at.sidebar.caption] == ["Sidebar navigation"]

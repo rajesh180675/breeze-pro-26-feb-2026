@@ -282,23 +282,156 @@ RESPONSIVE_CSS = """
 </style>
 """
 
-SIDEBAR_HIDDEN_CSS = """
+APP_SHELL_CSS = """
+<style>
+.shell-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.95rem 1.1rem;
+  border: 1px solid rgba(56, 189, 248, 0.16);
+  border-radius: 16px;
+  background: linear-gradient(135deg, rgba(15, 23, 42, 0.95), rgba(17, 24, 39, 0.92));
+  box-shadow: 0 18px 45px rgba(2, 6, 23, 0.18);
+  margin-bottom: 0.9rem;
+}
+.shell-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+}
+.shell-brand-mark {
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: 0.8rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #0891b2, #1d4ed8);
+  color: #f8fafc;
+  font-weight: 800;
+  font-size: 1rem;
+}
+.shell-brand-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 0.08rem;
+}
+.shell-brand-name {
+  color: #f8fafc;
+  font-size: 1rem;
+  font-weight: 800;
+  line-height: 1.1;
+}
+.shell-brand-meta {
+  color: #94a3b8;
+  font-size: 0.78rem;
+}
+.shell-page-title {
+  color: #f8fafc;
+  font-size: 1.1rem;
+  font-weight: 700;
+  line-height: 1.2;
+  margin-bottom: 0.15rem;
+}
+.shell-page-copy {
+  color: #a5b4fc;
+  font-size: 0.84rem;
+}
+.shell-status-stack {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  justify-content: flex-end;
+}
+.shell-pill {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 0.38rem 0.75rem;
+  font-size: 0.8rem;
+  font-weight: 700;
+  border: 1px solid transparent;
+}
+.shell-pill.connected {
+  color: #bbf7d0;
+  background: rgba(22, 163, 74, 0.14);
+  border-color: rgba(34, 197, 94, 0.25);
+}
+.shell-pill.warning {
+  color: #fde68a;
+  background: rgba(245, 158, 11, 0.14);
+  border-color: rgba(245, 158, 11, 0.24);
+}
+.shell-pill.offline {
+  color: #cbd5e1;
+  background: rgba(71, 85, 105, 0.28);
+  border-color: rgba(148, 163, 184, 0.18);
+}
+.shell-pill.market {
+  color: #67e8f9;
+  background: rgba(8, 145, 178, 0.15);
+  border-color: rgba(34, 211, 238, 0.18);
+}
+.shell-note {
+  color: #94a3b8;
+  font-size: 0.82rem;
+  margin: 0.1rem 0 0.85rem;
+}
+.shell-rail-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  margin-bottom: 0.75rem;
+}
+.shell-rail-mark {
+  width: 2.15rem;
+  height: 2.15rem;
+  border-radius: 0.75rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #0891b2, #1d4ed8);
+  color: #f8fafc;
+  font-weight: 800;
+}
+.shell-rail-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 0.08rem;
+}
+.shell-rail-name {
+  color: #f8fafc;
+  font-weight: 800;
+  font-size: 1rem;
+}
+.shell-rail-meta {
+  color: #94a3b8;
+  font-size: 0.75rem;
+}
+@media (max-width: 900px) {
+  .shell-bar {
+    padding: 0.8rem 0.9rem;
+  }
+  .shell-page-copy {
+    display: none;
+  }
+}
+</style>
+"""
+
+SIDEBAR_COMPACT_CSS = """
 <style>
 [data-testid="stSidebar"] {
-  margin-left: calc(-1 * var(--sidebar-width));
-}
-[data-testid="stSidebar"][aria-expanded="true"] {
-  min-width: 0 !important;
-  max-width: 0 !important;
+  min-width: 14rem !important;
+  max-width: 14rem !important;
 }
 [data-testid="stSidebar"] > div:first-child {
-  width: 0 !important;
+  width: 14rem !important;
 }
-[data-testid="stSidebarNav"] {
+.rail-detail {
   display: none !important;
-}
-.block-container {
-  max-width: 100% !important;
 }
 </style>
 """
@@ -508,16 +641,78 @@ def page_header(title: str):
 
 
 def render_layout_controls() -> None:
-    controls_col, action_col = st.columns([6, 1])
-    with controls_col:
-        if not st.session_state.get("sidebar_visible", True):
-            st.caption("Left menu hidden. Use Show Menu to reopen it.")
-    with action_col:
-        is_visible = st.session_state.get("sidebar_visible", True)
-        button_label = "Hide Menu" if is_visible else "Show Menu"
-        if st.button(button_label, key="toggle_sidebar_visibility", width="stretch"):
-            st.session_state["sidebar_visible"] = not is_visible
-            st.rerun()
+    page_label = "Startup" if not SessionState.is_authenticated() else SessionState.get_current_page()
+    nav_mode = SessionState.get_nav_mode()
+    market_status = C.get_market_status()
+    if not SessionState.is_authenticated():
+        connection_label = "Not Connected"
+        connection_class = "offline"
+        page_copy = "Startup mode keeps connect access visible in the main workspace."
+    elif SessionState.is_session_expired():
+        connection_label = "Session Expired"
+        connection_class = "warning"
+        page_copy = "Reconnect to re-enter the live trading workspace."
+    elif SessionState.is_session_stale():
+        connection_label = "Session Aging"
+        connection_class = "warning"
+        page_copy = "Workspace is live, but the session should be refreshed soon."
+    else:
+        connection_label = "Connected"
+        connection_class = "connected"
+        page_copy = "Professional workspace shell with persistent navigation and session controls."
+
+    st.markdown(
+        (
+            '<div class="shell-bar">'
+            '<div class="shell-brand">'
+            '<div class="shell-brand-mark">BP</div>'
+            '<div class="shell-brand-copy">'
+            '<div class="shell-brand-name">Breeze PRO</div>'
+            '<div class="shell-brand-meta">Trading terminal shell</div>'
+            '</div>'
+            '</div>'
+            f'<div><div class="shell-page-title">{page_label}</div><div class="shell-page-copy">{page_copy}</div></div>'
+            '<div class="shell-status-stack">'
+            f'<span class="shell-pill {connection_class}">{connection_label}</span>'
+            f'<span class="shell-pill market">{market_status.get("label", "Market status unavailable")}</span>'
+            '</div>'
+            '</div>'
+        ),
+        unsafe_allow_html=True,
+    )
+
+    action_widths = [1, 1, 1] if SessionState.is_authenticated() else [1, 1]
+    app_col, info_col = st.columns([5, 3])
+    with app_col:
+        note = "Navigation rail is compact. Expand it for full context." if nav_mode == "compact" else "Navigation rail is expanded and always visible."
+        st.caption(note)
+    with info_col:
+        action_cols = st.columns(action_widths)
+        action_index = 0
+        if SessionState.is_authenticated():
+            with action_cols[action_index]:
+                if st.button("Reconnect", key="shell_reconnect_action", width="stretch"):
+                    _cleanup_session()
+                    st.rerun()
+            action_index += 1
+            with action_cols[action_index]:
+                if st.button("Disconnect", key="shell_disconnect_action", width="stretch"):
+                    _cleanup_session()
+                    st.rerun()
+            action_index += 1
+        else:
+            with action_cols[action_index]:
+                if st.button("Connect", key="shell_connect_action", width="stretch"):
+                    st.session_state["startup_focus_connect"] = True
+                    SessionState.navigate_to("🏠 Dashboard")
+                    st.rerun()
+            action_index += 1
+        with action_cols[action_index]:
+            button_label = "Expand Menu" if nav_mode == "compact" else "Compact Menu"
+            if st.button(button_label, key="toggle_sidebar_visibility", width="stretch"):
+                next_mode = "expanded" if nav_mode == "compact" else "compact"
+                SessionState.set_nav_mode(next_mode)
+                st.rerun()
 
 
 def section(title: str):
@@ -1188,14 +1383,22 @@ def render_auto_refresh(page_key: str):
 # ═══════════════════════════════════════════════════════════════
 
 def render_sidebar():
+    nav_mode = SessionState.get_nav_mode()
     with st.sidebar:
-        st.markdown("""
-        <div style="text-align:center;padding:.5rem 0 1rem">
-            <span style="font-size:2rem">📈</span><br>
-            <span style="font-size:1.3rem;font-weight:800;color:#fff">Breeze PRO</span><br>
-            <span style="font-size:.7rem;color:#aaa">v10.0 — Production Terminal</span>
-        </div>
-        """, unsafe_allow_html=True)
+        st.markdown(
+            """
+            <div class="shell-rail-brand">
+                <div class="shell-rail-mark">BP</div>
+                <div class="shell-rail-copy rail-detail">
+                    <div class="shell-rail-name">Breeze PRO</div>
+                    <div class="shell-rail-meta">v10.0 • Trading workspace</div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        if nav_mode == "compact":
+            st.caption("Compact rail")
         st.markdown("---")
 
         if st.session_state.get("paper_trading_enabled"):
@@ -1446,7 +1649,7 @@ def page_startup():
         db_detail = f"Database check failed: {exc}"
 
     profile_name = active_profile.get("profile_name") or "No active profile"
-    nav_hidden = not st.session_state.get("sidebar_visible", True)
+    nav_compact = SessionState.get_nav_mode() == "compact"
     badge_items = [
         f"Market: {market_status.get('label', 'Unknown')}",
         f"Profiles: {len(profiles)} saved",
@@ -1522,9 +1725,9 @@ def page_startup():
             ),
             _startup_status_card(
                 "Navigation",
-                "Menu hidden" if nav_hidden else "Menu visible",
-                "Connect remains available in the main panel." if nav_hidden else "You can hide the menu without losing the connect flow.",
-                "warn" if nav_hidden else "ok",
+                "Menu compact" if nav_compact else "Menu expanded",
+                "Connect remains available in the main panel." if nav_compact else "Navigation stays visible while the full rail is expanded.",
+                "warn" if nav_compact else "ok",
             ),
         ]
         st.markdown(
@@ -1538,8 +1741,10 @@ def page_startup():
             '</div>',
             unsafe_allow_html=True,
         )
-        if nav_hidden:
-            info_box("The left menu is hidden right now, but this startup screen stays fully usable.")
+        if st.session_state.pop("startup_focus_connect", False):
+            info_box("Connect form is active below. Use the primary button in the Connect panel to enter the workspace.")
+        elif nav_compact:
+            info_box("The navigation rail is compact right now, but this startup screen stays fully usable.")
 
 
 def _cleanup_session():
@@ -5212,11 +5417,13 @@ def main():
     try:
         SessionState.initialize()
         st.markdown(BREEZE_PRO_CSS, unsafe_allow_html=True)
+        st.markdown(APP_SHELL_CSS, unsafe_allow_html=True)
         st.markdown(RESPONSIVE_CSS, unsafe_allow_html=True)
-        if not st.session_state.get("sidebar_visible", True):
-            st.markdown(SIDEBAR_HIDDEN_CSS, unsafe_allow_html=True)
+        if SessionState.get_nav_mode() == "compact":
+            st.markdown(SIDEBAR_COMPACT_CSS, unsafe_allow_html=True)
         components.html(KEYBOARD_SHORTCUTS_JS, height=0)
         render_layout_controls()
+        render_sidebar()
 
         if not SessionState.is_authenticated():
             render_alert_banners()
@@ -5245,8 +5452,6 @@ def main():
             gtt_mgr.start_sync()
             st.session_state["gtt_manager"] = gtt_mgr
 
-        if st.session_state.get("sidebar_visible", True):
-            render_sidebar()
         render_alert_banners()
         st.markdown("---")
 
