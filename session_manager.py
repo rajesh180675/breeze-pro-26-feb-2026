@@ -150,6 +150,7 @@ class SessionState:
         "session_token": "",
         "login_time": None,
         "last_login_time": None,
+        "post_login_target": "🏠 Dashboard",
         "user_name": "",
         "user_id": "",
         "debug_mode": False,
