@@ -162,6 +162,60 @@ PAGES = {
 
 AUTH_PAGES = set([k for k in PAGES.keys() if k != "🏠 Dashboard"])
 
+NAV_GROUPS = {
+    "Home": [
+        "🏠 Dashboard",
+    ],
+    "Trading": [
+        "⛓️ Option Chain",
+        "💸 Sell Options",
+        "❌ Square Off",
+        "📋 Orders & Trades",
+        "💼 Positions",
+        "📈 Futures Trading",
+        "⏰ GTT Orders",
+        "📄 Paper Trading",
+    ],
+    "Monitoring": [
+        "🚨 Risk Monitor",
+        "👁️ Watchlist",
+    ],
+    "Analysis": [
+        "📊 Historical Data",
+        "🧠 Strategy Builder",
+        "🔬 Analytics",
+    ],
+    "System": [
+        "⚙️ Settings",
+    ],
+}
+
+NAV_GROUP_SUMMARIES = {
+    "Home": "Workspace overview and session landing.",
+    "Trading": "Live execution, chain, positions, and order workflows.",
+    "Monitoring": "Exposure tracking, alerts, and watchlists.",
+    "Analysis": "Historical context, strategy building, and portfolio analytics.",
+    "System": "Profiles, preferences, and operational controls.",
+}
+
+PAGE_SUMMARIES = {
+    "🏠 Dashboard": "Session overview, balances, positions, and launch controls.",
+    "⛓️ Option Chain": "Live option-chain ladder, Greeks, replay, and intraday context.",
+    "💸 Sell Options": "Single-leg sell workflow with quote, margin, and stop-loss setup.",
+    "❌ Square Off": "Close live option positions individually or in bulk.",
+    "📋 Orders & Trades": "Orders, trades, persistent history, and activity tracking.",
+    "💼 Positions": "Current exposure, P&L, and exportable holdings view.",
+    "📊 Historical Data": "OHLCV history, charts, and technical analysis workspace.",
+    "📈 Futures Trading": "Futures quotes, basis monitoring, and execution tools.",
+    "⏰ GTT Orders": "Good Till Triggered order management and sync controls.",
+    "🧠 Strategy Builder": "Predefined and custom multi-leg strategy construction.",
+    "🔬 Analytics": "Portfolio Greeks, VaR, drawdown, and scenario analysis.",
+    "🚨 Risk Monitor": "Risk controls, alerts, and portfolio protection workflows.",
+    "👁️ Watchlist": "Track selected contracts and surface market context quickly.",
+    "📄 Paper Trading": "Practice the workflow without placing live exchange orders.",
+    "⚙️ Settings": "Profiles, secrets, defaults, and system preferences.",
+}
+
 
 # ═══════════════════════════════════════════════════════════════
 # DECORATORS
@@ -208,6 +262,126 @@ def empty_state(icon, msg, sub=""):
 
 def page_header(title: str):
     st.markdown(f'<h1 class="page-header">{title}</h1>', unsafe_allow_html=True)
+
+
+def _page_display_name(page: str) -> str:
+    parts = str(page).split(" ", 1)
+    return parts[1] if len(parts) > 1 else str(page)
+
+
+def _get_post_login_target() -> str:
+    target = st.session_state.get("post_login_target") or "🏠 Dashboard"
+    if target not in PAGES:
+        target = "🏠 Dashboard"
+        st.session_state["post_login_target"] = target
+    return target
+
+
+def _set_post_login_target(page: str) -> None:
+    st.session_state["post_login_target"] = page if page in PAGES else "🏠 Dashboard"
+
+
+def _queue_post_login_target(page: str) -> None:
+    _set_post_login_target(page)
+    st.session_state["startup_focus_connect"] = True
+    SessionState.navigate_to("🏠 Dashboard")
+
+
+def _page_summary(page: str) -> str:
+    return PAGE_SUMMARIES.get(page, "Open this workspace module.")
+
+
+def _sidebar_group_expanded(group_name: str, pages: List[str], selected_page: str) -> bool:
+    nav_mode = SessionState.get_nav_mode()
+    if nav_mode != "compact":
+        return True
+    if selected_page in pages:
+        return True
+    if not SessionState.is_authenticated():
+        return group_name in {"Home", "Trading", "Analysis"}
+    return group_name == "Home"
+
+
+def _navigate_to_workspace_page(page: str) -> None:
+    target_page = page if page in PAGES else "🏠 Dashboard"
+    current_page = SessionState.get_current_page()
+    if current_page == "⛓️ Option Chain" and target_page != current_page:
+        cleanup_option_chain_ws_subscriptions()
+    SessionState.navigate_to(target_page)
+
+
+def _handle_module_selection(page: str) -> None:
+    if SessionState.is_authenticated():
+        _navigate_to_workspace_page(page)
+    else:
+        _queue_post_login_target(page)
+
+
+def render_sidebar_module_navigation(key_prefix: str) -> None:
+    auth = SessionState.is_authenticated()
+    selected_page = SessionState.get_current_page() if auth else _get_post_login_target()
+    st.markdown('<div class="rail-section-label">Workspace Modules</div>', unsafe_allow_html=True)
+    if auth:
+        st.caption(f"Current module: {_page_display_name(selected_page)}")
+    else:
+        st.caption(f"Launch after connect: {_page_display_name(selected_page)}")
+        st.caption("All trading, analysis, and monitoring modules stay selectable from this rail.")
+
+    for group_name, pages in NAV_GROUPS.items():
+        with st.expander(
+            f"{group_name} · {len(pages)}",
+            expanded=_sidebar_group_expanded(group_name, pages, selected_page),
+        ):
+            if SessionState.get_nav_mode() != "compact":
+                st.caption(NAV_GROUP_SUMMARIES.get(group_name, ""))
+            for idx, page in enumerate(pages):
+                label = _page_display_name(page)
+                is_selected = page == selected_page
+                if st.button(
+                    label,
+                    key=f"{key_prefix}_{group_name}_{idx}",
+                    width="stretch",
+                    disabled=auth and is_selected,
+                    help=_page_summary(page),
+                ):
+                    _handle_module_selection(page)
+                    st.rerun()
+                if is_selected:
+                    st.caption("Current workspace module." if auth else "Selected launch target.")
+
+
+def render_workspace_module_directory(key_prefix: str) -> None:
+    current_page = SessionState.get_current_page()
+    section("Workspace Modules")
+    st.caption("Open any trading, monitoring, analysis, or system module directly from the dashboard.")
+    info_box(f"Current module: {_page_display_name(current_page)}")
+
+    for group_name, pages in NAV_GROUPS.items():
+        st.markdown(f'<div class="module-directory-group">{group_name}</div>', unsafe_allow_html=True)
+        cols = st.columns(3)
+        for idx, page in enumerate(pages):
+            label = _page_display_name(page)
+            is_current = page == current_page
+            card_copy = f"Current workspace module. {_page_summary(page)}" if is_current else _page_summary(page)
+            with cols[idx % 3]:
+                active_class = " active" if is_current else ""
+                st.markdown(
+                    (
+                        f'<div class="module-directory-card{active_class}">'
+                        f'<div class="module-directory-title">{label}</div>'
+                        f'<div class="module-directory-copy">{card_copy}</div>'
+                        '</div>'
+                    ),
+                    unsafe_allow_html=True,
+                )
+                if st.button(
+                    label,
+                    key=f"{key_prefix}_{group_name}_{idx}",
+                    width="stretch",
+                    disabled=is_current,
+                ):
+                    _navigate_to_workspace_page(page)
+                    st.rerun()
 
 
 def _get_startup_recovery_state() -> Dict[str, str]:
@@ -359,6 +533,55 @@ def warn_box(text: str):
 
 def danger_box(text: str):
     st.markdown(f'<div class="danger-box">{text}</div>', unsafe_allow_html=True)
+
+
+def render_locked_module_directory(key_prefix: str, sidebar: bool = False) -> None:
+    selected_target = _get_post_login_target()
+    host = st.sidebar if sidebar else st
+
+    if sidebar:
+        host.caption(f"Launch after connect: {_page_display_name(selected_target)}")
+        host.caption("Every workspace module stays visible here even before authentication.")
+    else:
+        section("Workspace Modules")
+        st.caption("Choose any module now. The app will open it immediately after you connect.")
+        info_box(f"Selected launch target: {_page_display_name(selected_target)}")
+
+    for group_name, pages in NAV_GROUPS.items():
+        if sidebar:
+            with host.expander(group_name, expanded=group_name in {"Home", "Trading", "Analysis"}):
+                for idx, page in enumerate(pages):
+                    label = _page_display_name(page)
+                    button_label = label
+                    if st.button(button_label, key=f"{key_prefix}_{group_name}_{idx}", width="stretch"):
+                        _queue_post_login_target(page)
+                        st.rerun()
+                    if page == selected_target:
+                        st.caption("Selected launch target.")
+        else:
+            st.markdown(f'<div class="module-directory-group">{group_name}</div>', unsafe_allow_html=True)
+            cols = st.columns(3)
+            for idx, page in enumerate(pages):
+                label = _page_display_name(page)
+                with cols[idx % 3]:
+                    active_class = " active" if page == selected_target else ""
+                    card_copy = (
+                        f"Selected launch target. {_page_summary(page)}"
+                        if page == selected_target else _page_summary(page)
+                    )
+                    st.markdown(
+                        (
+                            f'<div class="module-directory-card{active_class}">'
+                            f'<div class="module-directory-title">{label}</div>'
+                            f'<div class="module-directory-copy">{card_copy}</div>'
+                            '</div>'
+                        ),
+                        unsafe_allow_html=True,
+                    )
+                    button_label = label
+                    if st.button(button_label, key=f"{key_prefix}_{group_name}_{idx}", width="stretch"):
+                        _queue_post_login_target(page)
+                        st.rerun()
 
 
 def pnl_metric(label: str, value: float, col=None):
@@ -1040,26 +1263,11 @@ def render_sidebar():
             )
 
         has_secrets = Credentials.has_stored_credentials()
-        avail = list(PAGES.keys()) if SessionState.is_authenticated() else ["🏠 Dashboard"]
         cur = SessionState.get_current_page()
-        if cur not in avail:
-            cur = "🏠 Dashboard"
-            SessionState.navigate_to(cur)
-        try:
-            idx = avail.index(cur)
-        except ValueError:
-            idx = 0
+        if cur not in PAGES:
+            SessionState.navigate_to("🏠 Dashboard")
 
-        sel = st.radio(
-            "Nav", avail, index=idx,
-            format_func=lambda p: p,
-            label_visibility="collapsed", key="nav"
-        )
-        if sel != cur:
-            if cur == "⛓️ Option Chain" and sel != "⛓️ Option Chain":
-                cleanup_option_chain_ws_subscriptions()
-            SessionState.navigate_to(sel)
-            st.rerun()
+        render_sidebar_module_navigation("sidebar_nav")
 
         st.markdown("---")
 
@@ -1149,7 +1357,6 @@ def render_sidebar():
 
         else:
             st.caption("Connect from the startup screen in the main workspace.")
-            st.caption("The left menu is now navigation-only before login.")
 
         st.markdown("---")
         with st.expander("⚙️ Quick Settings"):
@@ -1292,6 +1499,7 @@ def page_startup():
     profile_name = active_profile.get("profile_name") or "No active profile"
     nav_compact = SessionState.get_nav_mode() == "compact"
     last_login_display = _format_session_timestamp(st.session_state.get("last_login_time"))
+    selected_target = _get_post_login_target()
 
     ws_value = "Cold start"
     ws_detail = "Websocket will initialize after a successful connection."
@@ -1358,7 +1566,10 @@ def page_startup():
                 unsafe_allow_html=True,
             )
         section("Connect")
-        st.caption("Authenticate here first. The dashboard and trading pages open after a successful session.")
+        st.caption(
+            "Authenticate here first. The dashboard and trading pages open after a successful session."
+            f" Current launch target: {_page_display_name(selected_target)}."
+        )
         render_connect_form("startup")
         st.markdown("---")
         section("Workspace Preview")
@@ -1384,6 +1595,8 @@ def page_startup():
             '<div class="startup-shortcuts">Shortcuts stay available after login: Alt+1..9 for page navigation, Alt+R to refresh the active workspace.</div>',
             unsafe_allow_html=True,
         )
+        st.markdown("---")
+        render_locked_module_directory("startup_launch")
 
     with side_col:
         section("Readiness")
@@ -1444,6 +1657,7 @@ def page_startup():
 
 
 def _cleanup_session(reason: str = "", detail: str = ""):
+    current_page = SessionState.get_current_page()
     cleanup_option_chain_ws_subscriptions()
     mgr = lf.get_live_feed_manager()
     if mgr is not None:
@@ -1461,6 +1675,8 @@ def _cleanup_session(reason: str = "", detail: str = ""):
         "expired": "Session expired or was revoked. Reconnect with a fresh token to continue.",
     }
     if reason:
+        if reason in {"expired", "reconnect"} and current_page in PAGES:
+            _set_post_login_target(current_page)
         _set_startup_recovery_state(reason, detail or recovery_detail_map.get(reason, "Reconnect to continue."))
     else:
         _clear_startup_recovery_state()
@@ -1479,6 +1695,7 @@ def do_login(api_key, api_secret, token, totp_secret=""):
                 Credentials.save_runtime_credentials(api_key, api_secret, token)
                 SessionState.set_authentication(True, client)
                 st.session_state["last_login_time"] = st.session_state.get("login_time")
+                SessionState.navigate_to(_get_post_login_target())
                 _clear_startup_recovery_state()
                 if "paper_engine" not in st.session_state:
                     st.session_state.paper_engine = PaperTradingEngine(client)
@@ -1665,18 +1882,9 @@ def page_dashboard():
             st.metric("Equity P&L", format_currency(total_eq))
             st.dataframe(pd.DataFrame(eq_rows), hide_index=True, width="stretch")
 
-    # ── Quick Actions ─────────────────────────────────────────
+    # ── Workspace Launcher ────────────────────────────────────
     st.markdown("---")
-    section("⚡ Quick Actions")
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
-    actions = [("📊 Chain", "⛓️ Option Chain"), ("💰 Sell", "💸 Sell Options"),
-               ("🔄 Square Off", "❌ Square Off"), ("🎯 Strategies", "🧠 Strategy Builder"),
-               ("🛡️ Risk", "🚨 Risk Monitor"), ("👁️ Watchlist", "👁️ Watchlist")]
-    for col, (label, page) in zip([c1, c2, c3, c4, c5, c6], actions):
-        with col:
-            if st.button(label, width="stretch"):
-                SessionState.navigate_to(page)
-                st.rerun()
+    render_workspace_module_directory("dashboard_module")
 
     # ── Session Stats ─────────────────────────────────────────
     summary = _db.get_trade_summary()

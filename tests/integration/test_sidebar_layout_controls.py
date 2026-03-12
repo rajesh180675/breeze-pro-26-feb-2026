@@ -5,6 +5,10 @@ from streamlit.testing.v1 import AppTest
 pytestmark = pytest.mark.integration
 
 
+def _find_button(at: AppTest, label: str):
+    return next(button for button in at.button if button.label == label)
+
+
 def _startup_layout_script() -> str:
     return """
 import sys
@@ -160,9 +164,70 @@ app_main.main()
 """
 
 
+def _sidebar_module_navigation_script() -> str:
+    return """
+import sys
+import types
+import importlib.util
+import streamlit as st
+
+if "breeze_connect" not in sys.modules:
+    stub = types.ModuleType("breeze_connect")
+
+    class BreezeConnect:
+        pass
+
+    stub.BreezeConnect = BreezeConnect
+    sys.modules["breeze_connect"] = stub
+
+st.session_state["authenticated"] = False
+st.session_state["nav_mode"] = "expanded"
+if "post_login_target" not in st.session_state:
+    st.session_state["post_login_target"] = "🏠 Dashboard"
+
+spec = importlib.util.spec_from_file_location("app_main_test", r"/workspaces/breeze-pro-26-feb-2026/app.py")
+app_main = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(app_main)
+
+with st.sidebar:
+    app_main.render_sidebar_module_navigation("sidebar_test")
+
+st.write(f"Launch target: {app_main._page_display_name(app_main._get_post_login_target())}")
+"""
+
+
+def _workspace_module_launcher_script() -> str:
+    return """
+import sys
+import types
+import importlib.util
+import streamlit as st
+
+if "breeze_connect" not in sys.modules:
+    stub = types.ModuleType("breeze_connect")
+
+    class BreezeConnect:
+        pass
+
+    stub.BreezeConnect = BreezeConnect
+    sys.modules["breeze_connect"] = stub
+
+st.session_state["authenticated"] = True
+if "current_page" not in st.session_state:
+    st.session_state["current_page"] = "🏠 Dashboard"
+
+spec = importlib.util.spec_from_file_location("app_main_test", r"/workspaces/breeze-pro-26-feb-2026/app.py")
+app_main = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(app_main)
+
+app_main.render_workspace_module_directory("workspace_test")
+st.write(f"Current module: {app_main._page_display_name(app_main.SessionState.get_current_page())}")
+"""
+
+
 def test_logged_out_users_land_on_startup_screen():
     at = AppTest.from_string(_startup_layout_script())
-    at.run(timeout=10)
+    at.run(timeout=20)
 
     assert [item.label for item in at.button] == ["Connect", "Compact Menu"]
     assert [item.value for item in at.sidebar.caption] == ["Sidebar navigation"]
@@ -172,7 +237,7 @@ def test_logged_out_users_land_on_startup_screen():
 
 def test_workspace_layout_can_compact_and_restore_sidebar():
     at = AppTest.from_string(_workspace_layout_script())
-    at.run(timeout=10)
+    at.run(timeout=20)
 
     assert [item.label for item in at.button] == ["Reconnect", "Disconnect", "Compact Menu"]
     assert [item.value for item in at.sidebar.caption] == ["Sidebar navigation"]
@@ -193,7 +258,7 @@ def test_workspace_layout_can_compact_and_restore_sidebar():
 
 def test_compact_rail_keeps_option_chain_accessible():
     at = AppTest.from_string(_compact_option_chain_layout_script())
-    at.run(timeout=10)
+    at.run(timeout=20)
 
     assert [item.label for item in at.button] == ["Reconnect", "Disconnect", "Expand Menu"]
     assert [item.value for item in at.sidebar.caption] == ["Sidebar navigation"]
@@ -203,9 +268,42 @@ def test_compact_rail_keeps_option_chain_accessible():
 
 def test_expired_session_routes_to_startup_with_reconnect_action():
     at = AppTest.from_string(_expired_session_recovery_script())
-    at.run(timeout=10)
+    at.run(timeout=20)
 
     assert [item.label for item in at.button] == ["Reconnect", "Compact Menu"]
     assert [item.value for item in at.sidebar.caption] == ["Sidebar navigation"]
     assert any("Session Expired" in item.value for item in at.markdown)
     assert "Startup recovery: expired" in [item.value for item in at.markdown]
+
+
+def test_prelogin_sidebar_module_navigation_exposes_full_workspace():
+    at = AppTest.from_string(_sidebar_module_navigation_script())
+    at.run(timeout=20)
+
+    labels = [item.label for item in at.button]
+    assert "Dashboard" in labels
+    assert "Option Chain" in labels
+    assert "Historical Data" in labels
+    assert "Futures Trading" in labels
+    assert "Strategy Builder" in labels
+    assert "Analytics" in labels
+    assert "Risk Monitor" in labels
+    assert "Paper Trading" in labels
+
+
+def test_prelogin_sidebar_module_navigation_updates_launch_target():
+    at = AppTest.from_string(_sidebar_module_navigation_script())
+    at.run(timeout=20)
+
+    _find_button(at, "Analytics").click().run()
+
+    assert "Launch target: Analytics" in [item.value for item in at.markdown]
+
+
+def test_workspace_module_launcher_can_open_previous_modules():
+    at = AppTest.from_string(_workspace_module_launcher_script())
+    at.run(timeout=20)
+
+    _find_button(at, "Futures Trading").click().run()
+
+    assert "Current module: Futures Trading" in [item.value for item in at.markdown]

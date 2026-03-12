@@ -365,10 +365,43 @@ BREEZE_PRO_CSS = """
 
 KEYBOARD_SHORTCUTS_JS = """
 <script>
+const breezeModuleNames = [
+  "Dashboard",
+  "Option Chain",
+  "Sell Options",
+  "Square Off",
+  "Orders & Trades",
+  "Positions",
+  "Historical Data",
+  "Futures Trading",
+  "GTT Orders",
+  "Strategy Builder",
+  "Analytics",
+  "Risk Monitor",
+  "Watchlist",
+  "Paper Trading",
+  "Settings"
+];
+
+function resolveNavTargets() {
+  const radioPages = document.querySelectorAll('[data-testid="stRadio"] label');
+  if (radioPages.length) {
+    return Array.from(radioPages);
+  }
+  const sidebar = document.querySelector('section[data-testid="stSidebar"]');
+  if (!sidebar) {
+    return [];
+  }
+  const sidebarButtons = Array.from(sidebar.querySelectorAll('button'));
+  return breezeModuleNames
+    .map((name) => sidebarButtons.find((btn) => btn.textContent.trim() === name))
+    .filter(Boolean);
+}
+
 document.addEventListener('keydown', function(e) {
   if (e.altKey && e.key >= '1' && e.key <= '9') {
     e.preventDefault();
-    const pages = document.querySelectorAll('[data-testid="stRadio"] label');
+    const pages = resolveNavTargets();
     const idx = parseInt(e.key) - 1;
     if (pages[idx]) pages[idx].click();
   }
@@ -390,11 +423,25 @@ RESPONSIVE_CSS = """
 <style>
 @media (max-width: 768px) {
   section[data-testid="stSidebar"] {
-    width: 0 !important;
+    min-width: 17rem !important;
+    max-width: 17rem !important;
+  }
+
+  section[data-testid="stSidebar"] > div:first-child {
+    width: 17rem !important;
   }
 
   .page-header {
     font-size: 1.2rem;
+  }
+
+  .shell-bar {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .shell-status-stack {
+    justify-content: flex-start;
   }
 
   .stColumns {
@@ -537,6 +584,52 @@ APP_SHELL_CSS = """
   background: linear-gradient(135deg, #0f9db6, #1d4ed8);
   color: #f8fafc;
   font-weight: 800;
+}
+
+.rail-section-label {
+  color: #94a3b8;
+  font-size: 0.74rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  margin: 0.35rem 0 0.5rem;
+}
+
+.module-directory-group {
+  color: #67e8f9;
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  margin: 1rem 0 0.55rem;
+}
+
+.module-directory-card {
+  min-height: 8.25rem;
+  border-radius: 14px;
+  padding: 0.95rem 1rem;
+  margin-bottom: 0.55rem;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  background: linear-gradient(180deg, rgba(15, 23, 42, 0.82), rgba(10, 18, 27, 0.96));
+  box-shadow: 0 12px 28px rgba(2, 6, 23, 0.20);
+}
+
+.module-directory-card.active {
+  border-color: rgba(34, 197, 94, 0.32);
+  background: linear-gradient(180deg, rgba(8, 47, 73, 0.90), rgba(10, 18, 27, 0.98));
+}
+
+.module-directory-title {
+  color: #f8fafc;
+  font-size: 1rem;
+  font-weight: 700;
+  margin-bottom: 0.45rem;
+}
+
+.module-directory-copy {
+  color: rgba(226, 232, 240, 0.74);
+  font-size: 0.9rem;
+  line-height: 1.45;
 }
 
 @media (max-width: 900px) {
@@ -708,6 +801,10 @@ STARTUP_SCREEN_CSS = """
   .startup-status-grid,
   .startup-preview-grid {
     grid-template-columns: 1fr;
+  }
+
+  .module-directory-card {
+    min-height: auto;
   }
 
   .startup-title {
