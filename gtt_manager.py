@@ -6,7 +6,7 @@ import logging
 import threading
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from enum import Enum
 from typing import Dict, List, Optional, Tuple
 
@@ -183,6 +183,7 @@ CREATE INDEX IF NOT EXISTS idx_gtt_exchange ON gtt_orders(exchange_code, status)
 
 class GTTManager:
     SYNC_INTERVAL_SECONDS = 60
+    MAX_ORDER_BOOK_RANGE_DAYS = 10
 
     def __init__(self, client: BreezeAPIClient, db: TradeDB):
         self._client = client
@@ -359,9 +360,40 @@ class GTTManager:
         return self.cancel_single_leg(record.exchange_code, gtt_order_id) if record.gtt_type == GTTType.SINGLE else self.cancel_three_leg(record.exchange_code, gtt_order_id)
 
     def get_order_book(self, exchange_code: str = "NFO", from_date: str = "", to_date: str = "") -> Dict:
-        from_iso = convert_to_breeze_datetime(from_date) if from_date else convert_to_breeze_datetime("2020-01-01")
-        to_iso = convert_to_breeze_datetime(to_date) if to_date else convert_to_breeze_datetime(datetime.now().strftime("%Y-%m-%d"))
-        return self._client.call_sdk("gtt_order_book", retryable=True, exchange_code=exchange_code, from_date=from_iso, to_date=to_iso)
+        start_date, end_date = self._resolve_order_book_dates(from_date, to_date)
+        if start_date > end_date:
+            return {
+                "success": False,
+                "data": {},
+                "message": f"Invalid date range: from_date {start_date.isoformat()} cannot be after to_date {end_date.isoformat()}",
+                "error_code": "INVALID_DATE_RANGE",
+            }
+
+        orders: List[Dict] = []
+        for chunk_start, chunk_end in self._iter_order_book_ranges(start_date, end_date):
+            resp = self._client.call_sdk(
+                "gtt_order_book",
+                retryable=True,
+                exchange_code=exchange_code,
+                from_date=convert_to_breeze_datetime(chunk_start.isoformat()),
+                to_date=convert_to_breeze_datetime(chunk_end.isoformat()),
+            )
+            if not resp.get("success"):
+                return resp
+
+            chunk_data = resp.get("data") or {}
+            chunk_orders = chunk_data.get("Success") or []
+            if isinstance(chunk_orders, list):
+                orders.extend(item for item in chunk_orders if isinstance(item, dict))
+            elif isinstance(chunk_orders, dict):
+                orders.append(chunk_orders)
+
+        return {
+            "success": True,
+            "data": {"Status": 200, "Error": None, "Success": orders},
+            "message": "",
+            "error_code": None,
+        }
 
     def get_active_gtts(self) -> List[GTTOrderRecord]:
         return self._load_records(status_filter=GTTStatus.ACTIVE)
@@ -380,7 +412,20 @@ class GTTManager:
         self._sync_stop.set()
 
     def sync_with_api(self, exchange_code: str = "NFO") -> int:
-        resp = self.get_order_book(exchange_code=exchange_code)
+        active_records = [record for record in self.get_active_gtts() if record.exchange_code == exchange_code]
+        if not active_records:
+            self._last_sync = datetime.now()
+            return 0
+
+        earliest_active_date = min(
+            self._record_lookup_date(record) or datetime.now().date()
+            for record in active_records
+        )
+        resp = self.get_order_book(
+            exchange_code=exchange_code,
+            from_date=earliest_active_date.isoformat(),
+            to_date=datetime.now().date().isoformat(),
+        )
         if not resp.get("success"):
             return 0
         api_orders = (resp.get("data", {}) or {}).get("Success") or []
@@ -408,6 +453,49 @@ class GTTManager:
                 changes += 1
         self._last_sync = datetime.now()
         return changes
+
+    @classmethod
+    def _resolve_order_book_dates(cls, from_date: str, to_date: str) -> Tuple[date, date]:
+        end_date = cls._coerce_date(to_date) or datetime.now().date()
+        start_date = cls._coerce_date(from_date)
+        if start_date is None:
+            start_date = end_date - timedelta(days=cls.MAX_ORDER_BOOK_RANGE_DAYS - 1)
+        return start_date, end_date
+
+    @classmethod
+    def _iter_order_book_ranges(cls, start_date: date, end_date: date) -> List[Tuple[date, date]]:
+        ranges: List[Tuple[date, date]] = []
+        current = start_date
+        max_span = timedelta(days=cls.MAX_ORDER_BOOK_RANGE_DAYS - 1)
+        while current <= end_date:
+            chunk_end = min(end_date, current + max_span)
+            ranges.append((current, chunk_end))
+            current = chunk_end + timedelta(days=1)
+        return ranges
+
+    @staticmethod
+    def _coerce_date(value: str) -> Optional[date]:
+        if not value:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        if "T" in text:
+            text = text.split("T", 1)[0]
+        for fmt in ("%Y-%m-%d", "%d-%b-%Y", "%d-%B-%Y", "%d/%m/%Y", "%d-%m-%Y"):
+            try:
+                return datetime.strptime(text, fmt).date()
+            except ValueError:
+                continue
+        try:
+            return datetime.fromisoformat(text).date()
+        except ValueError:
+            log.warning("Unable to parse GTT order-book date %r", value)
+            return None
+
+    @classmethod
+    def _record_lookup_date(cls, record: GTTOrderRecord) -> Optional[date]:
+        return cls._coerce_date(record.created_at) or cls._coerce_date(record.trade_date)
 
     def _sync_loop(self) -> None:
         while not self._sync_stop.is_set():

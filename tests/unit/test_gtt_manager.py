@@ -39,6 +39,18 @@ class _FakeClient:
         return {"success": True, "data": {"Success": {}}}
 
 
+class _ChunkedOrderBookClient(_FakeClient):
+    def call_sdk(self, method_name, retryable=True, **kwargs):
+        self.calls.append((method_name, retryable, kwargs))
+        if method_name == "gtt_order_book":
+            chunk_no = sum(1 for name, _, _ in self.calls if name == "gtt_order_book")
+            return {
+                "success": True,
+                "data": {"Success": [{"gtt_order_id": f"GTT{chunk_no}", "status": "active"}]},
+            }
+        return {"success": True, "data": {"Success": {}}}
+
+
 def _base_three_leg_req() -> GTTOrderRequest:
     return GTTOrderRequest(
         exchange_code="NFO",
@@ -134,6 +146,37 @@ def test_cancel_routes_based_on_record_type():
     assert result["success"] is True
     method, _, _ = client.calls[-1]
     assert method == "gtt_three_leg_cancel_order"
+
+
+def test_get_order_book_splits_large_date_ranges():
+    db = TradeDB()
+    client = _ChunkedOrderBookClient()
+    mgr = GTTManager(client, db)
+
+    resp = mgr.get_order_book(exchange_code="NFO", from_date="2026-01-01", to_date="2026-01-25")
+
+    assert resp["success"] is True
+    order_book_calls = [call for call in client.calls if call[0] == "gtt_order_book"]
+    assert len(order_book_calls) == 3
+    assert order_book_calls[0][2]["from_date"] == "2026-01-01T06:00:00.000Z"
+    assert order_book_calls[0][2]["to_date"] == "2026-01-10T06:00:00.000Z"
+    assert order_book_calls[1][2]["from_date"] == "2026-01-11T06:00:00.000Z"
+    assert order_book_calls[1][2]["to_date"] == "2026-01-20T06:00:00.000Z"
+    assert order_book_calls[2][2]["from_date"] == "2026-01-21T06:00:00.000Z"
+    assert order_book_calls[2][2]["to_date"] == "2026-01-25T06:00:00.000Z"
+    assert [item["gtt_order_id"] for item in resp["data"]["Success"]] == ["GTT1", "GTT2", "GTT3"]
+
+
+def test_sync_skips_api_when_no_active_gtts():
+    db = TradeDB()
+    client = _FakeClient()
+    mgr = GTTManager(client, db)
+    _reset_gtt_table(db)
+
+    n = mgr.sync_with_api("NFO")
+
+    assert n == 0
+    assert not any(method == "gtt_order_book" for method, _, _ in client.calls)
 
 
 def test_sync_updates_status_to_triggered():
