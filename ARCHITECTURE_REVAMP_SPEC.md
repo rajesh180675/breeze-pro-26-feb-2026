@@ -1,48 +1,22 @@
 # Breeze Pro Architecture Revamp Spec
 
-## Purpose
+## Objective
 
-Define a professional target architecture for the repository and a safe migration plan from the current mixed codebase into a clearer, maintainable application structure.
+Modernize the application into a professional, layered Python service architecture without breaking current runtime entrypoints or tests. The current repository mixes:
 
-This document is intentionally a spec only. It does not assume the implementation happens in one large refactor.
+- a newer production API package under `app/`
+- a large legacy root-level Streamlit codebase
+- flat infrastructure code grouped under `app/lib/`
 
-## Current State Summary
+This revamp establishes clear package boundaries, an application factory, service-layer orchestration, and compatibility shims so the migration can land safely on `main`.
 
-The repository currently has two distinct layers:
+## Current Problems
 
-1. A newer production-oriented package under `app/`
-   - FastAPI entrypoint in `app/api/main.py`
-   - Infrastructure and domain concerns grouped together under `app/lib/`
-2. A large legacy root-level application surface
-   - Streamlit/UI modules
-   - trading logic
-   - persistence
-   - analytics
-   - option-chain and session workflows
-
-### Current Architectural Problems
-
-1. `app/lib/` is a catch-all package rather than a real architectural boundary.
-2. API transport concerns and operational logic are coupled.
-3. External integrations, configuration, logging, and domain errors are mixed at the same level.
-4. The legacy root-level modules are not organized into explicit bounded contexts.
-5. CI and typing targets do not fully reflect the intended production package architecture.
-6. The repository has no defined migration contract between legacy modules and the newer `app/` package.
-
-## Revamp Goals
-
-1. Introduce explicit architectural layers with clear responsibilities.
-2. Preserve runtime stability during migration.
-3. Reduce cross-module coupling and improve import discipline.
-4. Make testing, CI, and deployment align with the intended package boundaries.
-5. Establish a path to migrate legacy root modules without a disruptive big-bang rewrite.
-
-## Non-Goals
-
-1. Rewriting the entire trading domain in one step.
-2. Replacing Streamlit immediately.
-3. Changing external behavior without tests or migration guards.
-4. Moving every root-level module into `app/` in a single PR.
+1. `app/lib/` is a generic bucket rather than an architectural boundary.
+2. API endpoints own operational logic instead of delegating to services.
+3. Metrics, logging, configuration, auth, and transport concerns are tightly mixed.
+4. CI and type-checking target only a narrow subset of the actual package structure.
+5. The repository has no explicit migration plan between the legacy root modules and the new production package.
 
 ## Target Architecture
 
@@ -51,235 +25,75 @@ app/
   api/
     main.py
     routes/
-    middleware/
-    dependencies/
+      system.py
+  application/
+    system.py
   core/
-    settings.py
-    logging.py
     lifecycle.py
+    logging.py
+    settings.py
   domain/
     errors.py
-    models/
-    value_objects/
-    services/
-  application/
-    use_cases/
-    orchestrators/
-    dto/
   infrastructure/
+    observability/
+      metrics.py
     breeze/
+      auth.py
       rest_client.py
       websocket_client.py
-      auth.py
-    persistence/
-    cache/
-    observability/
-  interfaces/
-    streamlit/
-    api/
+  lib/
+    ... compatibility shims only
 ```
 
-### Architectural Responsibilities
+## Design Principles
 
-1. `api/`
-   - HTTP transport only
-   - routing, validation, middleware, dependency wiring
-   - no direct business logic
-2. `core/`
-   - app settings
-   - logging
-   - startup/shutdown lifecycle
-   - environment and process-level concerns
-3. `domain/`
-   - domain models
-   - domain rules
-   - typed errors and value objects
-4. `application/`
-   - orchestration and use cases
-   - combines domain logic with infrastructure adapters
-   - no framework-specific code
-5. `infrastructure/`
-   - Breeze SDK integration
-   - REST and websocket clients
-   - persistence and monitoring adapters
-6. `interfaces/`
-   - Streamlit UI
-   - external service adapters
-   - integration-facing presentation logic
+1. API modules are thin transport adapters.
+2. Business and operational logic lives in services.
+3. Shared configuration, logging, lifecycle, errors, and metrics live in explicit foundational packages.
+4. External systems are isolated behind infrastructure modules.
+5. Existing import paths remain valid during migration through compatibility shims.
 
-## Legacy Migration Strategy
+## Phase Plan
 
-The legacy root-level modules should not be moved blindly. They should be grouped by bounded context first.
+### Phase 1
 
-### Proposed Bounded Contexts
+Ship a safe architectural baseline for the production package.
 
-1. `market_data`
-   - `historical.py`
-   - `live_feed.py`
-   - charts and technical indicator helpers
-2. `orders_execution`
-   - `basket_orders.py`
-   - `gtt_manager.py`
-   - order lifecycle logic
-3. `risk_and_portfolio`
-   - `risk_monitor.py`
-   - `paper_trading.py`
-   - analytics and portfolio summaries
-4. `session_and_auth`
-   - `session_manager.py`
-   - auth/session health and multi-account support
-5. `option_chain`
-   - option chain controller, services, metrics, view-models, charts, workspace
-6. `ui_shell`
-   - `app.py`
-   - Streamlit page composition and theme wiring
+- Introduce `core`, `domain`, `services`, `observability`, `api/routes`, and `clients/breeze`
+- Introduce explicit `application`, `core`, `domain`, `infrastructure`, and `api/routes` boundaries
+- Add an application factory in `app/api/main.py`
+- Move system health/version/readiness logic into `app/application/system.py`
+- Centralize metrics in `app/infrastructure/observability/metrics.py`
+- Migrate Breeze auth/rest/ws implementations into `app/infrastructure/breeze/*`
+- Convert `app/lib/*` into compatibility re-export shims
+- Expand CI and mypy scope from `app/lib/` to the full `app/` package
 
-## Migration Principles
+### Phase 2
 
-1. Move behavior behind stable interfaces before moving files.
-2. Prefer compatibility shims over mass import rewrites.
-3. Keep vertical slices testable at each phase.
-4. Migrate modules by bounded context, not alphabetically.
-5. Update CI scope as new package boundaries become authoritative.
+Unify the legacy Streamlit root modules behind the same layered package.
 
-## Proposed Phases
+- Move root-level domain logic into `app/`
+- Introduce module boundaries for trading, analytics, persistence, and UI state
+- Replace direct cross-module imports with explicit service interfaces
+- Add package-level lint and type enforcement for migrated modules
 
-### Phase 1: Foundation
+### Phase 3
 
-Objective: professionalize the current `app/` package without breaking public imports.
+Operational hardening.
 
-Changes:
+- Settings validation with startup checks
+- Dependency injection for Breeze clients and persistence adapters
+- Structured request correlation and API middleware
+- Repo-wide observability and deployment configuration cleanup
 
-1. Replace `app/lib/` as the primary architecture boundary.
-2. Introduce:
-   - `app/core/`
-   - `app/domain/`
-   - `app/infrastructure/`
-   - `app/api/routes/`
-3. Convert `app/api/main.py` to an application factory.
-4. Move health/readiness/version logic into a service module.
-5. Centralize metrics and logging.
-6. Keep `app/lib/*` as compatibility shims during migration.
+## Immediate Deliverables
 
-Acceptance criteria:
+This change set implements all of Phase 1.
 
-1. Existing tests still pass.
-2. `/healthz`, `/ready`, `/version`, and `/metrics` remain stable.
-3. CI targets the entire production package rather than only `app/lib/`.
+## Acceptance Criteria
 
-### Phase 2: Option Chain Vertical Slice
-
-Objective: migrate the strongest root-level bounded context first.
-
-Why this first:
-
-1. The option-chain code already behaves like a subsystem.
-2. It has dedicated tests.
-3. It spans controller, metrics, service, view-model, and UI concepts that benefit from explicit layering.
-
-Changes:
-
-1. Create `app/application/option_chain/`
-2. Move domain calculations into `app/domain/option_chain/`
-3. Move adapters and persistence into `app/infrastructure/option_chain/`
-4. Leave import shims at root for one release cycle
-
-Acceptance criteria:
-
-1. Option-chain tests pass from new package paths.
-2. Streamlit option-chain behavior is unchanged.
-3. Root-level compatibility imports remain operational.
-
-### Phase 3: Session/Auth and Execution Services
-
-Objective: isolate critical runtime workflows.
-
-Changes:
-
-1. Create:
-   - `app/application/session/`
-   - `app/application/orders/`
-   - `app/infrastructure/auth/`
-   - `app/infrastructure/execution/`
-2. Move session lifecycle and multi-account coordination into application services.
-3. Move Breeze order transport to explicit infrastructure adapters.
-
-Acceptance criteria:
-
-1. Session and order lifecycle tests pass.
-2. Core auth and order orchestration are no longer rooted in top-level files.
-
-### Phase 4: UI Shell Professionalization
-
-Objective: make the Streamlit app a thin interface layer.
-
-Changes:
-
-1. Convert `app.py` into a composition root only.
-2. Move feature page composition under `app/interfaces/streamlit/`
-3. Move UI state and page orchestration out of feature logic modules.
-4. Standardize navigation, layout, and shared widgets.
-
-Acceptance criteria:
-
-1. Streamlit entrypoint is small and declarative.
-2. Feature logic is imported from application/domain layers rather than root utilities.
-
-### Phase 5: Repository Cleanup
-
-Objective: finalize the migration.
-
-Changes:
-
-1. Remove compatibility shims once internal imports are migrated.
-2. Remove obsolete root-level modules.
-3. Tighten Ruff, mypy, and coverage scopes.
-4. Align Docker, deployment, and docs with final package layout.
-
-Acceptance criteria:
-
-1. No production code depends on legacy root compatibility modules.
-2. CI and documentation reflect the final architecture.
-
-## Testing and Quality Strategy
-
-1. Add contract tests around compatibility shims during transition.
-2. Expand CI from narrow package checks to full-package checks incrementally.
-3. Require each migration phase to ship with:
-   - focused unit tests
-   - import compatibility validation
-   - smoke validation of FastAPI and Streamlit entrypoints where applicable
-
-## Risks
-
-1. Large import churn can break the legacy UI unexpectedly.
-2. The repo has many root-level modules with implicit shared state.
-3. Test coverage exists but is uneven across subsystems.
-4. A single massive move would make regression triage difficult.
-
-## Risk Mitigations
-
-1. Migrate by bounded context.
-2. Keep compatibility shims until each subsystem is proven stable.
-3. Avoid simultaneous architectural and behavioral rewrites in the same phase.
-4. Land each phase on `main` only after targeted tests pass.
-
-## Recommended Immediate Scope
-
-The first implementation PR should only cover Phase 1:
-
-1. professionalize the `app/` package
-2. add an app factory
-3. move system endpoint logic into services
-4. isolate configuration, logging, metrics, and Breeze client concerns into explicit packages
-5. preserve `app.lib.*` imports via shims
-
-This is the highest-leverage, lowest-risk starting point.
-
-## Final Acceptance Criteria for the Full Program
-
-1. The repository has explicit package boundaries and a documented migration path.
-2. The production API package is layered and framework-thin.
-3. The legacy UI becomes an interface layer rather than a business-logic container.
-4. CI, typing, linting, and coverage match the final architecture.
-5. The migration reaches `main` incrementally without destabilizing live functionality.
+1. Existing `app.lib.*` imports continue to work.
+2. FastAPI app still exposes `/healthz`, `/ready`, `/version`, and `/metrics`.
+3. Production-package tests pass after the refactor.
+4. CI checks the full `app/` package instead of only `app/lib/`.
+5. The repository contains a clear architectural migration document on `main`.

@@ -29,7 +29,7 @@ jobs:
       - name: Security scan (bandit)
         run: bandit -q -r . -x tests/,./data/
       - name: Type check (mypy)
-        run: mypy app/lib/ --ignore-missing-imports
+        run: mypy app/ --ignore-missing-imports
 
   test:
     runs-on: ubuntu-latest
@@ -47,7 +47,7 @@ jobs:
       - name: Install deps
         run: pip install -r requirements.txt
       - name: Unit tests + coverage
-        run: pytest tests/unit/ --cov=app/lib --cov-report=xml --cov-fail-under=80
+        run: pytest tests/unit/ --cov=app --cov-report=xml --cov-fail-under=80
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
 

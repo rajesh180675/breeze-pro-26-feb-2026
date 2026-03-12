@@ -1,4 +1,4 @@
-"""System health and metadata routes."""
+"""System routes for health, readiness, version, and metrics."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from fastapi.responses import PlainTextResponse
 from app.application.system import readiness_status, version_payload
 from app.infrastructure.observability.metrics import CONTENT_TYPE_LATEST, render_metrics
 
-router = APIRouter()
+router = APIRouter(tags=["system"])
 
 
 @router.get("/healthz")

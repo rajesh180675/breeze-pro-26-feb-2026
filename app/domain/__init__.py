@@ -1,1 +1,1 @@
-"""Domain package."""
+"""Domain models and errors."""

@@ -3,11 +3,12 @@
 Production-ready Breeze integration components for ICICI Direct + Breeze Connect.
 
 ## Features
-- Typed configuration via environment variables (`app/lib/config.py`).
-- Central REST wrapper with retries, quota enforcement (100/min, 5000/day), circuit breaker, token handling, and typed errors (`app/lib/breeze_client.py`).
-- Session token lifecycle helpers and pluggable token stores (`app/lib/auth.py`).
-- WebSocket feed client with reconnect and subscription cap management (`app/lib/breeze_ws.py`).
-- FastAPI service with `/healthz`, `/ready`, and `/metrics` endpoints (`app/api/main.py`).
+- Typed configuration via environment variables (`app/core/settings.py`).
+- Central REST wrapper with retries, quota enforcement (100/min, 5000/day), circuit breaker, token handling, and typed errors (`app/infrastructure/breeze/rest_client.py`).
+- Session token lifecycle helpers and pluggable token stores (`app/infrastructure/breeze/auth.py`).
+- WebSocket feed client with reconnect and subscription cap management (`app/infrastructure/breeze/websocket_client.py`).
+- FastAPI service with an application factory and system routes in `app/api/main.py` and `app/api/routes/system.py`.
+- Service-layer runtime checks in `app/application/system.py` and centralized metrics in `app/infrastructure/observability/metrics.py`.
 - CI workflow with linting, tests, security scan, and Docker build (`.github/workflows/ci.yml`).
 
 ## Environment variables
@@ -30,7 +31,7 @@ uvicorn app.api.main:app --reload --host 0.0.0.0 --port 8000
 
 ## Tests
 ```bash
-pytest tests/unit --cov=app/lib --cov-report=term-missing
+pytest tests/unit --cov=app --cov-report=term-missing
 pytest tests/integration -m integration
 ```
 Integration tests auto-skip when Breeze credentials are missing.
@@ -51,6 +52,31 @@ docker run --rm -p 8000:8000 --env-file .env breeze-service:local
 - **AuthenticationError**: rotate and re-issue session token; restart deployment to refresh env-based token.
 - **CircuitOpenError**: upstream is unhealthy; wait for breaker cooldown, monitor 5xx errors.
 - **Websocket disconnect loops**: verify network egress, subscription count, and feed token validity.
+
+## Package architecture
+```text
+app/
+  api/
+    main.py
+    routes/system.py
+  application/
+    system.py
+  core/
+    lifecycle.py
+    logging.py
+    settings.py
+  domain/
+    errors.py
+  infrastructure/
+    breeze/
+      auth.py
+      rest_client.py
+      websocket_client.py
+    observability/
+      metrics.py
+  lib/
+    compatibility shims for legacy imports
+```
 
 ## Security checklist
 - Never commit secrets (`.env`, `.streamlit/secrets.toml`, `*.pem`, `*.key` are ignored).
