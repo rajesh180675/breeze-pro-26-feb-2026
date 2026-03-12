@@ -42,6 +42,16 @@ def test_filter_and_ladder_build_are_stable():
     assert ladder.iloc[0]["strike"] == 22000
 
 
+def test_enrich_option_chain_handles_sparse_index_frames():
+    df = _fixture("option_chain_balanced.json").iloc[[0, 2, 3, 5]].copy()
+
+    enriched = enrich_option_chain(df, "SENSEX", "2026-03-26", 75200, include_greeks=False)
+
+    assert enriched.index.tolist() == [0, 2, 3, 5]
+    assert "volume_spike" in enriched.columns
+    assert enriched["volume_spike"].dtype == bool
+
+
 def test_merge_live_overlay_updates_quote_fields(monkeypatch):
     df = _fixture("option_chain_balanced.json").iloc[:2].copy()
     cfg = SimpleNamespace(exchange="NFO", api_code="NIFTY")

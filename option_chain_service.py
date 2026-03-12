@@ -160,7 +160,8 @@ def enrich_option_chain(
     out["iv_percentile"] = iv_percentiles
     out["iv_zscore"] = iv_zscores
     out["avg_volume"] = avg_volumes
-    out["volume_spike"] = np.where(_numeric_column("volume") > (pd.Series(avg_volumes).replace(0, np.nan) * 3), True, False)
+    avg_volume_series = pd.Series(avg_volumes, index=out.index, dtype=float).replace(0, np.nan)
+    out["volume_spike"] = np.where(_numeric_column("volume") > (avg_volume_series * 3), True, False)
     out["liquidity_score"] = liquidity_scores
     out["vanna"] = vannas
     out["charm"] = charms
