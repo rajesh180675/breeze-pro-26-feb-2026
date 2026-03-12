@@ -6,6 +6,8 @@ import json
 import logging
 from datetime import datetime, timezone
 
+from app.core.request_context import get_correlation_id, get_request_id
+
 
 class JsonFormatter(logging.Formatter):
     """Simple JSON formatter for operational logs."""
@@ -16,8 +18,8 @@ class JsonFormatter(logging.Formatter):
             "level": record.levelname,
             "service": getattr(record, "service", "breeze-service"),
             "operation": getattr(record, "operation", None),
-            "correlation_id": getattr(record, "correlation_id", None),
-            "request_id": getattr(record, "request_id", None),
+            "correlation_id": getattr(record, "correlation_id", None) or get_correlation_id(),
+            "request_id": getattr(record, "request_id", None) or get_request_id(),
             "duration_ms": getattr(record, "duration_ms", None),
             "http_status": getattr(record, "http_status", None),
             "message": record.getMessage(),

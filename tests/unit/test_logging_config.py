@@ -1,6 +1,7 @@
 import json
 import logging
 
+from app.core.request_context import clear_correlation_id, clear_request_id, set_correlation_id, set_request_id
 from app.lib.logging_config import JsonFormatter, configure_logging
 
 
@@ -55,3 +56,18 @@ def test_configure_logging_sets_root_handler_and_level():
         root.handlers.clear()
         root.handlers.extend(old_handlers)
         root.setLevel(old_level)
+
+
+def test_json_formatter_reads_request_context_defaults():
+    formatter = JsonFormatter()
+    set_request_id("req-context")
+    set_correlation_id("corr-context")
+    try:
+        record = logging.makeLogRecord({"levelname": "INFO", "msg": "context log"})
+        payload = json.loads(formatter.format(record))
+    finally:
+        clear_request_id()
+        clear_correlation_id()
+
+    assert payload["request_id"] == "req-context"
+    assert payload["correlation_id"] == "corr-context"

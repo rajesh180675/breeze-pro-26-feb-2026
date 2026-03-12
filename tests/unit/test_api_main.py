@@ -27,6 +27,8 @@ def test_create_app_exposes_system_routes():
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+    assert response.headers["x-request-id"]
+    assert response.headers["x-correlation-id"] == response.headers["x-request-id"]
 
 
 def test_module_level_app_uses_factory():
@@ -35,6 +37,21 @@ def test_module_level_app_uses_factory():
     response = client.get("/healthz")
 
     assert response.status_code == 200
+    assert response.headers["x-request-id"]
+
+
+def test_request_context_middleware_preserves_incoming_ids():
+    get_settings.cache_clear()
+    client = TestClient(create_app())
+
+    response = client.get(
+        "/healthz",
+        headers={"X-Request-ID": "req-123", "X-Correlation-ID": "corr-456"},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["x-request-id"] == "req-123"
+    assert response.headers["x-correlation-id"] == "corr-456"
 
 
 def test_version_happy_path(monkeypatch):
