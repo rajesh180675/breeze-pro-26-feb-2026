@@ -1,10 +1,11 @@
 import sqlite3
 
+import pytest
 from fastapi.testclient import TestClient
 from fastapi import HTTPException
 
 from app.api.main import _readiness_status, app, create_app, healthz, ready, version
-from app.lib.config import get_settings
+from app.lib.config import SettingsValidationError, get_settings, validate_settings
 
 
 def _set_required_env(monkeypatch):
@@ -18,6 +19,7 @@ def test_healthz_ok():
 
 
 def test_create_app_exposes_system_routes():
+    get_settings.cache_clear()
     created = create_app()
     client = TestClient(created)
 
@@ -50,6 +52,35 @@ def test_version_happy_path(monkeypatch):
         "commit": "abc123",
         "env": "test",
     }
+
+
+def test_validate_settings_accepts_defaults():
+    get_settings.cache_clear()
+    assert validate_settings().service_name == "breeze-service"
+
+
+def test_create_app_rejects_invalid_timeout(monkeypatch):
+    monkeypatch.setenv("REQUEST_TIMEOUT_SECONDS", "0")
+    get_settings.cache_clear()
+
+    with pytest.raises(SettingsValidationError, match="request_timeout_seconds must be greater than 0"):
+        create_app()
+
+
+def test_create_app_rejects_invalid_base_url(monkeypatch):
+    monkeypatch.setenv("BREEZE_BASE_URL", "ftp://example.com")
+    get_settings.cache_clear()
+
+    with pytest.raises(SettingsValidationError, match="breeze_base_url must be a valid http or https URL"):
+        create_app()
+
+
+def test_get_settings_rejects_non_numeric_env(monkeypatch):
+    monkeypatch.setenv("MAX_REQUESTS_PER_MINUTE", "not-a-number")
+    get_settings.cache_clear()
+
+    with pytest.raises(SettingsValidationError, match="MAX_REQUESTS_PER_MINUTE must be an integer"):
+        get_settings()
 
 
 def test_ready_returns_503_when_required_env_missing(monkeypatch):

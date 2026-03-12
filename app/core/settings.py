@@ -5,16 +5,35 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from functools import lru_cache
+from urllib.parse import urlparse
+
+
+class SettingsValidationError(ValueError):
+    """Raised when runtime configuration is malformed."""
+
+    def __init__(self, errors: list[str]) -> None:
+        self.errors = errors
+        super().__init__("Invalid settings: " + "; ".join(errors))
 
 
 def _env_int(name: str, default: int) -> int:
     val = os.getenv(name)
-    return int(val) if val else default
+    if not val:
+        return default
+    try:
+        return int(val)
+    except ValueError as exc:
+        raise SettingsValidationError([f"{name} must be an integer"]) from exc
 
 
 def _env_float(name: str, default: float) -> float:
     val = os.getenv(name)
-    return float(val) if val else default
+    if not val:
+        return default
+    try:
+        return float(val)
+    except ValueError as exc:
+        raise SettingsValidationError([f"{name} must be a float"]) from exc
 
 
 @dataclass(frozen=True)
@@ -39,6 +58,41 @@ class Settings:
     app_version: str = "0.1.0"
     app_build: str | None = None
     app_commit: str | None = None
+
+
+def validate_settings(settings: Settings | None = None) -> Settings:
+    """Validate runtime configuration invariants required at startup."""
+
+    current = settings or get_settings()
+    errors: list[str] = []
+
+    positive_int_fields = {
+        "request_timeout_seconds": current.request_timeout_seconds,
+        "max_requests_per_minute": current.max_requests_per_minute,
+        "max_requests_per_day": current.max_requests_per_day,
+        "circuit_failures_threshold": current.circuit_failures_threshold,
+        "circuit_window_seconds": current.circuit_window_seconds,
+        "circuit_open_seconds": current.circuit_open_seconds,
+        "websocket_max_subscriptions": current.websocket_max_subscriptions,
+    }
+    for field_name, value in positive_int_fields.items():
+        if value <= 0:
+            errors.append(f"{field_name} must be greater than 0")
+
+    if current.retry_total < 0:
+        errors.append("retry_total must be 0 or greater")
+    if current.retry_backoff_factor < 0:
+        errors.append("retry_backoff_factor must be 0 or greater")
+    if not current.sqlite_db_path.strip():
+        errors.append("sqlite_db_path must not be blank")
+
+    parsed_base_url = urlparse(current.breeze_base_url)
+    if parsed_base_url.scheme not in {"http", "https"} or not parsed_base_url.netloc:
+        errors.append("breeze_base_url must be a valid http or https URL")
+
+    if errors:
+        raise SettingsValidationError(errors)
+    return current
 
 
 @lru_cache(maxsize=1)
