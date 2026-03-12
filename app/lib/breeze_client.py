@@ -333,7 +333,18 @@ class BreezeClient:
             resp.raise_for_status()
             self.circuit.record_success(endpoint)
             REQUEST_COUNTER.labels(method=method.upper(), endpoint=endpoint, result="ok").inc()
-            return resp.json() if resp.content else {}
+            if not resp.content:
+                return {}
+            try:
+                return resp.json()
+            except ValueError as exc:
+                REQUEST_COUNTER.labels(method=method.upper(), endpoint=endpoint, result="invalid_json").inc()
+                raise TransientBreezeError(
+                    "Invalid JSON response",
+                    operation=path,
+                    http_status=resp.status_code,
+                    request_id=request_id,
+                ) from exc
         except requests.RequestException as exc:
             self.circuit.record_failure(endpoint)
             REQUEST_COUNTER.labels(method=method.upper(), endpoint=endpoint, result="transport_error").inc()

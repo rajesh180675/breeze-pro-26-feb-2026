@@ -3,13 +3,25 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from json import JSONDecodeError
 from pathlib import Path
 from typing import Callable, Protocol
 
 from app.lib.errors import AuthenticationError
+
+LOGGER = logging.getLogger(__name__)
+
+
+def _coerce_utc(value: datetime) -> datetime:
+    """Normalize legacy naive timestamps to UTC-aware datetimes."""
+
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 @dataclass
@@ -62,15 +74,23 @@ class FileTokenStore:
     def load(self) -> TokenRecord | None:
         if not self.path.exists():
             return None
-        raw = json.loads(self.path.read_text(encoding="utf-8"))
-        expires_at = datetime.fromisoformat(raw["expires_at"])
-        issued_at_raw = raw.get("issued_at")
-        issued_at = datetime.fromisoformat(issued_at_raw) if issued_at_raw else (expires_at - timedelta(hours=24))
-        return TokenRecord(
-            access_token=raw["access_token"],
-            issued_at=issued_at,
-            expires_at=expires_at,
-        )
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+            expires_at = _coerce_utc(datetime.fromisoformat(raw["expires_at"]))
+            issued_at_raw = raw.get("issued_at")
+            issued_at = (
+                _coerce_utc(datetime.fromisoformat(issued_at_raw))
+                if issued_at_raw
+                else (expires_at - timedelta(hours=24))
+            )
+            return TokenRecord(
+                access_token=raw["access_token"],
+                issued_at=issued_at,
+                expires_at=expires_at,
+            )
+        except (JSONDecodeError, KeyError, OSError, TypeError, ValueError) as exc:
+            LOGGER.warning("token_cache_invalid", extra={"path": str(self.path), "error": str(exc)})
+            return None
 
     def save(self, token: TokenRecord) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -84,6 +104,7 @@ class FileTokenStore:
             ),
             encoding="utf-8",
         )
+        self.path.chmod(0o600)
 
 
 class AuthManager:

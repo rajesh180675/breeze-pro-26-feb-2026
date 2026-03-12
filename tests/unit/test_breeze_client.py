@@ -225,6 +225,17 @@ def test_request_with_empty_response_body(client):
     assert result == {}
 
 
+def test_request_with_invalid_json_body_maps_transient(client):
+    resp = _response(200)
+    resp.content = b"not-json"
+    resp.json.side_effect = ValueError("invalid json")
+    client.session.request = Mock(return_value=resp)
+    with pytest.raises(TransientBreezeError) as exc:
+        client.request("GET", "/positions")
+    assert exc.value.http_status == 200
+    assert exc.value.operation == "/positions"
+
+
 def test_authenticate_persists_token(client, monkeypatch):
     """authenticate() should call auth_manager with session token from settings."""
     client.auth_manager.authenticate = Mock()

@@ -1,5 +1,6 @@
 """Tests for app/lib/auth.py - full coverage of token stores, records, AuthManager."""
 import json
+import stat
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -100,6 +101,32 @@ def test_file_token_store_handles_missing_issued_at():
         assert loaded.access_token == "legacy"
 
 
+def test_file_token_store_ignores_invalid_json():
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "tok.json"
+        p.write_text("{not-json", encoding="utf-8")
+        assert FileTokenStore(str(p)).load() is None
+
+
+def test_file_token_store_normalizes_naive_timestamps():
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "tok.json"
+        p.write_text(
+            json.dumps(
+                {
+                    "access_token": "legacy",
+                    "issued_at": "2026-03-12T10:00:00",
+                    "expires_at": "2026-03-13T10:00:00",
+                }
+            ),
+            encoding="utf-8",
+        )
+        loaded = FileTokenStore(str(p)).load()
+        assert loaded is not None
+        assert loaded.issued_at.tzinfo == timezone.utc
+        assert loaded.expires_at.tzinfo == timezone.utc
+
+
 def test_file_token_store_creates_parent_dirs():
     with tempfile.TemporaryDirectory() as d:
         nested = str(Path(d) / "a" / "b" / "tok.json")
@@ -107,6 +134,7 @@ def test_file_token_store_creates_parent_dirs():
         now = datetime.now(tz=timezone.utc)
         store.save(TokenRecord(access_token="n", issued_at=now, expires_at=now + timedelta(hours=1)))
         assert Path(nested).exists()
+        assert stat.S_IMODE(Path(nested).stat().st_mode) == 0o600
 
 
 def test_auth_manager_raises_on_empty_token():

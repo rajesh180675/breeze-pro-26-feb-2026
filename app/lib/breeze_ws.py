@@ -48,14 +48,15 @@ class BreezeWebsocketClient:
 
     def subscribe(self, instruments: list[str], callback: Callable[[dict], None]) -> None:
         """Subscribe to feed symbols with cap validation and callback dispatch."""
-        if len(self._subscriptions) + len(instruments) > self.max_subscriptions:
+        new_symbols = [symbol for symbol in instruments if symbol not in self._subscriptions]
+        if len(self._subscriptions) + len(new_symbols) > self.max_subscriptions:
             raise RateLimitError(
                 "Subscription cap exceeded",
                 operation="subscribe",
                 http_status=429,
             )
         self._callback = callback
-        for symbol in instruments:
+        for symbol in new_symbols:
             self.sdk_client.subscribe_feeds(stock_token=symbol)
             self._subscriptions.add(symbol)
 

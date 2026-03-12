@@ -34,6 +34,17 @@ def test_subscribe_enforces_cap_and_records_tokens():
     assert client.subscribe_feeds.call_count == 2
 
 
+def test_subscribe_ignores_duplicate_tokens_for_cap_and_sdk_calls():
+    client = Mock()
+    ws = BreezeWebsocketClient(client, max_subscriptions=2)
+
+    ws.subscribe(["NSE:ABC"], lambda _message: None)
+    ws.subscribe(["NSE:ABC", "NSE:XYZ"], lambda _message: None)
+
+    assert ws._subscriptions == {"NSE:ABC", "NSE:XYZ"}
+    assert client.subscribe_feeds.call_count == 2
+
+
 def test_handle_message_forwards_to_callback():
     client = Mock()
     ws = BreezeWebsocketClient(client, max_subscriptions=2)
