@@ -488,7 +488,11 @@ def render_layout_controls() -> None:
     action_widths = [1, 1, 1] if SessionState.is_authenticated() else [1, 1]
     app_col, info_col = st.columns([5, 3])
     with app_col:
-        note = "Navigation rail is compact. Expand it for full context." if nav_mode == "compact" else "Navigation rail is expanded and always visible."
+        note = (
+            "The left module rail is collapsed. Expand it to browse the full workspace."
+            if nav_mode == "compact"
+            else "The left module rail stays available for switching between workspace modules."
+        )
         st.caption(note)
     with info_col:
         action_cols = st.columns(action_widths)
@@ -512,7 +516,7 @@ def render_layout_controls() -> None:
                     st.rerun()
             action_index += 1
         with action_cols[action_index]:
-            button_label = "Expand Menu" if nav_mode == "compact" else "Compact Menu"
+            button_label = "Expand Sidebar" if nav_mode == "compact" else "Collapse Sidebar"
             if st.button(button_label, key="toggle_sidebar_visibility", width="stretch"):
                 next_mode = "expanded" if nav_mode == "compact" else "compact"
                 SessionState.set_nav_mode(next_mode)
@@ -1882,9 +1886,11 @@ def page_dashboard():
             st.metric("Equity P&L", format_currency(total_eq))
             st.dataframe(pd.DataFrame(eq_rows), hide_index=True, width="stretch")
 
-    # ── Workspace Launcher ────────────────────────────────────
+    # ── Workspace Shell Guidance ──────────────────────────────
     st.markdown("---")
-    render_workspace_module_directory("dashboard_module")
+    info_box(
+        "Use the left sidebar to switch between Option Chain, Paper Trading, Square Off, Analytics, and the rest of the workspace modules."
+    )
 
     # ── Session Stats ─────────────────────────────────────────
     summary = _db.get_trade_summary()
