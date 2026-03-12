@@ -61,12 +61,14 @@ app/
     routes/system.py
   application/
     system.py
+    option_chain/
   core/
     lifecycle.py
     logging.py
     settings.py
   domain/
     errors.py
+    option_chain/
   infrastructure/
     breeze/
       auth.py
@@ -74,9 +76,15 @@ app/
       websocket_client.py
     observability/
       metrics.py
+    option_chain/
   lib/
     compatibility shims for legacy imports
 ```
+
+## Migration status
+- `app/lib/*` remains as the supported compatibility surface for the older production import paths.
+- Root-level `option_chain_*.py` modules now delegate to the layered `app/` implementation so `main` stays backward-compatible during the migration.
+- Transitional directories from early revamp drafts are intentionally not part of the target architecture.
 
 ## Security checklist
 - Never commit secrets (`.env`, `.streamlit/secrets.toml`, `*.pem`, `*.key` are ignored).

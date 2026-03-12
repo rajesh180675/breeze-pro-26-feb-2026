@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from app.core.settings import Settings as CoreSettings
 from app.domain.errors import AuthenticationError as DomainAuthenticationError
 from app.infrastructure.breeze.auth import AuthManager as InfraAuthManager
@@ -28,3 +30,11 @@ def test_rest_client_shim_preserves_client_type():
 
 def test_websocket_shim_preserves_client_type():
     assert BreezeWebsocketClient is InfraBreezeWebsocketClient
+
+
+def test_standardized_package_layout_has_no_empty_transitional_dirs():
+    repo_root = Path(__file__).resolve().parents[2]
+
+    assert not (repo_root / "app" / "clients").exists()
+    assert not (repo_root / "app" / "services").exists()
+    assert not (repo_root / "app" / "observability").exists()

@@ -8,12 +8,12 @@ Modernize the application into a professional, layered Python service architectu
 - a large legacy root-level Streamlit codebase
 - flat infrastructure code grouped under `app/lib/`
 
-This revamp establishes clear package boundaries, an application factory, service-layer orchestration, and compatibility shims so the migration can land safely on `main`.
+This revamp establishes clear package boundaries, an application factory, application-layer orchestration, and compatibility shims so the migration can land safely on `main`.
 
 ## Current Problems
 
 1. `app/lib/` is a generic bucket rather than an architectural boundary.
-2. API endpoints own operational logic instead of delegating to services.
+2. API endpoints own operational logic instead of delegating to application services.
 3. Metrics, logging, configuration, auth, and transport concerns are tightly mixed.
 4. CI and type-checking target only a narrow subset of the actual package structure.
 5. The repository has no explicit migration plan between the legacy root modules and the new production package.
@@ -28,12 +28,14 @@ app/
       system.py
   application/
     system.py
+    option_chain/
   core/
     lifecycle.py
     logging.py
     settings.py
   domain/
     errors.py
+    option_chain/
   infrastructure/
     observability/
       metrics.py
@@ -41,6 +43,7 @@ app/
       auth.py
       rest_client.py
       websocket_client.py
+    option_chain/
   lib/
     ... compatibility shims only
 ```
@@ -48,7 +51,7 @@ app/
 ## Design Principles
 
 1. API modules are thin transport adapters.
-2. Business and operational logic lives in services.
+2. Business and operational logic lives in application services.
 3. Shared configuration, logging, lifecycle, errors, and metrics live in explicit foundational packages.
 4. External systems are isolated behind infrastructure modules.
 5. Existing import paths remain valid during migration through compatibility shims.
@@ -59,7 +62,6 @@ app/
 
 Ship a safe architectural baseline for the production package.
 
-- Introduce `core`, `domain`, `services`, `observability`, `api/routes`, and `clients/breeze`
 - Introduce explicit `application`, `core`, `domain`, `infrastructure`, and `api/routes` boundaries
 - Add an application factory in `app/api/main.py`
 - Move system health/version/readiness logic into `app/application/system.py`
@@ -67,6 +69,7 @@ Ship a safe architectural baseline for the production package.
 - Migrate Breeze auth/rest/ws implementations into `app/infrastructure/breeze/*`
 - Convert `app/lib/*` into compatibility re-export shims
 - Expand CI and mypy scope from `app/lib/` to the full `app/` package
+- Remove abandoned transitional package directories once compatibility shims cover legacy imports
 
 ### Phase 2
 
@@ -76,6 +79,7 @@ Unify the legacy Streamlit root modules behind the same layered package.
 - Introduce module boundaries for trading, analytics, persistence, and UI state
 - Replace direct cross-module imports with explicit service interfaces
 - Add package-level lint and type enforcement for migrated modules
+- Migrate the option-chain subsystem as the first vertical slice under `app/application/option_chain`, `app/domain/option_chain`, and `app/infrastructure/option_chain`
 
 ### Phase 3
 
@@ -88,7 +92,7 @@ Operational hardening.
 
 ## Immediate Deliverables
 
-This change set implements all of Phase 1.
+The repository now contains completed Phase 1 work plus the Phase 2 option-chain vertical slice.
 
 ## Acceptance Criteria
 
@@ -97,3 +101,4 @@ This change set implements all of Phase 1.
 3. Production-package tests pass after the refactor.
 4. CI checks the full `app/` package instead of only `app/lib/`.
 5. The repository contains a clear architectural migration document on `main`.
+6. Empty transitional directories such as `app/services`, `app/clients`, and `app/observability` do not remain in the standardized package layout.
